@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
-import { mkdtemp, readFile, writeFile, readdir, truncate } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, readdir, rm, truncate } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -335,4 +336,204 @@ test('saveNotebookFile caps the on-disk file before reading it', async () => {
       error.status === 413 &&
       error.details.size === NOTEBOOK_CAP_BYTES + 1,
   )
+})
+
+function mixedMimeBundle() {
+  return {
+    'text/plain': { invalid: 'text must be a string or string array' },
+    'text/html': ['valid line', 7],
+    'image/png': 17,
+    'image/jpeg': null,
+    'application/octet-stream': false,
+    'application/JSON': { invalid: true },
+    'text/json': { invalid: true },
+    'application/json; charset=utf-8': { invalid: true },
+    'application/vnd.example+jsonish': { invalid: true },
+    'text/markdown': ['# Heading\n', '正文😀'],
+    'text/latex': 'x^2',
+    'text/x-empty': '',
+    'unknown-format': 'unknown MIME names still allow text',
+    'image/svg+xml': [],
+    'application/json': { nested: [null, true, 4, '文字', { x: [] }] },
+    'application/vnd.example.v1+json': [1, false, null, { x: 'y' }],
+  }
+}
+
+function expectedMimeBundle() {
+  return {
+    'text/markdown': ['# Heading\n', '正文😀'],
+    'text/latex': 'x^2',
+    'text/x-empty': '',
+    'unknown-format': 'unknown MIME names still allow text',
+    'image/svg+xml': [],
+    'application/json': { nested: [null, true, 4, '文字', { x: [] }] },
+    'application/vnd.example.v1+json': [1, false, null, { x: 'y' }],
+  }
+}
+
+function malformedMimeNotebook() {
+  const notebook = emptyNotebook()
+  const code = notebook.cells[0]
+  code.execution_count = -1
+  code.outputs = [
+    { output_type: 'display_data', data: mixedMimeBundle(), metadata: {} },
+    { output_type: 'execute_result', data: mixedMimeBundle(), metadata: {}, execution_count: -3 },
+  ]
+  for (const cell_type of ['markdown', 'raw']) {
+    notebook.cells.push({
+      cell_type, id: `${cell_type}-mime`, metadata: {}, source: 'attachment fixture',
+      attachments: {
+        'mixed.bin': mixedMimeBundle(),
+        'empty.bin': {},
+        'cleaned.bin': { 'text/plain': { invalid: true } },
+        'bad-null.bin': null,
+        'bad-string.bin': 'not a MIME bundle',
+        'bad-array.bin': [],
+        'bad-number.bin': 1,
+        ...JSON.parse('{"__proto__":{"text/plain":"ordinary attachment name"}}'),
+      },
+    })
+  }
+  return notebook
+}
+
+function assertMimeRepairs(notebook) {
+  const code = notebook.cells[0]
+  assert.equal(code.execution_count, null)
+  assert.equal(code.outputs[1].execution_count, null)
+  for (const output of code.outputs) assert.deepEqual(output.data, expectedMimeBundle())
+  for (const cell of notebook.cells.slice(1)) {
+    assert.deepEqual(Object.keys(cell.attachments).sort(), ['__proto__', 'cleaned.bin', 'empty.bin', 'mixed.bin'])
+    assert.deepEqual(cell.attachments['mixed.bin'], expectedMimeBundle())
+    assert.deepEqual(cell.attachments['empty.bin'], {})
+    assert.deepEqual(cell.attachments['cleaned.bin'], {})
+    assert.ok(Object.hasOwn(cell.attachments, '__proto__'))
+    assert.deepEqual(cell.attachments.__proto__, { 'text/plain': 'ordinary attachment name' })
+  }
+}
+
+test('both display output types drop invalid MIME values without changing legitimate data or the input', () => {
+  const notebook = malformedMimeNotebook()
+  const original = JSON.stringify(notebook)
+  for (const output of normalizeNotebook(notebook).cells[0].outputs) {
+    assert.deepEqual(output.data, expectedMimeBundle())
+  }
+  assert.equal(JSON.stringify(notebook), original, 'normalizing must not edit the caller snapshot')
+  assertMimeRepairs(JSON.parse(serializeNotebook(notebook)))
+})
+
+const jsonMimeValues = [null, false, 0, 1.25, '', 'plain JSON string', [], [null, true, { x: 3 }], {}, { nested: { value: [1, '字'] } }]
+
+test('application/json and vendor +json preserve every JSON value type in outputs and attachments', () => {
+  for (const value of jsonMimeValues) {
+    const notebook = emptyNotebook()
+    const bundle = { 'application/json': value, 'application/vnd.example+json': value }
+    notebook.cells[0].outputs = [
+      { output_type: 'display_data', data: bundle, metadata: {} },
+      { output_type: 'execute_result', data: bundle, metadata: {}, execution_count: 0 },
+    ]
+    notebook.cells.push({ cell_type: 'markdown', id: 'json-attachment', metadata: {}, source: '', attachments: { 'data.json': bundle } })
+    const saved = JSON.parse(serializeNotebook(notebook))
+    for (const output of saved.cells[0].outputs) assert.deepEqual(output.data, bundle)
+    assert.deepEqual(saved.cells[1].attachments['data.json'], bundle)
+  }
+})
+
+test('non-object MIME bundles become empty output data and non-object attachment maps are omitted', () => {
+  for (const malformed of [undefined, null, 17, false, 'text', [], ['text']]) {
+    const notebook = emptyNotebook()
+    notebook.cells[0].outputs = ['display_data', 'execute_result'].map((output_type) => ({ output_type, data: malformed, metadata: {}, execution_count: 0 }))
+    notebook.cells.push(...['markdown', 'raw'].map((cell_type) => ({ cell_type, id: cell_type, metadata: {}, source: '', attachments: malformed })))
+    const normalized = normalizeNotebook(notebook)
+    for (const output of normalized.cells[0].outputs) assert.deepEqual(output.data, {})
+    for (const cell of normalized.cells.slice(1)) assert.equal(Object.hasOwn(cell, 'attachments'), false)
+  }
+})
+
+test('markdown and raw attachments keep empty or repaired bundles but drop non-bundle entries', () => {
+  const notebook = malformedMimeNotebook()
+  const original = JSON.stringify(notebook)
+  const normalized = normalizeNotebook(notebook)
+  for (const cell of normalized.cells.slice(1)) {
+    assert.deepEqual(Object.keys(cell.attachments).sort(), ['__proto__', 'cleaned.bin', 'empty.bin', 'mixed.bin'])
+    assert.deepEqual(cell.attachments['mixed.bin'], expectedMimeBundle())
+    assert.deepEqual(cell.attachments['cleaned.bin'], {})
+    assert.deepEqual(cell.attachments['empty.bin'], {})
+    assert.ok(Object.hasOwn(cell.attachments, '__proto__'))
+    assert.deepEqual(cell.attachments.__proto__, { 'text/plain': 'ordinary attachment name' })
+  }
+  assert.equal(JSON.stringify(notebook), original)
+})
+
+test('execution counts preserve nonnegative integers and normalize other values to null', () => {
+  for (const [value, expected] of [[0, 0], [1, 1], [42, 42], [null, null], [undefined, null], [-1, null], [-123, null], [1.5, null], ['2', null], [true, null]]) {
+    const notebook = emptyNotebook()
+    notebook.cells[0].execution_count = value
+    notebook.cells[0].outputs = [{ output_type: 'execute_result', data: {}, metadata: {}, execution_count: value }]
+    for (const repaired of [normalizeNotebook(notebook), JSON.parse(serializeNotebook(notebook))]) {
+      assert.equal(repaired.cells[0].execution_count, expected)
+      assert.equal(repaired.cells[0].outputs[0].execution_count, expected)
+    }
+  }
+})
+
+test('reading and saving malformed MIME content repairs it without losing valid representations', async (t) => {
+  const dir = await tempDir()
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'mixed.ipynb')
+  const malformed = malformedMimeNotebook()
+  const original = JSON.stringify(malformed)
+  await writeFile(file, original)
+  const read = await readNotebookFile(file)
+  assert.equal(read.status, 'ok')
+  assert.equal(read.version, sha256(Buffer.from(original)))
+  assertMimeRepairs(read.notebook)
+  assert.equal(await readFile(file, 'utf8'), original, 'reading repairs only the in-memory notebook')
+  const saved = await saveNotebookFile(file, read.notebook, read.version)
+  assertMimeRepairs(JSON.parse(await readFile(file, 'utf8')))
+  // Also test a caller saving malformed data directly, without a prior read
+  // having already repaired the payload.
+  await saveNotebookFile(file, malformed, saved.version)
+  assertMimeRepairs(JSON.parse(await readFile(file, 'utf8')))
+  assert.deepEqual(await readdir(dir), ['mixed.ipynb'])
+})
+
+const schemaPython = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
+const hasNbformat = spawnSync(schemaPython, ['-c', 'import nbformat'], { stdio: 'ignore', timeout: 10_000 }).status === 0
+
+test('real nbformat validation accepts repaired serialized and saved MIME fixtures', {
+  skip: !hasNbformat && 'Requires nbformat in DSH_IPYNB_TEST_PYTHON',
+}, async (t) => {
+  const dir = await tempDir()
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'schema.ipynb')
+  const malformed = malformedMimeNotebook()
+  const original = JSON.stringify(malformed)
+  await writeFile(file, original)
+  await saveNotebookFile(file, malformed, sha256(Buffer.from(original)))
+  const valid = [JSON.parse(serializeNotebook(malformed)), JSON.parse(await readFile(file, 'utf8'))]
+  for (const value of jsonMimeValues) {
+    const notebook = emptyNotebook()
+    notebook.cells[0].outputs = [{ output_type: 'display_data', data: { 'application/json': value, 'application/vnd.example+json': value }, metadata: {} }]
+    valid.push(JSON.parse(serializeNotebook(notebook)))
+  }
+  const script = [
+    'import json, sys, nbformat',
+    'from jsonschema.exceptions import ValidationError',
+    'payload = json.load(sys.stdin)',
+    'try:',
+    '    nbformat.validate(payload["invalid"], version=4, version_minor=5)',
+    'except ValidationError:',
+    '    pass',
+    'else:',
+    '    raise AssertionError("The malformed control fixture unexpectedly validated")',
+    'for notebook in payload["valid"]:',
+    '    nbformat.validate(notebook, version=4, version_minor=5)',
+    'print(len(payload["valid"]))',
+  ].join('\n')
+  const result = spawnSync(schemaPython, ['-c', script], {
+    input: JSON.stringify({ invalid: malformed, valid }), encoding: 'utf8', timeout: 10_000,
+  })
+  assert.equal(result.status, 0, `${result.error?.message || ''}\n${result.stderr}`)
+  assert.equal(Number(result.stdout.trim()), valid.length)
 })

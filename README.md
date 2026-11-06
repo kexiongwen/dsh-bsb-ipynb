@@ -9,7 +9,7 @@
 - Notebook 渲染：Markdown、代码、raw cell，执行计数，流式 stdout/stderr、`text/html`、`image/png|jpeg|svg`、`text/markdown`、JSON、ANSI 彩色 traceback。
 - 编辑：点击 cell 进入编辑（语法高亮预览 → 文本编辑），支持增删、上移/下移、切换 cell 类型、Markdown 预览。
 - 执行：每个 notebook 一个持久 Python 内核（按文件路径共享），变量跨 cell 保留；Run all、中断、重启、关闭。
-- 保存：写回 nbformat 4.5，保存前按 nbformat schema 规范化（未知/非法字段会被丢弃，例如 `display_data.execution_count`）；用 sha256 版本号做乐观并发控制，外部修改返回 409 冲突而不覆盖，磁盘文件超过 32 MiB 返回 413；编辑后 1.5 秒自动保存。
+- 保存：写回 nbformat 4.5，保存前做基础字段规范化（例如移除 `display_data.execution_count`、过滤非法 MIME 数据和附件结构、修正非法执行计数），未进行完整 schema 校验；用 sha256 版本号做乐观并发控制，外部修改返回 409 冲突而不覆盖，磁盘文件超过 32 MiB 返回 413；编辑后 1.5 秒自动保存。
 - 解释器：自动发现 `DSH_IPYNB_PYTHON`、conda 环境、PATH 上的 `python3`/`python`、DSH 内置 Python；只有带 `jupyter_client` + `ipykernel` 的环境会被选中。
 - 安全：所有文件访问都限制在会话工作区内（realpath + `path.relative` 检查）；HTTP 路由复用 DSH 的 admission fence（`ctx.connection.requestRejection`）；内核输出 HTML 经 DOMParser 白名单清洗后才渲染，不执行 `<script>`。
 
@@ -105,7 +105,7 @@ python3 -m py_compile python/bridge.py
 node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 ```
 
-`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。
+`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；notebook 的真实 schema 验证测试需要 `nbformat`，缺少时同样跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。
 
 ## 可靠性
 
@@ -115,7 +115,7 @@ node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 - notebook 删除后仍可通过原路径查询和控制已有内核；插件记录当前会话已解析路径的真实拼写，因此在大小写不敏感的文件系统上，通过不同大小写的路径或符号链接执行后也能继续控制原内核。恢复该记录前会重新检查工作区边界和路径组件身份，已删除、改写或重建的符号链接不会继承旧记录；文件重新存在时以当前真实路径为准。
 - 服务端的 NDJSON 待发队列超过 64 MiB 时，立即触发取消和内核中断，并返回 `output-too-large` 错误。
 - 执行时，客户端每个 cell 的输出按完整 JSON 的 UTF-8 字节计量，最多保留 32 MiB，包含 MIME 数据、metadata、错误信息和 traceback。新增、流合并和显示更新共用预算；超限后以提示替换输出并丢弃后续输出，直到明确清空或重新运行。`clear_output(wait=true)` 在下一条输出到达时清空并重置预算。
-- 服务端把 notebook 按 nbformat schema 规范化后再写回，未知/非法字段会被丢弃，保证落盘内容是合法的 nbformat 4.5。
+- 服务端在读取和保存时做基础字段规范化：按 cell/output 类型保留支持的字段，执行计数仅接受非负整数或 `null`；输出和附件共用 MIME 数据校验，非 JSON MIME 值仅保留字符串或字符串数组，`application/json` 和 `application/*+json` 保留合法 JSON 值。非法 MIME 项和非对象附件项会被丢弃。此流程未进行完整的 nbformat schema 校验（例如 metadata 内部约束），不保证任意输入经规范化后都能通过完整校验。
 - 保存前先 `stat` 磁盘文件：文件超过 32 MiB 时返回 `too-large`（413），不会先整体读入内存；序列化后的内容同样受 32 MiB 上限约束。
 - 单行内核输出超过 64 MiB 时，本次执行会收到失败终态并重启内核，避免桥进程内存无限增长。
 - 执行请求的发送和编号登记同步完成，早到的输出无需额外缓存；已完成或未知请求的迟到输出会被丢弃，不会积累在桥进程中，也不会混入其他单元格。
