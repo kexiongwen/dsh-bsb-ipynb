@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-bsb-ipynb",
+    "description": "在侧边栏文件树中预览并运行 .ipynb 笔记本：编辑单元格、在常驻 Python 内核中执行，并把结果保存回文件。"
+  }
+}

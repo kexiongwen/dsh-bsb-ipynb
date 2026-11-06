@@ -1,0 +1,367 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { registerIpynbRoutes } from '../lib/routes.js'
+import { readJsonBody } from '../lib/json.js'
+import { discoverInterpreters } from '../lib/env.js'
+import { emptyNotebook, serializeNotebook } from '../lib/notebook.js'
+
+function makeRes() {
+  const state = { status: 0, headers: {}, chunks: [], ended: false }
+  const res = {
+    headersSent: false,
+    writeHead(status, headers) {
+      state.status = status
+      Object.assign(state.headers, headers || {})
+      res.headersSent = true
+      return res
+    },
+    write(chunk) {
+      state.chunks.push(Buffer.from(chunk))
+      return true
+    },
+    end(chunk) {
+      if (chunk) state.chunks.push(Buffer.from(chunk))
+      state.ended = true
+    },
+    on() {
+      return res
+    },
+  }
+  return { res, state }
+}
+
+function makeReq({ method = 'GET', url = '/ipynb/health', body, rejection, headers = {} } = {}) {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
+  return {
+    method,
+    url,
+    headers: { 'content-type': 'application/json', ...headers },
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk
+    },
+    rejection,
+  }
+}
+
+function makeCtx({ cwd, rejection } = {}) {
+  const registered = []
+  return {
+    registered,
+    sessions: {
+      get(id) {
+        return id === 's1' && cwd ? { header: { cwd } } : undefined
+      },
+    },
+    connection: {
+      requestRejection() {
+        return rejection
+      },
+    },
+    webServer: {
+      register(route) {
+        registered.push(route)
+        return () => {}
+      },
+    },
+  }
+}
+
+function makeKernels() {
+  const calls = []
+  const entry = {
+    python: '/fake/python',
+    busy: false,
+    async run(cellId, code, onEvent) {
+      calls.push({ cellId, code })
+      onEvent({ type: 'status', execution_state: 'busy', cell_id: cellId })
+      onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text: 'hello\n' })
+      onEvent({ type: 'execute_reply', cell_id: cellId, ok: true, execution_count: 3 })
+      return { type: 'execute_reply', cell_id: cellId, ok: true, execution_count: 3 }
+    },
+    async interrupt() {
+      calls.push({ interrupt: true })
+    },
+  }
+  return {
+    calls,
+    entry,
+    kernelCount: 1,
+    status() {
+      return { running: true, ready: true, busy: false, python: entry.python, executionState: 'idle', lastError: null }
+    },
+    async getOrStart(target, python, onEvent) {
+      calls.push({ target, python })
+      if (onEvent) onEvent({ type: 'status', phase: 'starting' })
+      return entry
+    },
+    peek() {
+      return entry
+    },
+    async shutdown() {
+      calls.push({ shutdown: true })
+      return true
+    },
+    async restart() {
+      calls.push({ restart: true })
+    },
+  }
+}
+
+async function invoke(ctx, kernels, req) {
+  registerIpynbRoutes(ctx, kernels)
+  const route = ctx.registered[0]
+  assert.equal(route.path, '/ipynb')
+  const { res, state } = makeRes()
+  await route.handler(req, res)
+  const text = Buffer.concat(state.chunks).toString('utf8')
+  let json
+  if (String(state.headers['content-type'] || '').includes('application/json') && text) {
+    json = JSON.parse(text)
+  }
+  return { state, text, json }
+}
+
+test('health reports version, kernels and interpreter counts', async () => {
+  const ctx = makeCtx()
+  const { state, json } = await invoke(ctx, makeKernels(), makeReq())
+  assert.equal(state.status, 200)
+  assert.equal(json.ok, true)
+  assert.equal(typeof json.value.version, 'string')
+  assert.equal(json.value.kernels, 1)
+  assert.equal(typeof json.value.interpreters.total, 'number')
+})
+
+test('interpreters lists discovered entries with a default', async () => {
+  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({ url: '/ipynb/interpreters' }))
+  assert.equal(state.status, 200)
+  assert.ok(Array.isArray(json.value.interpreters))
+  assert.ok('default' in json.value)
+})
+
+test('unknown endpoints return not-found', async () => {
+  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({ url: '/ipynb/nope' }))
+  assert.equal(state.status, 404)
+  assert.equal(json.error.code, 'not-found')
+})
+
+test('wrong method returns 405 with allow', async () => {
+  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({ method: 'PUT', url: '/ipynb/read' }))
+  assert.equal(state.status, 405)
+  assert.equal(state.headers.allow, 'POST')
+  assert.equal(json.error.code, 'method-not-allowed')
+})
+
+test('the host admission fence rejects requests before routing', async () => {
+  const { state, json } = await invoke(makeCtx({ rejection: 403 }), makeKernels(), makeReq())
+  assert.equal(state.status, 403)
+  assert.equal(json.error.code, 'forbidden')
+})
+
+test('non-JSON POST bodies are rejected', async () => {
+  const { state, json } = await invoke(
+    makeCtx(),
+    makeKernels(),
+    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'x.ipynb' }, headers: { 'content-type': 'text/plain' } }),
+  )
+  assert.equal(state.status, 400)
+  assert.equal(json.error.code, 'bad-request')
+})
+
+test('read rejects paths outside the session workspace', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const ctx = makeCtx({ cwd: dir })
+  const { state, json } = await invoke(
+    ctx,
+    makeKernels(),
+    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: '/etc/hosts' } }),
+  )
+  assert.equal(state.status, 403)
+  assert.equal(json.error.code, 'path-outside-root')
+})
+
+test('read returns the parsed notebook and its version', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'demo.ipynb' } }),
+  )
+  assert.equal(state.status, 200)
+  assert.equal(json.value.status, 'ok')
+  assert.equal(json.value.version.length, 64)
+  assert.equal(json.value.notebook.cells.length, 1)
+})
+
+test('save reports a write conflict for a stale baseVersion', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const notebook = emptyNotebook()
+  notebook.cells[0].source = '1 + 1'
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: { sessionId: 's1', path: 'demo.ipynb', notebook, baseVersion: '0'.repeat(64) },
+    }),
+  )
+  assert.equal(state.status, 409)
+  assert.equal(json.error.code, 'write-conflict')
+  assert.equal(json.error.details.version.length, 64)
+})
+
+test('save writes a fresh version when baseVersion matches', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const read = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'demo.ipynb' } }),
+  )
+  const notebook = read.json.value.notebook
+  notebook.cells[0].source = 'print(9)'
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: { sessionId: 's1', path: 'demo.ipynb', notebook, baseVersion: read.json.value.version },
+    }),
+  )
+  assert.equal(state.status, 200)
+  assert.notEqual(json.value.version, read.json.value.version)
+})
+
+test('readJsonBody enforces its byte limit', async () => {
+  const req = makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'x.ipynb' } })
+  await assert.rejects(readJsonBody(req, 4), (error) => error.code === 'too-large')
+})
+
+test('execute streams NDJSON events', async (t) => {
+  const discovered = await discoverInterpreters()
+  if (!discovered.default) {
+    t.skip('no Python interpreter with jupyter_client/ipykernel')
+    return
+  }
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  const { state, text } = await invoke(
+    makeCtx({ cwd: dir }),
+    kernels,
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/execute',
+      body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: 'print(1)' },
+    }),
+  )
+  assert.equal(state.status, 200)
+  assert.match(String(state.headers['content-type']), /application\/x-ndjson/)
+  assert.equal(state.headers['x-accel-buffering'], 'no')
+  assert.equal(state.headers['cache-control'], 'no-store')
+  const events = text
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line))
+  assert.ok(events.some((event) => event.type === 'stream' && event.text === 'hello\n'))
+  assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
+  assert.equal(kernels.calls[0].python, discovered.default)
+})
+
+test('execute validates the notebook path before opening a stream', async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const dir = path.join(base, 'session')
+  await mkdir(dir)
+  await writeFile(path.join(base, 'outside.ipynb'), serializeNotebook(emptyNotebook()))
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/execute',
+      body: { sessionId: 's1', path: '../outside.ipynb', cellId: 'c1', code: '1' },
+    }),
+  )
+  assert.equal(state.status, 403)
+  assert.equal(json.error.code, 'path-outside-root')
+})
+
+test('interrupt and shutdown require a running kernel', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  kernels.peek = () => null
+  const ctx = makeCtx({ cwd: dir })
+  const { state, json } = await invoke(
+    ctx,
+    kernels,
+    makeReq({ method: 'POST', url: '/ipynb/interrupt', body: { sessionId: 's1', path: 'demo.ipynb' } }),
+  )
+  assert.equal(state.status, 503)
+  assert.equal(json.error.code, 'kernel-unavailable')
+})
+
+test('execute waits for drain instead of dropping the final reply', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const ctx = makeCtx({ cwd: dir })
+  const kernels = makeKernels()
+  registerIpynbRoutes(ctx, kernels)
+  const handler = ctx.registered[0].handler
+  const chunks = []
+  const drainCallbacks = []
+  let writes = 0
+  let ended = false
+  const res = {
+    headersSent: false,
+    writeHead() {
+      this.headersSent = true
+      return this
+    },
+    write(chunk) {
+      chunks.push(String(chunk))
+      writes += 1
+      // Apply backpressure after the first chunk.
+      return writes > 1
+    },
+    end(chunk) {
+      if (chunk !== undefined) chunks.push(String(chunk))
+      ended = true
+    },
+    on() {
+      return this
+    },
+    once(event, callback) {
+      if (event === 'drain') drainCallbacks.push(callback)
+      return this
+    },
+  }
+  await handler(
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/execute',
+      body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1 + 1' },
+    }),
+    res,
+  )
+  assert.ok(drainCallbacks.length > 0, 'route should wait for drain')
+  for (const callback of drainCallbacks.splice(0)) callback()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(ended, true)
+  const events = chunks
+    .join('')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line))
+  assert.ok(events.some((event) => event.type === 'stream'))
+  assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
+})

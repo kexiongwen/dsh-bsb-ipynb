@@ -1,0 +1,22 @@
+dsh-bsb-ipynb
+Copyright (c) 2026 dsh-bsb-ipynb authors
+Licensed under the MIT License (see LICENSE).
+
+This product includes software derived from:
+
+  @dong-victor/dsh-better-sidebar-jupyter
+  https://github.com/dong-victor/dsh-better-sidebar-jupyter
+  MIT License, Copyright (c) dong-victor
+
+  - python/bridge.py — Jupyter kernel bridge, copied with modifications
+    (environment variable handling for the notebook working directory).
+  - Markdown, ANSI, Python syntax highlighting and HTML sanitizer
+    algorithms were reimplemented in plain JavaScript after studying
+    the corresponding MIT-licensed client modules of that project.
+
+Design reference (no code copied):
+
+  kikulmj/dsh-jupyter — Apache License 2.0
+  https://github.com/kikulmj/dsh-jupyter
+  Used as a reference for the HTTP route layout, session workspace
+  containment, notebook version guard and NDJSON streaming design.

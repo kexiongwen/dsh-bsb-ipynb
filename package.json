@@ -1,0 +1,41 @@
+{
+  "name": "dsh-bsb-ipynb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Preview and run Jupyter notebooks (.ipynb) in the DSH better-sidebar file tree.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test --test-timeout=180000 test/*.test.mjs"
+  },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./python/bridge.py": "./python/bridge.py"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "python",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}
