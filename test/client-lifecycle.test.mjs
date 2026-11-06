@@ -174,7 +174,8 @@ function mountNotebook(t) {
     return element
   }
   const api = {
-    flush, settle,
+    flush, settle, component,
+    timersFor: (delay) => [...timers.values()].filter((timer) => timer.delay === delay),
     get toolbar() { return component('Toolbar').props },
     get cell() { return component('CellView').props },
     get banner() { return component('Banner').props.banner },
@@ -680,4 +681,51 @@ test('truncating one cell in Run all does not consume the next cell budget', asy
   assert.equal(save.body.notebook.cells[1].outputs[0].text, 'SECOND CELL')
   save.resolve(response({ ok: true, value: { version: 'v2' } }))
   await app.settle()
+})
+
+test('clearing a cell output empties it and marks the notebook dirty', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  assert.equal(app.cell.cell.outputs.length, 1)
+  app.cell.onClearOutputs('cell-1')
+  await app.settle()
+  assert.equal(app.cell.cell.outputs.length, 0)
+  assert.equal(app.cell.cell.execution_count, 1, 'clearing output leaves the execution count alone')
+  assert.equal(app.toolbar.dirty, true)
+})
+
+test('an oversized notebook is blocked before upload and can be saved after clearing outputs', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  // Load a document whose pretty nbformat form exceeds the server's 32 MiB cap.
+  app.reload(notebookData('x'.repeat(33 * MiB), 'v2'))
+  await app.settle()
+  app.edit('print("edited")')
+  app.save()
+  await app.settle()
+  assert.equal(app.requests('save').length, 0, 'an oversized notebook must not be uploaded')
+  assert.equal(app.banner?.kind, 'error')
+  assert.match(app.banner.text, /32 MiB/)
+  assert.equal(app.saveButton().disabled, false, 'manual save stays available for the retry')
+  assert.equal(app.timersFor(1500).length, 0, 'a capacity block must not leave an autosave retry armed')
+  app.edit('print("edited again")')
+  await app.settle()
+  assert.equal(app.timersFor(1500).length, 0, 'further edits must not re-arm autosave while blocked')
+
+  // The banner action clears every output, which releases the block.
+  const banner = app.component('Banner')
+  const clearAll = findElement(banner.type(banner.props), (value) => value.props?.title === 'Clear all outputs')
+  assert.ok(clearAll, 'the capacity banner offers a clear-all-outputs action')
+  clearAll.props.onClick()
+  await app.settle()
+  assert.equal(app.cell.cell.outputs.length, 0)
+  assert.equal(app.banner, null, 'clearing outputs dismisses the capacity banner')
+  assert.equal(app.toolbar.dirty, true)
+
+  const request = app.save()
+  assert.ok(request, 'the cleared notebook is uploaded again')
+  request.resolve(response({ ok: true, value: { version: 'v3', size: 64 } }))
+  await app.settle()
+  assert.equal(request.body.notebook.cells[0].outputs.length, 0)
+  assert.equal(app.toolbar.dirty, false)
 })

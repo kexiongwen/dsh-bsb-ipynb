@@ -316,6 +316,30 @@ test('serialization strips display_id and illegal execution_count from outputs',
   assert.equal('display_id' in outputs[2], false)
 })
 
+test('the save preflight measures the same serialized size the server caps', async () => {
+  const { exports } = await loadClient()
+  const { notebookCapacity, serializeNotebook, normalizeNotebook, NOTEBOOK_CAP_BYTES, capacityText } = exports.__test
+  assert.equal(NOTEBOOK_CAP_BYTES, 32 * 1024 * 1024)
+  assert.deepEqual(notebookCapacity(null), { ok: true, bytes: 0 })
+  const notebook = normalizeNotebook({
+    cells: [{
+      cell_type: 'code',
+      source: 'print(1)',
+      execution_count: 1,
+      outputs: [{ output_type: 'stream', name: 'stdout', text: 'hello' }],
+    }],
+    metadata: {},
+    nbformat: 4,
+    nbformat_minor: 5,
+  })
+  const exact = Buffer.byteLength(serializeNotebook(notebook), 'utf8')
+  assert.deepEqual(notebookCapacity(notebook), { ok: true, bytes: exact })
+  assert.equal(notebookCapacity(notebook, exact).ok, true, 'the exact limit is still saveable')
+  assert.equal(notebookCapacity(notebook, exact - 1).ok, false, 'one byte above the limit is blocked')
+  assert.match(capacityText(exact), /32 MiB/)
+  assert.match(capacityText(exact), new RegExp((exact / 1048576).toFixed(1)))
+})
+
 test('autosave recovers after a failed save only when the notebook changes', async () => {
   const { exports } = await loadClient()
   const { shouldScheduleAutosave } = exports.__test
@@ -343,6 +367,7 @@ test('autosave stays blocked by conflict, running cell or clean state', async ()
   assert.equal(shouldScheduleAutosave(base), true)
   assert.equal(shouldScheduleAutosave({ ...base, conflict: 'v2' }), false)
   assert.equal(shouldScheduleAutosave({ ...base, autosaveBlocked: true }), false)
+  assert.equal(shouldScheduleAutosave({ ...base, capacityBlocked: true }), false)
   assert.equal(shouldScheduleAutosave({ ...base, runningCell: 'c1' }), false)
   assert.equal(shouldScheduleAutosave({ ...base, saveState: 'saving' }), false)
   assert.equal(shouldScheduleAutosave({ ...base, dirty: false }), false)

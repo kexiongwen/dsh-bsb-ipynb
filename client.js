@@ -46,6 +46,10 @@ window.__ModuleLoader__.load({
         conflict: 'The file changed on disk. Reload it before saving again.',
         saved: 'Saved',
         saveFailed: 'Save failed',
+        capacityTooLarge: 'Notebook is {size} MiB; the save limit is 32 MiB. Clear outputs and save again.',
+        clearCellOutputs: 'Clear outputs',
+        clearAllOutputs: 'Clear all outputs',
+        clearAllOutputsConfirm: 'Clear the outputs of every cell? They can only be restored by running the cells again.',
         kernelDied: 'The kernel stopped unexpectedly.',
         kernelRestarted: 'Interrupt timed out, so the kernel was restarted. All variables and kernel state have been cleared.',
         streamIncomplete: 'Execution ended before the cell finished.',
@@ -94,6 +98,10 @@ window.__ModuleLoader__.load({
         conflict: '文件已在磁盘上发生变化，请重新加载后再保存。',
         saved: '已保存',
         saveFailed: '保存失败',
+        capacityTooLarge: 'notebook 内容约 {size} MiB，保存上限为 32 MiB。请清空输出后再保存。',
+        clearCellOutputs: '清空输出',
+        clearAllOutputs: '清空全部输出',
+        clearAllOutputsConfirm: '清空所有单元格的输出？只有重新运行才能恢复。',
         kernelDied: '内核意外退出。',
         kernelRestarted: '中断超时，内核已强制重启；所有变量和内核状态均已清空。',
         streamIncomplete: '执行流在单元格完成前中断。',
@@ -654,7 +662,7 @@ window.__ModuleLoader__.load({
     // but must not retry the same failing snapshot in a loop.
     function shouldScheduleAutosave(state) {
       if (state.loadStatus !== 'ok' || !state.dirty) return false
-      if (state.conflict || state.autosaveBlocked || state.runningCell) return false
+      if (state.conflict || state.autosaveBlocked || state.capacityBlocked || state.runningCell) return false
       if (state.saveState === 'saving') return false
       if (state.saveState === 'failed' && !state.notebookChangedSinceFailure) return false
       return true
@@ -748,6 +756,22 @@ window.__ModuleLoader__.load({
         return copy
       })
       return JSON.stringify(value, null, 2) + '\n'
+    }
+
+    // Keep in sync with NOTEBOOK_CAP_BYTES in lib/notebook.js. The server
+    // writes pretty-printed nbformat JSON and rejects anything above this cap
+    // with 413, so measuring the same serialization is the strictest check.
+    const NOTEBOOK_CAP_BYTES = 32 * 1024 * 1024
+    const capacityEncoder = new TextEncoder()
+
+    function notebookCapacity(notebook, limit = NOTEBOOK_CAP_BYTES) {
+      if (!notebook || !Array.isArray(notebook.cells)) return { ok: true, bytes: 0 }
+      const bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
+      return { ok: bytes <= limit, bytes }
+    }
+
+    function capacityText(bytes) {
+      return t('capacityTooLarge').replace('{size}', (bytes / 1048576).toFixed(1))
     }
 
     function cellTypeLabel(type) {
@@ -1021,7 +1045,7 @@ window.__ModuleLoader__.load({
     }
 
     function CellView(props) {
-      const { cell, index, count, ctx, scope, notebookPath, editing, running, onEdit, onDone, onSource, onRun, onMove, onDelete, onType, onInsertBelow, onSave } = props
+      const { cell, index, count, ctx, scope, notebookPath, editing, running, onEdit, onDone, onSource, onRun, onMove, onDelete, onType, onInsertBelow, onSave, onClearOutputs } = props
       const textareaRef = useRef(null)
       const source = cell.source ?? ''
       const resolveImage = useMemo(
@@ -1078,6 +1102,9 @@ window.__ModuleLoader__.load({
             { className: 'dsh-bsb-ipynb-cell-actions' },
             code
               ? h(IconButton, { title: t('runCell'), disabled: running, onClick: () => onRun(cell.id) }, running ? '…' : t('run'))
+              : null,
+            code && Array.isArray(cell.outputs) && cell.outputs.length
+              ? h(IconButton, { title: t('clearCellOutputs'), onClick: () => onClearOutputs(cell.id) }, '⌫')
               : null,
             code || markdown
               ? h(IconButton, { title: editing ? t('doneEditing') : t('editCell'), onClick: () => (editing ? onDone() : onEdit(cell.id)) }, editing ? t('doneEditing') : t('editCell'))
@@ -1191,7 +1218,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function Banner({ banner, onReload }) {
+    function Banner({ banner, onReload, onClearOutputs }) {
       if (!banner) return null
       return h(
         'div',
@@ -1199,7 +1226,9 @@ window.__ModuleLoader__.load({
         h('span', { className: 'dsh-bsb-ipynb-banner-text' }, banner.text),
         banner.action === 'reload'
           ? h(IconButton, { title: t('reload'), onClick: onReload }, t('reload'))
-          : null,
+          : banner.action === 'clear-outputs'
+            ? h(IconButton, { title: t('clearAllOutputs'), onClick: onClearOutputs }, t('clearAllOutputs'))
+            : null,
       )
     }
 
@@ -1217,6 +1246,7 @@ window.__ModuleLoader__.load({
       const [conflict, setConflict] = useState(null)
       const [banner, setBanner] = useState(null)
       const [autosaveBlocked, setAutosaveBlocked] = useState(false)
+      const [capacityBlocked, setCapacityBlocked] = useState(false)
       const [editingCell, setEditingCell] = useState(null)
       const [runningCell, setRunningCell] = useState(null)
       const [runAllRunning, setRunAllRunning] = useState(false)
@@ -1278,6 +1308,7 @@ window.__ModuleLoader__.load({
         setRunningCell(null)
         setRunAllRunning(false)
         setSaveState('idle')
+        setCapacityBlocked(false)
         if (!data || typeof data !== 'object') {
           setLoadStatus('error')
           setLoadMessage('Invalid server response')
@@ -1340,6 +1371,7 @@ window.__ModuleLoader__.load({
         setRunningCell(null)
         setRunAllRunning(false)
         setSaveState('idle')
+        setCapacityBlocked(false)
         const nextNotebook = emptyNotebook()
         notebookRef.current = nextNotebook
         setNotebook(nextNotebook)
@@ -1364,6 +1396,16 @@ window.__ModuleLoader__.load({
           return
         }
         const snapshot = notebookRef.current
+        const capacity = notebookCapacity(snapshot)
+        if (!capacity.ok) {
+          // Refuse before serializing the upload: a 413 after the fact would
+          // repeat on every autosave and cannot be fixed by editing the source.
+          setSaveState('failed')
+          setCapacityBlocked(true)
+          setBanner({ kind: 'error', reason: 'capacity', text: capacityText(capacity.bytes), action: 'clear-outputs' })
+          return
+        }
+        setCapacityBlocked(false)
         const seq = documentSeqRef.current
         const revision = notebookRevisionRef.current
         const request = { seq }
@@ -1478,12 +1520,12 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         const changedSinceFailure = failedSnapshotRef.current === null || notebook !== failedSnapshotRef.current
-        if (!shouldScheduleAutosave({ loadStatus, dirty, conflict, autosaveBlocked, runningCell, saveState, notebookChangedSinceFailure: changedSinceFailure })) return undefined
+        if (!shouldScheduleAutosave({ loadStatus, dirty, conflict, autosaveBlocked, capacityBlocked, runningCell, saveState, notebookChangedSinceFailure: changedSinceFailure })) return undefined
         const timer = setTimeout(() => {
           void saveRef.current()
         }, AUTOSAVE_MS)
         return () => clearTimeout(timer)
-      }, [dirty, notebook, conflict, autosaveBlocked, saveState, loadStatus, runningCell])
+      }, [dirty, notebook, conflict, autosaveBlocked, capacityBlocked, saveState, loadStatus, runningCell])
 
       // Only committed output snapshots can trigger a notice. Replayed or
       // discarded React updaters must not leave a stale truncation flag.
@@ -1592,6 +1634,7 @@ window.__ModuleLoader__.load({
         // that React has not yet updated with this run's queued changes.
         notebookRevisionRef.current += 1
         setEditingCell(null)
+        setCapacityBlocked(false)
         runningRef.current = cellId
         setRunningCell(cellId)
         setKernel((previous) => ({ ...previous, running: true, busy: true, executionState: 'busy' }))
@@ -1733,6 +1776,41 @@ window.__ModuleLoader__.load({
         markDirty()
       }, [markDirty])
 
+      const clearOutputs = useCallback((cellId) => {
+        const current = notebookRef.current
+        const cell = current && current.cells.find((entry) => entry.id === cellId)
+        if (!cell || cell.cell_type !== 'code' || !Array.isArray(cell.outputs) || cell.outputs.length === 0) return
+        setNotebook((previous) => updateCell(previous, cellId, (entry) => (
+          entry.cell_type === 'code' ? { ...entry, outputs: [] } : entry
+        )))
+        setBanner((currentBanner) => (currentBanner && currentBanner.reason === 'capacity' ? null : currentBanner))
+        setCapacityBlocked(false)
+        markDirty()
+      }, [markDirty])
+
+      const clearAllOutputs = useCallback(() => {
+        const current = notebookRef.current
+        if (!current) return
+        const hasOutputs = current.cells.some((cell) => (
+          cell.cell_type === 'code' && Array.isArray(cell.outputs) && cell.outputs.length > 0
+        ))
+        if (!hasOutputs) return
+        if (typeof window === 'undefined' || !window.confirm || !window.confirm(t('clearAllOutputsConfirm'))) return
+        setNotebook((previous) => (previous
+          ? {
+              ...previous,
+              cells: previous.cells.map((cell) => (
+                cell.cell_type === 'code' && Array.isArray(cell.outputs) && cell.outputs.length
+                  ? { ...cell, outputs: [] }
+                  : cell
+              )),
+            }
+          : previous))
+        setBanner(null)
+        setCapacityBlocked(false)
+        markDirty()
+      }, [markDirty])
+
       const moveCell = useCallback((cellId, delta) => {
         setNotebook((previous) => {
           if (!previous) return previous
@@ -1845,7 +1923,7 @@ window.__ModuleLoader__.load({
           dirty,
           conflict,
         }),
-        h(Banner, { banner, onReload: reload }),
+        h(Banner, { banner, onReload: reload, onClearOutputs: clearAllOutputs }),
         h(
           'div',
           { className: 'dsh-bsb-ipynb-cells' },
@@ -1870,6 +1948,7 @@ window.__ModuleLoader__.load({
               onType: changeType,
               onInsertBelow: (cellId) => insertCell(cellId, 'code'),
               onSave: () => void saveRef.current(),
+              onClearOutputs: clearOutputs,
             }),
           ),
         ),
@@ -2157,6 +2236,9 @@ window.__ModuleLoader__.load({
       reduceOutputs,
       outputsSize,
       MAX_CELL_OUTPUT_BYTES,
+      NOTEBOOK_CAP_BYTES,
+      notebookCapacity,
+      capacityText,
       shouldScheduleAutosave,
       resolveRestartPython,
       executeReplyFailed,
