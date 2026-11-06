@@ -86,12 +86,8 @@ class Bridge:
         self.kc = None          # BlockingKernelClient
         self.pending = {}       # shell msg_id -> (cell_id, exec_id)
         self.idle_events = {}   # shell msg_id -> threading.Event (iopub idle seen)
-        # iopub can beat the shell reply that tells us msg_id -> cell_id.
-        # Buffer a bounded number of those messages and replay them once the
-        # mapping is registered, so their output is not lost or misattributed.
-        self.early_iopub = {}   # msg_id -> [raw iopub message]
-        self.early_idle = set() # msg_ids whose idle status arrived early
-        self.executing = False
+        # Sending an execute request and registering its ID share this lock
+        # with IOPub lookup, so even the earliest output needs no extra cache.
         self.pending_lock = threading.Lock()
         self.exec_queue = queue.Queue()   # (cell_id, exec_id, code)
         self.stop = threading.Event()
@@ -162,8 +158,17 @@ class Bridge:
         })
         log("info", "kernel ready")
 
+    def clear_pending_locked(self):
+        """Release in-flight idle waits and mappings; caller holds pending_lock."""
+        for event in self.idle_events.values():
+            event.set()
+        self.pending.clear()
+        self.idle_events.clear()
+
     def shutdown_kernel(self):
-        self.stop.set()
+        with self.pending_lock:
+            self.stop.set()
+            self.clear_pending_locked()
         try:
             if self.kc is not None:
                 self.kc.stop_channels()
@@ -214,7 +219,6 @@ class Bridge:
     def run_one(self, cell_id, exec_id, code):
         kc = self.kc
         self.interrupt_requested_at = None
-        self.executing = True
         finished = False
         msg_id = None
 
@@ -249,18 +253,18 @@ class Bridge:
             # allow_stdin=False is deliberate: this bridge never forwards stdin
             # requests to the host, so input()/getpass must fail fast with
             # StdinNotImplementedError instead of blocking forever.
-            msg_id = kc.execute(code, silent=False, store_history=True, allow_stdin=False)
             with self.pending_lock:
+                if self.stop.is_set() or self.restarting or kc is not self.kc:
+                    raise RuntimeError("kernel changed before execution could be submitted")
+                # execute() defaults to reply=False: it only sends the request
+                # and returns its ID, without waiting for shell/IOPub replies.
+                # Hold the lock until registration so the pump cannot mistake
+                # early output for an unknown request. Never wait for execution
+                # or emit output while holding this lock.
+                msg_id = kc.execute(code, silent=False, store_history=True, allow_stdin=False)
                 self.pending[msg_id] = (cell_id, exec_id)
                 idle = threading.Event()
                 self.idle_events[msg_id] = idle
-                early = self.early_iopub.pop(msg_id, [])
-                if msg_id in self.early_idle:
-                    self.early_idle.discard(msg_id)
-                    idle.set()
-            # Replay iopub events that raced the shell reply registration.
-            for raw in early:
-                self.handle_iopub(raw)
             # The shell reply closes the request; iopub events arrive in the
             # iopub pump thread while we block here. Hold the execute_reply
             # until the pump has seen the matching idle status, so the reply
@@ -306,9 +310,7 @@ class Bridge:
             if reply is None:
                 finish("error", "kernel stopped before the cell finished")
                 return
-            idle = self.idle_events.get(msg_id)
-            if idle is not None:
-                idle.wait(timeout=10)
+            idle.wait(timeout=10)
             content = reply.get("content", {})
             status = content.get("status", "error")
             finish(status, content.get("ename") or None, content.get("execution_count"))
@@ -323,7 +325,6 @@ class Bridge:
             })
             finish("error", str(error))
         finally:
-            self.executing = False
             if msg_id is not None:
                 with self.pending_lock:
                     self.pending.pop(msg_id, None)
@@ -375,26 +376,16 @@ class Bridge:
         header = msg.get("header", {})
         parent = msg.get("parent_header", {})
         msg_type = header.get("msg_type", "")
-        cell_id = None
-        exec_id = None
         parent_id = parent.get("msg_id")
         with self.pending_lock:
             mapping = self.pending.get(parent_id)
-        if mapping is not None:
-            cell_id, exec_id = mapping
-        content = msg.get("content", {})
-        if cell_id is None and self.executing and parent_id:
-            # The shell reply has not registered this msg_id yet. Buffer the
-            # message (bounded) and replay it from run_one once it can be
-            # attributed to the cell that caused it.
-            with self.pending_lock:
-                if len(self.early_iopub) > 256:
-                    self.early_iopub.clear()
-                    self.early_idle.clear()
-                self.early_iopub.setdefault(parent_id, []).append(msg)
-                if msg_type == "status" and content.get("execution_state") == "idle":
-                    self.early_idle.add(parent_id)
+        if mapping is None:
+            # Completed executions may keep emitting from background threads.
+            # They will never be registered again: neither retain their output
+            # nor forward it untagged into an unrelated execution.
             return
+        cell_id, exec_id = mapping
+        content = msg.get("content", {})
         if msg_type == "status":
             state = content.get("execution_state", "idle")
             emit({
@@ -515,7 +506,9 @@ class Bridge:
         # Same batch semantics: a restart cancels cells queued behind the
         # running one (they would otherwise execute after the fresh kernel).
         self.drain_queue("restarted")
-        self.restarting = True
+        with self.pending_lock:
+            self.restarting = True
+            self.clear_pending_locked()
         try:
             try:
                 self.kc.stop_channels()
@@ -534,10 +527,8 @@ class Bridge:
                 kc = self.km.client()
                 kc.start_channels()
                 kc.wait_for_ready(timeout=25)
-                self.kc = kc
                 with self.pending_lock:
-                    self.pending.clear()
-                    self.idle_events.clear()
+                    self.kc = kc
                 self.interrupt_requested_at = None
                 language_info = {}
                 emit({
@@ -551,7 +542,8 @@ class Bridge:
                 log("error", "restart channels failed: %s" % (error,))
                 return False
         finally:
-            self.restarting = False
+            with self.pending_lock:
+                self.restarting = False
 
     # ------------------------------------------------------------- main
 
