@@ -5,7 +5,6 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
-    const VERSION = '0.1.0'
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
     const STATUS_POLL_MS = 10000
@@ -21,7 +20,6 @@ window.__ModuleLoader__.load({
         shutdown: 'Shut down kernel',
         kernel: 'Kernel',
         python: 'Python',
-        starting: 'starting',
         busy: 'busy',
         idle: 'idle',
         off: 'off',
@@ -58,10 +56,7 @@ window.__ModuleLoader__.load({
         installHint: 'Install them with: python -m pip install jupyter_client ipykernel',
         restartConfirm: 'Restart the kernel to switch interpreter?',
         shortcuts: 'Ctrl/Cmd+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Ctrl/Cmd+S save',
-        noOutput: '',
-        untitled: 'Jupyter Notebook',
         emptyFile: 'Empty file — a new notebook will be created on save.',
-        stale: 'The notebook was updated on disk.',
       },
       zh: {
         runAll: '全部运行',
@@ -73,7 +68,6 @@ window.__ModuleLoader__.load({
         shutdown: '关闭内核',
         kernel: '内核',
         python: 'Python',
-        starting: '启动中',
         busy: '运行中',
         idle: '空闲',
         off: '未启动',
@@ -110,9 +104,7 @@ window.__ModuleLoader__.load({
         installHint: '可使用以下命令安装：python -m pip install jupyter_client ipykernel',
         restartConfirm: '切换解释器需要重启内核，是否继续？',
         shortcuts: 'Ctrl/Cmd+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Ctrl/Cmd+S 保存',
-        untitled: 'Jupyter Notebook',
         emptyFile: '空文件 — 保存时将创建新的 notebook。',
-        stale: 'notebook 已在磁盘上更新。',
       },
     }
 
@@ -1045,7 +1037,7 @@ window.__ModuleLoader__.load({
     }
 
     function CellView(props) {
-      const { cell, index, count, ctx, scope, notebookPath, editing, running, onEdit, onDone, onSource, onRun, onMove, onDelete, onType, onInsertBelow, onSave, onClearOutputs } = props
+      const { cell, index, count, ctx, scope, notebookPath, editing, running, busy, onEdit, onDone, onSource, onRun, onMove, onDelete, onType, onInsertBelow, onSave, onClearOutputs } = props
       const textareaRef = useRef(null)
       const source = cell.source ?? ''
       const resolveImage = useMemo(
@@ -1101,14 +1093,12 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dsh-bsb-ipynb-cell-actions' },
             code
-              ? h(IconButton, { title: t('runCell'), disabled: running, onClick: () => onRun(cell.id) }, running ? '…' : t('run'))
+              ? h(IconButton, { title: t('runCell'), disabled: busy, onClick: () => onRun(cell.id) }, running ? '…' : t('run'))
               : null,
             code && Array.isArray(cell.outputs) && cell.outputs.length
               ? h(IconButton, { title: t('clearCellOutputs'), onClick: () => onClearOutputs(cell.id) }, '⌫')
               : null,
-            code || markdown
-              ? h(IconButton, { title: editing ? t('doneEditing') : t('editCell'), onClick: () => (editing ? onDone() : onEdit(cell.id)) }, editing ? t('doneEditing') : t('editCell'))
-              : null,
+            h(IconButton, { title: editing ? t('doneEditing') : t('editCell'), onClick: () => (editing ? onDone() : onEdit(cell.id)) }, editing ? t('doneEditing') : t('editCell')),
             h(IconButton, { title: t('moveUp'), disabled: index === 0, onClick: () => onMove(cell.id, -1) }, '↑'),
             h(IconButton, { title: t('moveDown'), disabled: index === count - 1, onClick: () => onMove(cell.id, 1) }, '↓'),
             h(IconButton, { title: t('deleteCell'), onClick: () => onDelete(cell.id) }, '×'),
@@ -1161,7 +1151,24 @@ window.__ModuleLoader__.load({
                   className: 'dsh-bsb-ipynb-markdown',
                   dangerouslySetInnerHTML: { __html: renderMarkdownWithImages(source, resolveImage) },
                 })
-            : h('pre', { className: 'dsh-bsb-ipynb-raw' }, source),
+            : editing
+              ? h('textarea', {
+                  ref: textareaRef,
+                  className: 'dsh-bsb-ipynb-source-editor',
+                  value: source,
+                  spellCheck: false,
+                  autoFocus: true,
+                  onChange: (event) => onSource(cell.id, event.target.value),
+                  onKeyDown,
+                })
+              : h('pre', {
+                  className: 'dsh-bsb-ipynb-raw',
+                  tabIndex: 0,
+                  onClick: () => onEdit(cell.id),
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter') onEdit(cell.id)
+                  },
+                }, source),
         code && Array.isArray(cell.outputs) && cell.outputs.length
           ? h('div', { className: 'dsh-bsb-ipynb-outputs' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output, resolveImage })))
           : null,
@@ -1437,6 +1444,7 @@ window.__ModuleLoader__.load({
             setDirty(true)
           }
           setSaveState('saved')
+          setEmptyFile(false)
           setConflict(null)
           setBanner(null)
           if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -1508,6 +1516,7 @@ window.__ModuleLoader__.load({
       }, [ctx, path])
 
       useEffect(() => {
+        if (loadStatus !== 'ok') return undefined
         refreshKernel()
         if (visible === false) return undefined
         pollRef.current = setInterval(() => {
@@ -1516,7 +1525,7 @@ window.__ModuleLoader__.load({
         return () => {
           if (pollRef.current) clearInterval(pollRef.current)
         }
-      }, [refreshKernel, visible])
+      }, [refreshKernel, visible, loadStatus])
 
       useEffect(() => {
         const changedSinceFailure = failedSnapshotRef.current === null || notebook !== failedSnapshotRef.current
@@ -1600,10 +1609,16 @@ window.__ModuleLoader__.load({
             updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
           markDirty()
-          setKernel((previous) => ({ ...previous, running: true, busy: false, executionState: 'idle' }))
+          setKernel((previous) => ({
+            ...previous,
+            running: !run.died,
+            busy: false,
+            executionState: run.died ? 'none' : 'idle',
+          }))
           return
         }
         if (event.type === 'kernel_died') {
+          run.died = true
           run.failed = true
           setBanner({ kind: 'error', text: event.message || t('kernelDied') })
           setKernel((previous) => ({ ...previous, running: false, ready: false, busy: false, executionState: 'none' }))
@@ -1938,6 +1953,7 @@ window.__ModuleLoader__.load({
               notebookPath: path,
               editing: editingCell === cell.id,
               running: runningCell === cell.id,
+              busy: Boolean(runningCell) || runAllRunning,
               onEdit: (cellId) => setEditingCell(cellId),
               onDone: () => setEditingCell(null),
               onSource: setSource,
@@ -2162,7 +2178,7 @@ window.__ModuleLoader__.load({
 .dsh-bsb-ipynb-error { color: #cf222e; }
 .dsh-bsb-ipynb-html { font-family: inherit; white-space: normal; }
 .dsh-bsb-ipynb-image { display: block; max-width: 100%; background: white; }
-.dsh-bsb-ipynb-raw { color: var(--dsh-bsb-ipynb-muted); }
+.dsh-bsb-ipynb-raw { color: var(--dsh-bsb-ipynb-muted); cursor: text; }
 .dsh-bsb-ipynb-card { margin: 16px; padding: 16px; border: 1px solid var(--dsh-bsb-ipynb-border); border-radius: 8px; background: var(--dsh-bsb-ipynb-soft); }
 .dsh-bsb-ipynb-card-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
 .dsh-bsb-ipynb-card-detail { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--dsh-bsb-ipynb-soft-strong); border-radius: 5px; padding: 8px 10px; font-size: 12px; }
@@ -2218,7 +2234,6 @@ window.__ModuleLoader__.load({
     }
 
     const __test = {
-      VERSION,
       STRINGS,
       escapeHtml,
       mimeText,

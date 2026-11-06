@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "description": "Preview and run Jupyter notebooks (.ipynb) in the DSH better-sidebar file tree.",
   "license": "MIT",
   "scripts": {

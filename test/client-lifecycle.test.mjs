@@ -173,8 +173,25 @@ function mountNotebook(t) {
     assert.ok(element, name + ' is rendered')
     return element
   }
+  const components = (name) => {
+    flush()
+    const found = []
+    const pending = [tree]
+    while (pending.length) {
+      const element = pending.shift()
+      if (!element || typeof element !== 'object') continue
+      if (Array.isArray(element)) { pending.push(...element); continue }
+      if (element.type?.name === name) found.push(element)
+      pending.push(...(element.props?.children || []))
+    }
+    return found
+  }
+  const find = (predicate) => {
+    flush()
+    return findElement(tree, predicate)
+  }
   const api = {
-    flush, settle, component,
+    flush, settle, component, components, find,
     timersFor: (delay) => [...timers.values()].filter((timer) => timer.delay === delay),
     get toolbar() { return component('Toolbar').props },
     get cell() { return component('CellView').props },
@@ -727,5 +744,78 @@ test('an oversized notebook is blocked before upload and can be saved after clea
   request.resolve(response({ ok: true, value: { version: 'v3', size: 64 } }))
   await app.settle()
   assert.equal(request.body.notebook.cells[0].outputs.length, 0)
+  assert.equal(app.toolbar.dirty, false)
+})
+
+test('a running cell disables Run on every cell', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const twoCells = notebookData()
+  twoCells.notebook.cells.push({ ...twoCells.notebook.cells[0], id: 'cell-2', source: 'print("second")' })
+  app.reload(twoCells)
+  await app.settle()
+  const request = app.run()
+  const stream = executionStream()
+  request.resolve(stream.response)
+  await app.settle()
+  const cells = app.components('CellView')
+  assert.equal(cells.length, 2)
+  for (const element of cells) {
+    const runButton = findElement(element.type(element.props), (value) => value.props?.title === 'Run cell')
+    assert.ok(runButton, 'each code cell renders a Run button')
+    assert.equal(runButton.props.disabled, true, 'a global execution blocks Run on every cell')
+  }
+  stream.end()
+  await app.settle()
+})
+
+test('a kernel death is not undone by the terminal reply it precedes', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const request = app.run()
+  const stream = executionStream()
+  request.resolve(stream.response)
+  await app.settle()
+  stream.emit({ type: 'kernel_died', message: 'kernel crashed' })
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false)
+  stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: false, status: 'error' })
+  stream.end()
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'the synthetic terminal reply must not revive a dead kernel')
+  assert.equal(app.toolbar.kernel.executionState, 'none')
+})
+
+test('raw cells become editable in place', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.cell.onType('cell-1', 'raw')
+  await app.settle()
+  assert.equal(app.cell.cell.cell_type, 'raw')
+  app.cell.onEdit('cell-1')
+  await app.settle()
+  assert.equal(app.cell.editing, true)
+  const cellView = app.component('CellView')
+  const textarea = findElement(cellView.type(cellView.props), (value) => value.type === 'textarea')
+  assert.ok(textarea, 'editing a raw cell renders its source textarea')
+  app.cell.onSource('cell-1', 'raw text')
+  await app.settle()
+  assert.equal(app.cell.cell.source, 'raw text')
+  assert.equal(app.cell.editing, true)
+})
+
+test('the empty-file hint disappears once the notebook is saved', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.reload({ ...notebookData(), emptyFile: true })
+  await app.settle()
+  assert.ok(app.find((value) => value.props?.className === 'dsh-bsb-ipynb-hint'), 'empty-file hint is visible')
+  app.edit('print("saved")')
+  const request = app.save()
+  assert.ok(request)
+  request.resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await app.settle()
+  assert.equal(app.find((value) => value.props?.className === 'dsh-bsb-ipynb-hint'), null,
+    'a successful save clears the empty-file hint')
   assert.equal(app.toolbar.dirty, false)
 })

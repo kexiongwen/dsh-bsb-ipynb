@@ -783,3 +783,9 @@ test('an exact byte-limit stream accepts a split surrogate completion that reduc
   assertOutputBytes(outputsSize, capped)
   assert.equal(full[0].text, text, 'later merging/truncation must not modify the original full snapshot')
 })
+
+test('client translations expose the same keys', async () => {
+  const { exports } = await loadClient()
+  const { STRINGS } = exports.__test
+  assert.deepEqual(Object.keys(STRINGS.en).sort(), Object.keys(STRINGS.zh).sort())
+})

@@ -8,6 +8,7 @@ import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { KernelManager } from '../lib/kernel.js'
 import { emptyNotebook } from '../lib/notebook.js'
+import { discoverInterpreters } from '../lib/env.js'
 import { registerIpynbRoutes } from '../lib/routes.js'
 
 const python = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
@@ -114,7 +115,7 @@ test('execute route streams a real kernel run to completion', { skip: !hasJupyte
     const statusEnvelope = JSON.parse(status.chunks.join(''))
     assert.equal(statusEnvelope.ok, true)
     assert.equal(statusEnvelope.value.running, true)
-    assert.match(statusEnvelope.value.python, /python3/) 
+    assert.equal(statusEnvelope.value.python, (await discoverInterpreters()).default)
   } finally {
     await kernels.disposeAll()
     await rm(dir, { recursive: true, force: true })

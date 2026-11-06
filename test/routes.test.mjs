@@ -7,6 +7,7 @@ import { registerIpynbRoutes } from '../lib/routes.js'
 import { readJsonBody } from '../lib/json.js'
 import { discoverInterpreters } from '../lib/env.js'
 import { NOTEBOOK_CAP_BYTES, emptyNotebook, serializeNotebook, sha256 } from '../lib/notebook.js'
+const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
 function makeRes() {
   const state = { status: 0, headers: {}, chunks: [], ended: false }
@@ -166,7 +167,7 @@ test('health reports version, kernels and interpreter counts', async () => {
   const { state, json } = await invoke(ctx, makeKernels(), makeReq())
   assert.equal(state.status, 200)
   assert.equal(json.ok, true)
-  assert.equal(typeof json.value.version, 'string')
+  assert.equal(json.value.version, packageJson.version)
   assert.equal(json.value.kernels, 1)
   assert.equal(typeof json.value.interpreters.total, 'number')
 })
@@ -397,19 +398,34 @@ test('execute validates the notebook path before opening a stream', async () => 
   assert.equal(json.error.code, 'path-outside-root')
 })
 
-test('interrupt and shutdown require a running kernel', async () => {
+test('interrupt needs a running kernel; shutdown without one is a no-op', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
-  const kernels = makeKernels()
-  kernels.peek = () => null
   const ctx = makeCtx({ cwd: dir })
-  const { state, json } = await invoke(
-    ctx,
-    kernels,
-    makeReq({ method: 'POST', url: '/ipynb/interrupt', body: { sessionId: 's1', path: 'demo.ipynb' } }),
-  )
-  assert.equal(state.status, 503)
-  assert.equal(json.error.code, 'kernel-unavailable')
+  const makeKernelsWithoutKernel = () => {
+    const kernels = makeKernels()
+    kernels.peek = () => null
+    return kernels
+  }
+  try {
+    const interrupted = await invoke(
+      ctx,
+      makeKernelsWithoutKernel(),
+      makeReq({ method: 'POST', url: '/ipynb/interrupt', body: { sessionId: 's1', path: 'demo.ipynb' } }),
+    )
+    assert.equal(interrupted.state.status, 503)
+    assert.equal(interrupted.json.error.code, 'kernel-unavailable')
+
+    const shutdown = await invoke(
+      ctx,
+      makeKernelsWithoutKernel(),
+      makeReq({ method: 'POST', url: '/ipynb/shutdown', body: { sessionId: 's1', path: 'demo.ipynb' } }),
+    )
+    assert.equal(shutdown.state.status, 200, 'shutdown is idempotent when no kernel is running')
+    assert.equal(shutdown.json.ok, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('execute waits for drain instead of dropping the final reply', async () => {

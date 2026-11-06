@@ -9,7 +9,7 @@
 - Notebook 渲染：Markdown、代码、raw cell，执行计数，流式 stdout/stderr、`text/html`、`image/png|jpeg|svg`、`text/markdown`、JSON、ANSI 彩色 traceback。
 - 编辑：点击 cell 进入编辑（语法高亮预览 → 文本编辑），支持增删、上移/下移、切换 cell 类型、Markdown 预览、清空单个或全部 cell 的输出。
 - 执行：每个 notebook 一个持久 Python 内核（按文件路径共享），变量跨 cell 保留；Run all、中断、重启、关闭。
-- 保存：写回 nbformat 4.5，保存前做基础字段规范化（例如移除 `display_data.execution_count`、过滤非法 MIME 数据和附件结构、修正非法执行计数），未进行完整 schema 校验；用 sha256 版本号做乐观并发控制，外部修改返回 409 冲突而不覆盖，磁盘文件超过 32 MiB 返回 413；保存前按落盘格式预检整本大小，超限时提示清空输出而不是上传后被拒；编辑后 1.5 秒自动保存。
+- 保存：写回 nbformat 4.5，保存前做基础字段规范化（例如移除 `display_data.execution_count`、过滤非法 MIME 数据和附件结构、修正非法执行计数），未进行完整 schema 校验；用 sha256 版本号做乐观并发控制，读取前检测到的外部修改返回 409 冲突而不覆盖（校验到原子 rename 之间的外部写入属已知竞态），磁盘文件超过 32 MiB 返回 413；保存前按落盘格式预检整本大小，超限时提示清空输出而不是上传后被拒；编辑后 1.5 秒自动保存。
 - 解释器：自动发现 `DSH_IPYNB_PYTHON`、conda 环境、PATH 上的 `python3`/`python`、DSH 内置 Python；只有带 `jupyter_client` + `ipykernel` 的环境会被选中。
 - 安全：所有文件访问都限制在会话工作区内（realpath + `path.relative` 检查）；HTTP 路由复用 DSH 的 admission fence（`ctx.connection.requestRejection`）；内核输出 HTML 经 DOMParser 白名单清洗后才渲染，不执行 `<script>`。
 
@@ -58,7 +58,7 @@
 ```text
 dsh-bsb-ipynb/
 ├── index.js              # 宿主插件入口（inject webServer/sessions/connection）
-├── client.js             # 浏览器端单文件构建产物（window.__ModuleLoader__）
+├── client.js             # 浏览器端手写单文件 bundle（window.__ModuleLoader__，无构建步骤）
 ├── lib/
 │   ├── json.js           # JSON envelope、请求体读取、ApiError
 │   ├── gate.js           # 会话工作区解析与路径逃逸防护
@@ -80,7 +80,7 @@ dsh-bsb-ipynb/
 | GET | `/ipynb/health` | 版本、内核数、解释器统计 |
 | GET | `/ipynb/interpreters` | 解释器列表与默认项 |
 | GET | `/ipynb/status?sessionId=&path=` | 某个 notebook 的内核状态 |
-| POST | `/ipynb/read` | 读取并解析 notebook（`{status:'ok'|'invalid'|'unsupported', notebook?, version, size}`） |
+| POST | `/ipynb/read` | 读取并解析 notebook（`{status:'ok'|'invalid'|'unsupported', notebook?, version, size, emptyFile?, error?}`） |
 | POST | `/ipynb/save` | `{notebook, baseVersion}` 保存；版本过期返回 409 |
 | POST | `/ipynb/execute` | `{cellId, code, python?}`，NDJSON 流式返回执行事件 |
 | POST | `/ipynb/interrupt` | 中断当前执行 |
@@ -105,7 +105,7 @@ python3 -m py_compile python/bridge.py
 node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 ```
 
-`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；notebook 的真实 schema 验证测试需要 `nbformat`，缺少时同样跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。
+`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；notebook 的真实 schema 验证测试需要 `nbformat`，缺少时同样跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器；未设置时默认使用 `/opt/miniconda3/bin/python3`，该路径不存在时相关测试会**静默跳过**（CI 等环境建议显式设置该变量）。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例只在大小写不敏感的文件系统（如 macOS APFS）上运行，其他平台会跳过。
 
 ## 可靠性
 
@@ -129,6 +129,13 @@ node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 - 中断后内核约 3 秒仍无响应时会强制重启，所有变量和其他内核状态都会被清空。
 - 执行结果由客户端写回并在保存时落盘；服务端不会在后台追加输出。
 - 当前没有“新建 notebook”向导，请在文件树里新建 `.ipynb` 空文件，或直接打开已有文件。
+
+## 内部限制与环境变量
+
+- POST 请求体上限 64 MiB（`lib/json.js`，适用于所有 POST 路由；notebook 落盘上限为 32 MiB）。
+- 内核空闲回收由 `DSH_IPYNB_KERNEL_IDLE_MS` 控制，默认 30 分钟。
+- 客户端内核状态轮询间隔 10 秒；`/ipynb/execute` 的 NDJSON ping 间隔 15 秒。
+- 内核 ready 超时 30 秒；shutdown 宽限 2 秒后发 SIGTERM，再 2 秒后 SIGKILL。
 
 ## 许可
 
