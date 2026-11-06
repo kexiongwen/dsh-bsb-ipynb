@@ -105,6 +105,14 @@ function reply(proc, command, ok = true) {
   })
 }
 
+// A restart only completes when the bridge echoes the operation id it was
+// sent; tests must simulate that contract rather than rely on any ready event.
+function restartReady(proc) {
+  const command = proc.commands.filter((candidate) => candidate.op === 'restart').at(-1)
+  assert.ok(command && Number.isInteger(command.id), 'a restart command with an operation id was sent')
+  proc.event({ type: 'ready', op_id: command.id })
+}
+
 for (const phase of ['during restart', 'idle after restart', 'during the next same-cell run']) {
   test(`a superseded execution's kernel_died is ignored ${phase}`, async (t) => {
     const h = harness(t)
@@ -118,7 +126,7 @@ for (const phase of ['during restart', 'idle after restart', 'during the next sa
     let nextCommand
     let nextState
     if (phase !== 'during restart') {
-      proc.event({ type: 'ready' })
+      restartReady(proc)
       await restarted
     }
     if (phase === 'during the next same-cell run') {
@@ -139,7 +147,7 @@ for (const phase of ['during restart', 'idle after restart', 'during the next sa
     if (phase === 'during restart') {
       assert.equal(restarting.status, 'pending')
       assert.equal(entry.ready, false)
-      proc.event({ type: 'ready' })
+      restartReady(proc)
       await restarted
     } else if (nextRun) {
       assert.equal(nextState.status, 'pending')
@@ -212,7 +220,7 @@ test('concurrent restarts during startup share one command and one ready timeout
   assert.equal(h.activeReadyTimers().length, 1, 'only the restart ready timeout may remain armed')
   assert.equal(first.status, 'pending')
   assert.equal(second.status, 'pending')
-  proc.event({ type: 'ready' })
+  restartReady(proc)
   await flush()
   assert.equal(first.status, 'fulfilled')
   assert.equal(second.status, 'fulfilled')
@@ -221,6 +229,44 @@ test('concurrent restarts during startup share one command and one ready timeout
   assert.equal(h.activeReadyTimers().length, 0, 'no displaced timeout may later kill the ready bridge')
   assert.deepEqual(proc.kills, [])
   assert.equal(entry.ready, true)
+})
+
+test('a ready without the restart operation id cannot complete a restart wait', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const restarting = observe(entry.restart())
+  const command = proc.commands.at(-1)
+  assert.equal(command.op, 'restart')
+  assert.ok(Number.isInteger(command.id), 'restart carries an operation id')
+  proc.event({ type: 'ready' })
+  await flush()
+  assert.equal(restarting.status, 'pending', 'a bridge-initiated ready must not satisfy a host restart')
+  assert.equal(entry.ready, false)
+  proc.event({ type: 'ready', op_id: command.id + 1 })
+  await flush()
+  assert.equal(restarting.status, 'pending', 'a different operation id must not satisfy the wait')
+  restartReady(proc)
+  await restarting
+  assert.equal(entry.ready, true)
+  assert.equal(h.activeReadyTimers().length, 0)
+})
+
+test('each restart command carries a fresh operation id', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const first = entry.restart()
+  await flush()
+  const firstCommand = proc.commands.at(-1)
+  restartReady(proc)
+  await first
+  const second = entry.restart()
+  await flush()
+  const secondCommand = proc.commands.at(-1)
+  assert.equal(secondCommand.op, 'restart')
+  assert.ok(Number.isInteger(firstCommand.id) && Number.isInteger(secondCommand.id))
+  assert.notEqual(secondCommand.id, firstCommand.id, 'every restart needs its own operation id')
+  restartReady(proc)
+  await second
 })
 
 test('an execution requested during startup and restart waits for the restarted kernel', async (t) => {
@@ -235,7 +281,7 @@ test('an execution requested during startup and restart waits for the restarted 
   assert.equal(restartState.status, 'pending')
   assert.equal(runState.status, 'pending')
   assert.equal(proc.commands.some((command) => command.op === 'execute'), false)
-  proc.event({ type: 'ready' })
+  restartReady(proc)
   await flush()
   const commands = proc.commands.filter((command) => command.op === 'execute')
   assert.equal(commands.length, 1)
@@ -335,7 +381,7 @@ test('aborting a request waiting for restart prevents execution and leaves the k
   const rejected = assert.rejects(cancelled, (error) => error === reason)
   controller.abort(reason)
   assert.equal(proc.commands.some((command) => command.op === 'execute'), false)
-  proc.event({ type: 'ready' })
+  restartReady(proc)
   await restarting
   await rejected
   assert.equal(proc.commands.some((command) => command.op === 'execute'), false)
@@ -577,7 +623,7 @@ for (const origin of ['startup', 'previous restart']) {
     const { entry, proc } = await h.startReady()
     if (origin === 'previous restart') {
       const previousRestart = entry.restart()
-      proc.event({ type: 'ready' })
+      restartReady(proc)
       await previousRestart
     }
     const oldTimer = h.readyTimers.at(-1)
@@ -593,7 +639,7 @@ for (const origin of ['startup', 'previous restart']) {
     assert.equal(entry.ready, false)
     assert.equal(currentTimer.active, true)
     assert.deepEqual(proc.kills, [])
-    proc.event({ type: 'ready' })
+    restartReady(proc)
     await restarting
     assert.equal(entry.ready, true)
     assert.equal(h.activeReadyTimers().length, 0)

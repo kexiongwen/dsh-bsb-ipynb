@@ -13,11 +13,12 @@ Commands (one JSON object per line on stdin):
   {"op": "status"}                          -> {"type": "status_reply", "alive": bool}
   {"op": "execute", "cell_id": str, "code": str, "exec_id": str}
   {"op": "interrupt"}
-  {"op": "restart"}
+  {"op": "restart", "id": n}                -> {"type": "ready", "op_id": n}
   {"op": "shutdown"}                        -> clean shutdown, then exit(0)
 
 Events (one JSON object per line on stdout):
-  {"type": "ready", "kernel_name": ..., "language_info": {...}}
+  {"type": "ready", "kernel_name": ..., "language_info": {...}}  # op_id echoed
+                                                 after a requested restart
   {"type": "status_reply", "alive": bool}
   {"type": "status", "execution_state": "busy"|"idle", "cell_id": ...}
   {"type": "stream", "cell_id": ..., "name": "stdout"|"stderr", "text": ...}
@@ -96,8 +97,23 @@ class Bridge:
         self.executor = None
         self.interrupt_requested_at = None
         self.restarting = False           # True while a restart is in flight
+        # Restarts are serialized: concurrent callers share one restart and
+        # wait for the same completion instead of racing the kernel manager.
+        self.restart_guard = threading.Lock()
+        self.restart_inflight = None      # {"done": Event, "result": bool} while set
 
     # ------------------------------------------------------------- kernel
+
+    def emit_ready(self, op_id=None):
+        """Report a ready kernel, echoing the restart operation it completes."""
+        event = {
+            "type": "ready",
+            "kernel_name": getattr(self.km, "kernel_name", "python3") or "python3",
+            "language_info": {},
+        }
+        if op_id is not None:
+            event["op_id"] = op_id
+        emit(event)
 
     def start_kernel(self, cwd=None):
         from jupyter_client import KernelManager
@@ -152,12 +168,7 @@ class Bridge:
             raise
         self.km = km
         self.kc = kc
-        language_info = {}
-        emit({
-            "type": "ready",
-            "kernel_name": getattr(km, "kernel_name", "python3") or "python3",
-            "language_info": language_info,
-        })
+        self.emit_ready()
         log("info", "kernel ready")
 
     def clear_pending_locked(self):
@@ -277,6 +288,13 @@ class Bridge:
             # never overtakes the cell's own outputs (stream/display/error).
             reply = None
             while not self.stop.is_set():
+                # Another restart (host request or a previous interrupt
+                # timeout) can replace the kernel while this cell is waiting
+                # for its shell reply. Never block forever on a superseded
+                # client: report the interrupted cell instead.
+                if kc is not self.kc or self.restarting:
+                    finish("interrupted", "kernel changed before the cell finished")
+                    return
                 try:
                     candidate = kc.get_shell_msg(timeout=1)
                 except queue.Empty:
@@ -532,10 +550,40 @@ class Bridge:
         except Exception as error:
             log("error", "interrupt failed: %s" % (error,))
 
-    def restart(self):
+    def restart(self, op_id=None):
+        """Restart the kernel once, sharing an in-flight restart.
+
+        The bridge allows only one restart at a time: a caller that finds one
+        already running waits for it and then reports its own operation id so
+        the host can match the ready event it is waiting for.
+        """
         if self.km is None or self.kc is None:
             log("warn", "no kernel to restart")
             return False
+        with self.restart_guard:
+            holder = self.restart_inflight
+            if holder is None:
+                holder = {"done": threading.Event(), "result": False}
+                self.restart_inflight = holder
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            holder["done"].wait()
+            if holder["result"] and op_id is not None:
+                self.emit_ready(op_id)
+            return holder["result"]
+        try:
+            result = self.restart_once(op_id)
+            holder["result"] = result
+            return result
+        finally:
+            with self.restart_guard:
+                if self.restart_inflight is holder:
+                    self.restart_inflight = None
+            holder["done"].set()
+
+    def restart_once(self, op_id=None):
         # Same batch semantics: a restart cancels cells queued behind the
         # running one (they would otherwise execute after the fresh kernel).
         self.drain_queue("restarted")
@@ -563,12 +611,7 @@ class Bridge:
                 with self.pending_lock:
                     self.kc = kc
                 self.interrupt_requested_at = None
-                language_info = {}
-                emit({
-                    "type": "ready",
-                    "kernel_name": getattr(self.km, "kernel_name", "python3") or "python3",
-                    "language_info": language_info,
-                })
+                self.emit_ready(op_id)
                 log("info", "kernel restarted")
                 return True
             except Exception as error:
@@ -607,7 +650,7 @@ class Bridge:
                 elif op == "interrupt":
                     self.interrupt()
                 elif op == "restart":
-                    self.restart()
+                    self.restart(command.get("id"))
                 elif op == "shutdown":
                     self.shutdown_kernel()
                     return

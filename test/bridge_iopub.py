@@ -69,6 +69,15 @@ class ControlledClient:
         pass
 
 
+class SilentClient(ControlledClient):
+    """A client whose shell socket never yields a reply."""
+
+    def get_shell_msg(self, timeout=1):
+        self.shell_entered.set()
+        time.sleep(0.02)
+        raise queue.Empty()
+
+
 class ControlledManager:
     kernel_name = "python3"
 
@@ -450,6 +459,91 @@ class IOPubTests(unittest.TestCase):
         self.assertFalse(self.client.execute_entered.is_set())
         self.assertEqual(self.bridge.pending, {})
         self.assertEqual(self.bridge.idle_events, {})
+
+    def test_concurrent_restarts_share_one_restart_and_echo_operation_ids(self):
+        entered = threading.Event()
+        release = threading.Event()
+        self.releases.append(release)
+        restarted = []
+        manager = ControlledManager(ControlledClient("replacement-request"))
+        manager.restart_kernel = lambda now: (restarted.append(now), entered.set(), release.wait(3))
+        self.bridge.km = manager
+        # Observe the follower entering restart() while the leader is blocked
+        # inside restart_kernel(), so the coalescing path is deterministic.
+        follower_entered = threading.Event()
+        original_guard = self.bridge.restart_guard
+
+        class ObservedLock:
+            def __enter__(self):
+                original_guard.acquire()
+                follower_entered.set()
+                return self
+
+            def __exit__(self, *exc_info):
+                original_guard.release()
+                return False
+
+        self.bridge.restart_guard = ObservedLock()
+        results = []
+
+        def call(op_id):
+            results.append((op_id, self.bridge.restart(op_id)))
+
+        leader = self.start_thread(lambda: call(11))
+        self.wait(entered)
+        follower_entered.clear()
+        follower = self.start_thread(lambda: call(22))
+        self.wait(follower_entered)
+        release.set()
+        self.join(leader)
+        self.join(follower)
+        self.assertEqual(len(restarted), 1, "concurrent callers must share one kernel restart")
+        self.assertEqual(sorted(results), [(11, True), (22, True)])
+        ready = [event for event in self.events if event["type"] == "ready"]
+        self.assertEqual(sorted(event.get("op_id") for event in ready), [11, 22],
+                         "each caller's operation id is echoed exactly once")
+        self.assertFalse(self.bridge.restarting)
+
+    def test_restart_ready_echoes_only_requested_operation_ids(self):
+        self.assertTrue(self.bridge.restart())
+        ready = [event for event in self.events if event["type"] == "ready"]
+        self.assertEqual(len(ready), 1)
+        self.assertNotIn("op_id", ready[0],
+                         "a bridge-initiated restart must not claim a host operation id")
+        self.events.clear()
+        self.assertTrue(self.bridge.restart(7))
+        ready = [event for event in self.events if event["type"] == "ready"]
+        self.assertEqual([event.get("op_id") for event in ready], [7])
+
+    def assert_superseded_run_finishes(self, supersede):
+        self.client = SilentClient()
+        self.bridge.kc = self.client
+        run = self.start_run()
+        self.wait(self.client.shell_entered)
+        supersede()
+        self.join(run)
+        replies = [event for event in self.events if event["type"] == "execute_reply"]
+        self.assertEqual(len(replies), 1)
+        self.assertFalse(replies[0]["ok"])
+        self.assertEqual(replies[0]["status"], "interrupted")
+        self.assertIn("kernel changed", replies[0]["error"])
+        self.assertEqual(self.bridge.pending, {})
+        self.assertEqual(self.bridge.idle_events, {})
+
+    def test_run_finishes_when_its_client_was_replaced(self):
+        try:
+            self.assert_superseded_run_finishes(
+                lambda: setattr(self.bridge, "kc", ControlledClient("other-client")))
+        finally:
+            self.bridge.kc = self.client
+
+    def test_run_finishes_when_a_restart_is_in_flight(self):
+        def mark_restarting():
+            self.bridge.restarting = True
+        try:
+            self.assert_superseded_run_finishes(mark_restarting)
+        finally:
+            self.bridge.restarting = False
 
 
 def real_kernel_regression():
