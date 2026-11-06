@@ -809,28 +809,140 @@ window.__ModuleLoader__.load({
       let changed = false
       const cells = notebook.cells.map((cell) => {
         if (cell.id !== cellId) return cell
-        changed = true
-        return updater(cell)
+        const next = updater(cell)
+        if (next !== cell) changed = true
+        return next
       })
       return changed ? { ...notebook, cells } : notebook
     }
 
     const MAX_CELL_OUTPUT_BYTES = 32 * 1024 * 1024
+    const OUTPUT_EVENTS = new Set(['stream', 'display_data', 'execute_result', 'error', 'update_display_data', 'clear_output'])
+    const outputEncoder = new TextEncoder()
+    const outputSizes = new WeakMap()
+    const outputBudgets = new WeakMap()
+
+    function jsonBytes(value) {
+      return outputEncoder.encode(JSON.stringify(value) ?? 'null').byteLength
+    }
+
+    function outputSize(output) {
+      if (!output || typeof output !== 'object') return jsonBytes(output)
+      if (!outputSizes.has(output)) outputSizes.set(output, jsonBytes(output))
+      return outputSizes.get(output)
+    }
+
+    // Arrays and their output objects are immutable snapshots. These caches
+    // retain no discarded snapshots and never mutate an earlier budget, so
+    // React can defer or replay an updater without consuming the budget twice.
+    // Internal state is not attached to notebook data or written to disk.
+    function outputBudget(outputs) {
+      if (!outputBudgets.has(outputs)) {
+        const bytes = 2 + Math.max(0, outputs.length - 1) + outputs.reduce((sum, output) => sum + outputSize(output), 0)
+        outputBudgets.set(outputs, { bytes, pendingClear: false, truncation: null })
+      }
+      return outputBudgets.get(outputs)
+    }
 
     function outputsSize(outputs) {
-      let total = 0
-      for (const output of outputs || []) {
-        if (output && output.output_type === 'stream') {
-          total += String(output.text || '').length
-          continue
-        }
-        const data = output && output.data
-        if (!data || typeof data !== 'object') continue
-        for (const value of Object.values(data)) {
-          total += typeof value === 'string' ? value.length : JSON.stringify(value).length
-        }
+      return outputBudget(Array.isArray(outputs) ? outputs : []).bytes
+    }
+
+    function rememberOutputs(outputs, bytes) {
+      outputBudgets.set(outputs, { bytes, pendingClear: false, truncation: null })
+      return outputs
+    }
+
+    function limitedOutputs() {
+      const outputs = [{ output_type: 'stream', name: 'stderr', text: '…[output limit reached, remaining output dropped]' }]
+      outputBudgets.set(outputs, { bytes: 2 + outputSize(outputs[0]), pendingClear: false, truncation: {} })
+      return outputs
+    }
+
+    function reduceOutputs(previous, event) {
+      let outputs = Array.isArray(previous) ? previous : []
+      if (!event || !OUTPUT_EVENTS.has(event.type)) return outputs
+      let budget = outputBudget(outputs)
+      if (event.type === 'clear_output') {
+        if (!event.wait) return []
+        if (budget.pendingClear) return outputs
+        const next = outputs.slice()
+        outputBudgets.set(next, { ...budget, pendingClear: true })
+        return next
       }
-      return total
+      if (event.type === 'update_display_data' && !event.display_id) return outputs
+      // Consume deferred clears in the same update queue as output events,
+      // before consulting the truncation lock or old display IDs.
+      if (budget.pendingClear) {
+        outputs = []
+        budget = outputBudget(outputs)
+      }
+      if (budget.truncation) return outputs
+
+      if (event.type === 'update_display_data') {
+        const matches = []
+        for (let index = 0; index < outputs.length; index += 1) {
+          if (outputs[index].display_id === event.display_id) matches.push(index)
+        }
+        if (!matches.length) return outputs
+        const data = event.data || {}
+        const metadata = event.metadata || {}
+        const payloadBytes = jsonBytes(data) + jsonBytes(metadata)
+        const replacements = []
+        let bytes = budget.bytes
+        for (const index of matches) {
+          const old = outputs[index]
+          // Encode the shared payload once, including all nested values and
+          // keys. Each matching display slot still consumes its full size.
+          const size = jsonBytes({ ...old, data: null, metadata: null }) - 8 + payloadBytes
+          bytes += size - outputSize(old)
+          const replacement = { ...old, data, metadata }
+          outputSizes.set(replacement, size)
+          replacements.push(replacement)
+        }
+        if (bytes > MAX_CELL_OUTPUT_BYTES) return limitedOutputs()
+        const next = outputs.slice()
+        matches.forEach((index, offset) => { next[index] = replacements[offset] })
+        return rememberOutputs(next, bytes)
+      }
+
+      let output
+      if (event.type === 'stream') {
+        output = { output_type: 'stream', name: event.name || 'stdout', text: String(event.text || '') }
+      } else if (event.type === 'error') {
+        output = {
+          output_type: 'error', ename: event.ename || 'Error', evalue: event.evalue || '',
+          traceback: Array.isArray(event.traceback) ? event.traceback : [],
+        }
+      } else {
+        output = { output_type: event.type, data: event.data || {}, metadata: event.metadata || {} }
+        if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) output.execution_count = event.execution_count
+        if (event.display_id) output.display_id = event.display_id
+      }
+      const last = outputs[outputs.length - 1]
+      if (output.output_type === 'stream' && last?.output_type === 'stream' && last.name === output.name) {
+        let merged, size
+        if (typeof last.text === 'string') {
+          let delta = jsonBytes(output.text) - 2 // exclude the JSON string quotes
+          // A surrogate pair split across chunks replaces two six-byte JSON
+          // escapes with one four-byte UTF-8 code point when concatenated.
+          const tail = last.text.charCodeAt(last.text.length - 1)
+          const head = output.text.charCodeAt(0)
+          if (tail >= 0xd800 && tail <= 0xdbff && head >= 0xdc00 && head <= 0xdfff) delta -= 8
+          size = outputSize(last) + delta
+          if (budget.bytes + delta > MAX_CELL_OUTPUT_BYTES) return limitedOutputs()
+          merged = { ...last, text: last.text + output.text }
+        } else {
+          merged = { ...last, text: mimeText(last.text) + output.text }
+          size = outputSize(merged)
+          if (budget.bytes - outputSize(last) + size > MAX_CELL_OUTPUT_BYTES) return limitedOutputs()
+        }
+        outputSizes.set(merged, size)
+        return rememberOutputs([...outputs.slice(0, -1), merged], budget.bytes - outputSize(last) + size)
+      }
+      const bytes = budget.bytes + outputSize(output) + (outputs.length ? 1 : 0)
+      if (bytes > MAX_CELL_OUTPUT_BYTES) return limitedOutputs()
+      return rememberOutputs([...outputs, output], bytes)
     }
 
     // Text MIME values in nbformat may be a string or an array of lines.
@@ -1122,7 +1234,6 @@ window.__ModuleLoader__.load({
       const pythonRef = useRef('')
       const forceReloadRef = useRef(false)
       const saveTimerRef = useRef(null)
-      const clearPendingRef = useRef(new Set())
       const stopRef = useRef(false)
       const runAllRef = useRef(null)
       const abortRef = useRef(null)
@@ -1130,8 +1241,7 @@ window.__ModuleLoader__.load({
       const failedSnapshotRef = useRef(null)
       const documentSeqRef = useRef(0)
       const notebookRevisionRef = useRef(0)
-      const outputTruncatedRef = useRef(false)
-      const truncationNotifiedRef = useRef(false)
+      const notifiedTruncationsRef = useRef(new WeakSet())
 
       dirtyRef.current = dirty
       notebookRef.current = notebook
@@ -1154,9 +1264,7 @@ window.__ModuleLoader__.load({
         runningRef.current = null
         runAllRef.current = null
         stopRef.current = true
-        clearPendingRef.current.clear()
-        outputTruncatedRef.current = false
-        truncationNotifiedRef.current = false
+        notifiedTruncationsRef.current = new WeakSet()
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
         saveTimerRef.current = null
         if (abortRef.current) abortRef.current.abort()
@@ -1377,12 +1485,24 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer)
       }, [dirty, notebook, conflict, autosaveBlocked, saveState, loadStatus, runningCell])
 
-      // Truncation happens deep inside a setNotebook updater; surface it as a
-      // one-time info banner after the state change commits.
+      // Only committed output snapshots can trigger a notice. Replayed or
+      // discarded React updaters must not leave a stale truncation flag.
       useEffect(() => {
-        if (!outputTruncatedRef.current || truncationNotifiedRef.current) return
-        truncationNotifiedRef.current = true
-        setBanner((current) => (current && current.kind === 'error' ? current : { kind: 'info', text: t('outputTruncated') }))
+        let hasTruncation = false
+        let newTruncation = false
+        for (const cell of notebook?.cells || []) {
+          const token = outputBudgets.get(cell.outputs)?.truncation
+          if (!token) continue
+          hasTruncation = true
+          if (notifiedTruncationsRef.current.has(token)) continue
+          notifiedTruncationsRef.current.add(token)
+          newTruncation = true
+        }
+        if (newTruncation) {
+          setBanner((current) => (current && current.kind === 'error' ? current : { kind: 'info', reason: 'output-limit', text: t('outputTruncated') }))
+        } else if (!hasTruncation) {
+          setBanner((current) => current?.reason === 'output-limit' ? null : current)
+        }
       }, [notebook])
 
       useEffect(() => {
@@ -1400,36 +1520,10 @@ window.__ModuleLoader__.load({
           : updateCell(previous, cellId, (cell) => cell.cell_type === 'code' ? updater(cell) : cell))
       }, [])
 
-      const appendOutput = useCallback((seq, cellId, output) => {
+      const updateRunOutputs = useCallback((seq, cellId, event) => {
         updateRunCell(seq, cellId, (cell) => {
-          let outputs = Array.isArray(cell.outputs) ? cell.outputs : []
-          if (clearPendingRef.current.has(cellId)) {
-            clearPendingRef.current.delete(cellId)
-            outputs = []
-          }
-          let next
-          if (output.output_type === 'stream' && outputs.length) {
-            const last = outputs[outputs.length - 1]
-            if (last.output_type === 'stream' && last.name === output.name) {
-              const merged = { ...last, text: String(last.text || '') + String(output.text || '') }
-              if (merged.text.length > 5_000_000) {
-                merged.text = merged.text.slice(0, 5_000_000) + '\n…[output truncated]'
-                outputTruncatedRef.current = true
-              }
-              next = [...outputs.slice(0, -1), merged]
-            }
-          }
-          if (!next) next = [...outputs, output]
-          if (outputsSize(next) > MAX_CELL_OUTPUT_BYTES) {
-            // Alternating stdout/stderr and huge displays could otherwise grow
-            // a single cell without bound. Keep a bounded marker instead.
-            outputTruncatedRef.current = true
-            return {
-              ...cell,
-              outputs: [{ output_type: 'stream', name: 'stderr', text: '…[output limit reached, remaining output dropped]' }],
-            }
-          }
-          return { ...cell, outputs: next }
+          const outputs = reduceOutputs(cell.outputs, event)
+          return outputs === cell.outputs ? cell : { ...cell, outputs }
         })
       }, [updateRunCell])
 
@@ -1444,59 +1538,11 @@ window.__ModuleLoader__.load({
           setKernel((previous) => ({ ...previous, running: true, ready: true, executionState: state, busy: state === 'busy' }))
           return
         }
-        if (event.type === 'stream') {
-          appendOutput(seq, cellId, { output_type: 'stream', name: event.name || 'stdout', text: String(event.text || '') })
-          return
-        }
-        if (event.type === 'display_data' || event.type === 'execute_result') {
-          const output = {
-            output_type: event.type,
-            data: event.data || {},
-            metadata: event.metadata || {},
-          }
-          // nbformat only allows an integer execution_count on execute_result;
-          // display_data must never carry one.
-          if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) {
-            output.execution_count = event.execution_count
-          }
-          // display_id is a Jupyter transient used to match update_display_data;
-          // it stays in memory only and is stripped before saving.
-          if (event.display_id) output.display_id = event.display_id
-          appendOutput(seq, cellId, output)
+        if (OUTPUT_EVENTS.has(event.type)) {
+          updateRunOutputs(seq, cellId, event)
           if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) {
             updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
-          return
-        }
-        if (event.type === 'update_display_data') {
-          updateRunCell(seq, cellId, (cell) => {
-            if (!event.display_id) return cell
-            return {
-              ...cell,
-              outputs: (cell.outputs || []).map((output) =>
-                output.display_id === event.display_id
-                  ? { ...output, data: event.data || {}, metadata: event.metadata || {} }
-                  : output,
-              ),
-            }
-          })
-          return
-        }
-        if (event.type === 'clear_output') {
-          if (event.wait) {
-            clearPendingRef.current.add(cellId)
-          } else {
-            updateRunCell(seq, cellId, (cell) => ({ ...cell, outputs: [] }))
-          }
-          return
-        }
-        if (event.type === 'error') {
-          appendOutput(seq, cellId, {
-            output_type: 'error',
-            ename: event.ename || 'Error',
-            evalue: event.evalue || '',
-            traceback: Array.isArray(event.traceback) ? event.traceback : [],
-          })
           return
         }
         if (event.type === 'execute_reply') {
@@ -1525,7 +1571,7 @@ window.__ModuleLoader__.load({
           run.failed = true
           setBanner({ kind: 'error', text: event.message || t('loadError') })
         }
-      }, [appendOutput, updateRunCell, markDirty])
+      }, [updateRunOutputs, updateRunCell, markDirty])
 
       const runCell = useCallback(async (cellId) => {
         if (runningRef.current || conflict || loadStatus !== 'ok') return false
@@ -1548,7 +1594,6 @@ window.__ModuleLoader__.load({
         setEditingCell(null)
         runningRef.current = cellId
         setRunningCell(cellId)
-        clearPendingRef.current.delete(cellId)
         setKernel((previous) => ({ ...previous, running: true, busy: true, executionState: 'busy' }))
         updateRunCell(run.seq, cellId, (entry) => ({ ...entry, outputs: [], execution_count: null }))
         const restorePreRunOutputs = () => {
@@ -2109,6 +2154,9 @@ window.__ModuleLoader__.load({
       normalizeNotebook,
       serializeNotebook,
       stripIllegalOutputFields,
+      reduceOutputs,
+      outputsSize,
+      MAX_CELL_OUTPUT_BYTES,
       shouldScheduleAutosave,
       resolveRestartPython,
       executeReplyFailed,

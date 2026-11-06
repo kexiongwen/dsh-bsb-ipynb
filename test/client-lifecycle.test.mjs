@@ -38,7 +38,18 @@ function executionStream() {
   const body = new ReadableStream({ start(value) { controller = value } })
   return {
     response: { ok: true, status: 200, body },
-    emit(event) { controller.enqueue(new TextEncoder().encode(JSON.stringify(event) + '\n')) },
+    emit(event) {
+      // HTTP readers receive chunks, not necessarily complete NDJSON lines.
+      // Keep transport allocations bounded even in the real 32 MiB tests.
+      const line = JSON.stringify(event) + '\n'
+      for (let start = 0; start < line.length;) {
+        let end = Math.min(start + 1024 * 1024, line.length)
+        const tail = line.charCodeAt(end - 1)
+        if (end < line.length && tail >= 0xd800 && tail <= 0xdbff) end -= 1
+        controller.enqueue(new TextEncoder().encode(line.slice(start, end)))
+        start = end
+      }
+    },
     end() { controller.close() },
     fail(error = new Error('connection lost')) { controller.error(error) },
   }
@@ -189,6 +200,14 @@ function mountNotebook(t) {
     mounted = false
     for (const slot of slots) slot?.cleanup?.()
     timers.clear()
+    // Release the unmounted fixture's component and transport state before
+    // another real-cap case allocates its large output payloads.
+    slots.length = 0
+    requests.length = 0
+    pendingState = []
+    pendingEffects = []
+    tree = null
+    props = null
   })
   flush()
   return api
@@ -441,4 +460,224 @@ test('an old Run all finalizer cannot stop or duplicate the newly adopted batch'
   await app.settle()
   await newBatch
   assert.equal(app.toolbar.runAllRunning, false)
+})
+
+const OUTPUT_CAP_BYTES = 32 * 1024 * 1024
+const MiB = 1024 * 1024
+const outputBytes = (outputs) => Buffer.byteLength(JSON.stringify(outputs), 'utf8')
+
+async function startOutputRun(app) {
+  await app.settle()
+  const request = app.run()
+  assert.ok(request)
+  const stream = executionStream()
+  request.resolve(stream.response)
+  await app.settle()
+  return {
+    emit(event) { stream.emit({ cell_id: 'cell-1', ...event }) },
+    async send(event) { stream.emit({ cell_id: 'cell-1', ...event }); await app.settle() },
+    async finish() {
+      stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: true, execution_count: 2 })
+      stream.end()
+      await app.settle()
+    },
+    end() { stream.end() },
+  }
+}
+
+function assertOutputLimit(app) {
+  const outputs = app.cell.cell.outputs
+  assert.equal(outputs.length, 1, 'an exceeded budget leaves one bounded marker')
+  assert.equal(outputs[0].output_type, 'stream')
+  assert.equal(outputs[0].name, 'stderr')
+  assert.match(outputs[0].text, /limit|truncat/i)
+  assert.ok(outputBytes(outputs) < 1024, 'the marker itself must stay bounded')
+  assert.equal(app.banner?.kind, 'info')
+  return JSON.stringify(outputs)
+}
+
+test('the output budget counts UTF-8 Chinese and emoji bytes', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  // 15 Mi UTF-16 units, but 35 MiB in UTF-8, before JSON structure.
+  await run.send({ type: 'display_data', data: { 'text/plain': '汉😀'.repeat(5 * MiB) }, metadata: {} })
+  assertOutputLimit(app)
+  await run.finish()
+})
+
+for (const field of ['error', 'metadata']) {
+  test(`the output budget includes ${field} content outside MIME data`, async (t) => {
+    const app = mountNotebook(t)
+    const run = await startOutputRun(app)
+    const event = field === 'error'
+      ? { type: 'error', ename: 'Error', evalue: 'e'.repeat(2 * MiB), traceback: ['x'.repeat(31 * MiB)] }
+      : { type: 'display_data', data: { 'text/plain': 'x' }, metadata: { extra: 'x'.repeat(33 * MiB) } }
+    await run.send(event)
+    assertOutputLimit(app)
+    await run.finish()
+  })
+}
+
+test('the exact serialized output boundary is accepted, stream merging obeys it, and clearing or rerunning resets it', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  const overhead = outputBytes([{ output_type: 'stream', name: 'stdout', text: '' }])
+  const text = 'x'.repeat(OUTPUT_CAP_BYTES - overhead)
+  await run.send({ type: 'stream', name: 'stdout', text })
+  assert.equal(outputBytes(app.cell.cell.outputs), OUTPUT_CAP_BYTES, 'the complete JSON output array defines the boundary')
+  assert.equal(app.cell.cell.outputs[0].text.length, text.length)
+  assert.equal(app.banner, null)
+  await run.send({ type: 'stream', name: 'stdout', text: 'x' })
+  const marker = assertOutputLimit(app)
+  for (const event of [
+    { type: 'stream', name: 'stderr', text: 'AFTER LIMIT' },
+    { type: 'error', ename: 'LateError', evalue: 'late', traceback: ['late'] },
+    { type: 'display_data', display_id: 'late', data: { 'text/plain': 'late' }, metadata: {} },
+    { type: 'update_display_data', display_id: 'late', data: { 'text/plain': 'later' }, metadata: {} },
+  ]) await run.send(event)
+  assert.equal(JSON.stringify(app.cell.cell.outputs), marker, 'all later output kinds remain dropped in this run')
+  await run.send({ type: 'clear_output', wait: false })
+  assert.equal(app.cell.cell.outputs.length, 0)
+  await run.send({ type: 'stream', name: 'stdout', text: 'AFTER CLEAR' })
+  assert.equal(app.cell.cell.outputs[0].text, 'AFTER CLEAR')
+  // Re-enter the truncated state so rerun must reset an active limit flag,
+  // rather than merely inheriting the already-cleared budget.
+  await run.send({ type: 'display_data', data: { 'text/plain': text }, metadata: {} })
+  assertOutputLimit(app)
+  await run.finish()
+  const rerun = await startOutputRun(app)
+  await rerun.send({ type: 'stream', name: 'stdout', text: 'NEW RUN' })
+  assert.equal(app.cell.cell.outputs.length, 1)
+  assert.equal(app.cell.cell.outputs[0].text, 'NEW RUN')
+  await rerun.finish()
+})
+
+test('display updates charge every matching display id and cannot escape a truncated cell', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  for (let index = 0; index < 2; index += 1) {
+    await run.send({ type: 'display_data', display_id: 'shared', data: { 'text/plain': 'small' }, metadata: {} })
+  }
+  await run.send({ type: 'update_display_data', display_id: 'shared', data: { 'text/plain': 'x'.repeat(17 * MiB) }, metadata: {} })
+  const marker = assertOutputLimit(app)
+  await run.send({ type: 'update_display_data', display_id: 'shared', data: { 'text/plain': 'small again' }, metadata: {} })
+  await run.send({ type: 'display_data', display_id: 'shared', data: { 'text/plain': 'new display' }, metadata: {} })
+  assert.equal(JSON.stringify(app.cell.cell.outputs), marker)
+  await run.finish()
+})
+
+test('shrinking a display releases its old data and metadata budget; unmatched updates do not consume it', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  await run.send({ type: 'display_data', display_id: 'plot', data: { 'text/plain': 'x'.repeat(2 * MiB) }, metadata: { extra: 'm'.repeat(16 * MiB) } })
+  await run.send({ type: 'update_display_data', display_id: 'plot', data: { 'text/plain': 'small' }, metadata: {} })
+  await run.send({ type: 'update_display_data', display_id: 'missing', data: { 'text/plain': 'x'.repeat(33 * MiB) }, metadata: {} })
+  await run.send({ type: 'display_data', data: { 'text/plain': 'x'.repeat(31 * MiB) }, metadata: {} })
+  const outputs = app.cell.cell.outputs
+  assert.equal(outputs.length, 2)
+  assert.equal(outputs[0].data['text/plain'], 'small')
+  assert.equal(Object.keys(outputs[0].metadata).length, 0)
+  assert.equal(outputs[1].data['text/plain'].length, 31 * MiB)
+  assert.ok(outputBytes(outputs) < OUTPUT_CAP_BYTES)
+  assert.equal(app.banner, null)
+  await run.finish()
+})
+
+test('deferred clearing follows event order even before React commits and includes display updates', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  await run.send({ type: 'stream', name: 'stdout', text: 'INITIAL' })
+  run.emit({ type: 'stream', name: 'stdout', text: 'BEFORE CLEAR' })
+  run.emit({ type: 'clear_output', wait: true })
+  run.emit({ type: 'stream', name: 'stdout', text: 'AFTER CLEAR' })
+  await settleWithoutCommit()
+  app.flush()
+  assert.equal(app.cell.cell.outputs.length, 1)
+  assert.equal(app.cell.cell.outputs[0].text, 'AFTER CLEAR', 'an earlier queued output must not consume a later deferred clear')
+
+  await run.send({ type: 'clear_output', wait: false })
+  await run.send({ type: 'display_data', display_id: 'plot', data: { 'text/plain': 'OLD PLOT' }, metadata: {} })
+  await run.send({ type: 'clear_output', wait: true })
+  await run.send({ type: 'status', execution_state: 'busy' })
+  assert.equal(app.cell.cell.outputs[0].data['text/plain'], 'OLD PLOT', 'a status event does not consume deferred clear')
+  await run.send({ type: 'update_display_data', display_id: 'plot', data: { 'text/plain': 'UPDATE' }, metadata: {} })
+  assert.equal(app.cell.cell.outputs.length, 0, 'the update consumes clear before looking for display ids to replace')
+  await run.send({ type: 'stream', name: 'stdout', text: 'FRESH' })
+  assert.equal(app.cell.cell.outputs[0].text, 'FRESH')
+  await run.finish()
+})
+
+test('queued overflow, immediate clear and fresh output remain ordered when the run finishes before a React commit', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  run.emit({ type: 'display_data', data: { 'text/plain': 'x'.repeat(33 * MiB) }, metadata: {} })
+  run.emit({ type: 'clear_output', wait: false })
+  run.emit({ type: 'stream', name: 'stdout', text: 'FRESH AFTER LIMIT' })
+  run.emit({ type: 'execute_reply', ok: true, execution_count: 2 })
+  run.end()
+  await settleWithoutCommit()
+  app.flush()
+  assert.equal(app.cell.cell.outputs.length, 1)
+  assert.equal(app.cell.cell.outputs[0].text, 'FRESH AFTER LIMIT')
+  assert.equal(app.toolbar.running, false)
+  assert.equal(app.toolbar.dirty, true)
+})
+
+test('a deferred clear resets a truncated cell on its next display update, and reload discards old budget state', async (t) => {
+  const app = mountNotebook(t)
+  const run = await startOutputRun(app)
+  const oversized = { type: 'display_data', data: { 'text/plain': 'x'.repeat(33 * MiB) }, metadata: {} }
+  await run.send(oversized)
+  const marker = assertOutputLimit(app)
+  await run.send({ type: 'clear_output', wait: true })
+  await run.send({ type: 'ping' })
+  assert.equal(JSON.stringify(app.cell.cell.outputs), marker)
+  await run.send({ type: 'update_display_data', display_id: 'missing', data: { 'text/plain': 'unused' }, metadata: {} })
+  assert.equal(app.cell.cell.outputs.length, 0)
+  await run.send({ type: 'stream', name: 'stdout', text: 'AFTER DEFERRED CLEAR' })
+  assert.equal(app.cell.cell.outputs[0].text, 'AFTER DEFERRED CLEAR')
+  await run.send(oversized)
+  assertOutputLimit(app)
+  app.reload()
+  const fresh = await startOutputRun(app)
+  run.emit({ type: 'clear_output', wait: true })
+  run.emit({ type: 'update_display_data', display_id: 'missing', data: { 'text/plain': 'STALE' }, metadata: {} })
+  run.end()
+  await fresh.send({ type: 'stream', name: 'stdout', text: 'NEW DOCUMENT' })
+  assert.equal(app.cell.cell.outputs.length, 1)
+  assert.equal(app.cell.cell.outputs[0].text, 'NEW DOCUMENT')
+  assert.equal(app.banner, null)
+  await fresh.finish()
+})
+
+test('truncating one cell in Run all does not consume the next cell budget', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const data = notebookData()
+  data.notebook.cells.push({ ...data.notebook.cells[0], id: 'cell-2', outputs: [] })
+  app.reload(data)
+  const batch = app.toolbar.onRunAll()
+  app.flush()
+  const first = executionStream()
+  app.requests('execute')[0].resolve(first.response)
+  await app.settle()
+  first.emit({ type: 'display_data', cell_id: 'cell-1', data: { 'text/plain': 'x'.repeat(33 * MiB) }, metadata: {} })
+  await app.settle()
+  assertOutputLimit(app)
+  first.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: true, execution_count: 1 })
+  first.end()
+  await app.settle()
+  assert.equal(app.requests('execute').length, 2)
+  const second = executionStream()
+  app.requests('execute')[1].resolve(second.response)
+  second.emit({ type: 'stream', cell_id: 'cell-2', name: 'stdout', text: 'SECOND CELL' })
+  second.emit({ type: 'execute_reply', cell_id: 'cell-2', ok: true, execution_count: 2 })
+  second.end()
+  await app.settle()
+  await batch
+  const save = app.save()
+  assert.equal(save.body.notebook.cells[1].outputs.length, 1)
+  assert.equal(save.body.notebook.cells[1].outputs[0].text, 'SECOND CELL')
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
 })

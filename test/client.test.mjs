@@ -549,3 +549,212 @@ test('kernel restart replies have a clear bilingual warning', async () => {
   assert.match(STRINGS.zh.kernelRestarted, /中断超时/)
   assert.match(STRINGS.zh.kernelRestarted, /变量和内核状态均已清空/)
 })
+
+function assertOutputBytes(outputsSize, outputs, label = 'output JSON bytes') {
+  assert.equal(outputsSize(outputs), Buffer.byteLength(JSON.stringify(outputs), 'utf8'), label)
+}
+
+function freezeOutputFixture(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.values(value).forEach(freezeOutputFixture)
+    Object.freeze(value)
+  }
+  return value
+}
+
+async function loadOutputReducer() {
+  const { exports } = await loadClient()
+  const api = exports.__test
+  assert.equal(typeof api.reduceOutputs, 'function')
+  assert.equal(typeof api.outputsSize, 'function')
+  assert.equal(api.MAX_CELL_OUTPUT_BYTES, 32 * 1024 * 1024)
+  return api
+}
+
+test('output byte accounting includes JSON structure, escaping, metadata and error details', async () => {
+  const { outputsSize } = await loadOutputReducer()
+  const outputs = freezeOutputFixture([
+    { output_type: 'stream', name: 'stdout', text: 'ASCII 中文 😀 " \\ \n\r\t\b\f\u0000 \ud800 \udc00' },
+    {
+      output_type: 'display_data', display_id: '显示-1',
+      data: {
+        'text/plain': ['第一行\n', 'emoji 😀'],
+        'application/json': { nested: ['"', '\\', true, false, null, 1.25, -7], '键\n': '值' },
+      },
+      metadata: { width: 640, caption: '"图"\n\ud800', nested: { controls: '\u0001\u001f' } },
+    },
+    { output_type: 'error', ename: '错误', evalue: 'bad "value" 😀', traceback: ['line\n1', '\\line\t2\udc00'] },
+    { output_type: 'execute_result', execution_count: 12, data: { 'text/plain': '42' }, metadata: {} },
+  ])
+  assertOutputBytes(outputsSize, [])
+  for (let length = 1; length <= outputs.length; length += 1) {
+    assertOutputBytes(outputsSize, outputs.slice(0, length))
+  }
+  assertOutputBytes(outputsSize, outputs)
+  assertOutputBytes(outputsSize, outputs, 're-reading a frozen snapshot must not increment its accounting')
+})
+
+test('stream merging matches UTF-8 JSON bytes for Unicode, escaping and split surrogate pairs', async () => {
+  const { reduceOutputs, outputsSize } = await loadOutputReducer()
+  const cases = [
+    ['ASCII', ' text'],
+    ['中', '文', '😀'],
+    ['"', '\\', '\n', '\r\t\b\f\u0000\u001f'],
+    ['\ud83d', '\ude00'],
+    ['prefix\ud83d', '\ude00suffix'],
+    ['\ud800', 'x'],
+    ['\udc00', '\ud800'],
+    ['\ud83d', '\ude00', '\ud83d', '\ude00'],
+    ['"\ud83d', '\ude00\\', '\ud800'],
+  ]
+  for (const chunks of cases) {
+    let outputs = []
+    let text = ''
+    for (const chunk of chunks) {
+      text += chunk
+      outputs = reduceOutputs(outputs, { type: 'stream', name: 'stdout', text: chunk })
+      assert.equal(outputs.length, 1)
+      assert.equal(outputs[0].text, text)
+      assertOutputBytes(outputsSize, outputs, 'bytes after chunk ' + JSON.stringify(chunk))
+    }
+  }
+})
+
+test('only adjacent streams with the same name merge and every event keeps exact accounting', async () => {
+  const { reduceOutputs, outputsSize } = await loadOutputReducer()
+  let outputs = []
+  for (const event of [
+    { type: 'stream', name: 'stdout', text: 'one' },
+    { type: 'stream', name: 'stdout', text: '中文' },
+    { type: 'stream', name: 'stderr', text: 'error\n' },
+    { type: 'stream', name: 'stdout', text: 'three' },
+    { type: 'stream', name: 'stdout', text: '😀' },
+  ]) {
+    outputs = reduceOutputs(outputs, event)
+    assertOutputBytes(outputsSize, outputs)
+  }
+  assert.deepEqual(outputs.map(({ name, text }) => ({ name, text })), [
+    { name: 'stdout', text: 'one中文' },
+    { name: 'stderr', text: 'error\n' },
+    { name: 'stdout', text: 'three😀' },
+  ])
+})
+
+test('display updates account for every matching slot and subtract replaced data and metadata', async () => {
+  const { reduceOutputs, outputsSize } = await loadOutputReducer()
+  let outputs = []
+  for (const event of [
+    { type: 'display_data', display_id: 'shared', data: { 'text/plain': 'first' }, metadata: { old: 'large'.repeat(20) } },
+    { type: 'display_data', display_id: 'other', data: { 'text/plain': 'untouched' }, metadata: { keep: true } },
+    { type: 'execute_result', display_id: 'shared', execution_count: 7, data: { 'text/plain': 'second' }, metadata: { old: 'different' } },
+  ]) {
+    outputs = reduceOutputs(outputs, event)
+    assertOutputBytes(outputsSize, outputs)
+  }
+  const before = freezeOutputFixture(outputs)
+  const update = freezeOutputFixture({
+    type: 'update_display_data', display_id: 'shared',
+    data: { 'text/plain': '中文😀'.repeat(30), 'application/json': { quotes: '"\\\n', lone: '\ud800' } },
+    metadata: { nested: { caption: '新值\n', values: [1, null, true] } },
+  })
+  const updated = reduceOutputs(before, update)
+  assert.deepEqual(updated[0].data, update.data)
+  assert.deepEqual(updated[2].data, update.data)
+  assert.deepEqual(updated[0].metadata, update.metadata)
+  assert.deepEqual(updated[2].metadata, update.metadata)
+  assert.deepEqual(updated[1], before[1])
+  assert.equal(updated[2].execution_count, 7)
+  assert.equal(before[0].data['text/plain'], 'first', 'updating displays must not mutate the previous snapshot')
+  assertOutputBytes(outputsSize, updated)
+  const repeated = reduceOutputs(before, update)
+  assert.deepEqual(repeated, updated)
+  assertOutputBytes(outputsSize, repeated, 'replayed display updates must not charge their bytes twice')
+  const shrunk = reduceOutputs(updated, { type: 'update_display_data', display_id: 'shared', data: {}, metadata: {} })
+  assert.ok(outputsSize(shrunk) < outputsSize(updated))
+  assertOutputBytes(outputsSize, shrunk)
+  const unmatched = reduceOutputs(shrunk, { type: 'update_display_data', display_id: 'missing', data: update.data, metadata: update.metadata })
+  assert.deepEqual(unmatched, shrunk)
+  assertOutputBytes(outputsSize, unmatched, 'unknown display IDs do not consume retained-output budget')
+})
+
+test('replaying an output reducer never mutates the input or accumulates charges', async () => {
+  const { reduceOutputs, outputsSize } = await loadOutputReducer()
+  const initial = freezeOutputFixture([{ output_type: 'stream', name: 'stdout', text: 'prefix\ud83d' }])
+  const original = JSON.stringify(initial)
+  for (const event of [
+    { type: 'stream', name: 'stdout', text: '\ude00suffix' },
+    { type: 'display_data', display_id: 'new', data: { 'text/plain': '展示' }, metadata: { key: 'value' } },
+    { type: 'execute_result', execution_count: 2, data: { 'application/json': { answer: 42 } }, metadata: {} },
+    { type: 'error', ename: 'ExampleError', evalue: '中文 "value"', traceback: ['line1\n', 'line2\\😀'] },
+  ]) {
+    freezeOutputFixture(event)
+    const first = reduceOutputs(initial, event)
+    const second = reduceOutputs(initial, event)
+    assert.deepEqual(second, first)
+    assert.equal(JSON.stringify(initial), original)
+    assertOutputBytes(outputsSize, initial)
+    assertOutputBytes(outputsSize, first)
+    assertOutputBytes(outputsSize, second)
+  }
+})
+
+test('pending clears are immutable replayable state and apply in output event order', async () => {
+  const { reduceOutputs, outputsSize } = await loadOutputReducer()
+  const baseline = freezeOutputFixture(reduceOutputs([], { type: 'stream', text: 'BEFORE', name: 'stdout' }))
+  const pending = reduceOutputs(baseline, { type: 'clear_output', wait: true })
+  assert.deepEqual(pending, baseline, 'wait=true keeps the existing visible output until the next output')
+  assertOutputBytes(outputsSize, pending)
+  const left = reduceOutputs(pending, { type: 'stream', name: 'stdout', text: 'LEFT' })
+  const right = reduceOutputs(pending, { type: 'stream', name: 'stdout', text: 'RIGHT' })
+  assert.equal(left[0].text, 'LEFT')
+  assert.equal(right[0].text, 'RIGHT')
+  assert.equal(pending[0].text, 'BEFORE')
+  assert.equal(reduceOutputs(baseline, { type: 'stream', name: 'stdout', text: 'AFTER' })[0].text, 'BEFOREAFTER',
+    'recording a pending clear must not mutate the original snapshot branch')
+  assert.deepEqual(reduceOutputs(pending, { type: 'stream', name: 'stdout', text: 'LEFT' }), left)
+  for (const outputs of [baseline, pending, left, right]) assertOutputBytes(outputsSize, outputs)
+
+  let ordered = reduceOutputs(baseline, { type: 'stream', name: 'stdout', text: 'A' })
+  ordered = reduceOutputs(ordered, { type: 'clear_output', wait: true })
+  ordered = reduceOutputs(ordered, { type: 'stream', name: 'stdout', text: 'B' })
+  assert.equal(ordered[0].text, 'B', 'the clear follows A and precedes B')
+  const cleared = reduceOutputs(pending, { type: 'clear_output', wait: false })
+  assert.deepEqual(cleared, [])
+  let afterClear = reduceOutputs(cleared, { type: 'stream', name: 'stdout', text: 'A' })
+  afterClear = reduceOutputs(afterClear, { type: 'stream', name: 'stdout', text: 'B' })
+  assert.equal(afterClear[0].text, 'AB', 'an immediate clear also cancels an older pending clear')
+  assertOutputBytes(outputsSize, cleared)
+  assertOutputBytes(outputsSize, afterClear)
+})
+
+test('streams larger than the former five-million-character cap retain data within the byte budget', async () => {
+  const { reduceOutputs, outputsSize, MAX_CELL_OUTPUT_BYTES } = await loadOutputReducer()
+  const text = 'x'.repeat(5_000_001)
+  const outputs = reduceOutputs([], { type: 'stream', name: 'stdout', text })
+  assert.equal(outputs.length, 1)
+  assert.equal(outputs[0].text, text)
+  assertOutputBytes(outputsSize, outputs)
+  assert.ok(outputsSize(outputs) < MAX_CELL_OUTPUT_BYTES)
+})
+
+test('an exact byte-limit stream accepts a split surrogate completion that reduces serialized size', async () => {
+  const { reduceOutputs, outputsSize, MAX_CELL_OUTPUT_BYTES } = await loadOutputReducer()
+  const overhead = Buffer.byteLength(JSON.stringify([{ output_type: 'stream', name: 'stdout', text: '' }]), 'utf8')
+  const text = 'x'.repeat(MAX_CELL_OUTPUT_BYTES - overhead - 6) + '\ud83d'
+  const full = reduceOutputs([], { type: 'stream', name: 'stdout', text })
+  assert.equal(full[0].text, text)
+  assert.equal(outputsSize(full), MAX_CELL_OUTPUT_BYTES)
+  assertOutputBytes(outputsSize, full)
+  const paired = reduceOutputs(full, { type: 'stream', name: 'stdout', text: '\ude00' })
+  assert.equal(paired[0].text.endsWith('😀'), true)
+  assert.equal(outputsSize(paired), MAX_CELL_OUTPUT_BYTES - 2,
+    'two escaped lone surrogates become one four-byte UTF-8 code point, a net reduction of two bytes here')
+  assertOutputBytes(outputsSize, paired)
+  const exact = reduceOutputs(paired, { type: 'stream', name: 'stdout', text: 'zz' })
+  assert.equal(outputsSize(exact), MAX_CELL_OUTPUT_BYTES)
+  assertOutputBytes(outputsSize, exact)
+  const capped = reduceOutputs(exact, { type: 'stream', name: 'stdout', text: '!' })
+  assert.ok(outputsSize(capped) <= MAX_CELL_OUTPUT_BYTES)
+  assertOutputBytes(outputsSize, capped)
+  assert.equal(full[0].text, text, 'later merging/truncation must not modify the original full snapshot')
+})
