@@ -561,6 +561,8 @@ class Bridge:
         if self.km is None or self.kc is None:
             log("warn", "no kernel to interrupt")
             return
+        if self.interrupt_requested_at is None:
+            self.interrupt_requested_at = time.monotonic()
         # Drop cells queued behind the running one: an interrupt cancels the
         # whole batch, not just the head (the client sends run-all as one
         # batch so the bridge owns the queue across browser reconnects).
@@ -572,7 +574,6 @@ class Bridge:
             # when the interrupted cell stays silent past the grace period.
             msg = self.kc.session.msg("interrupt_request", content={})
             self.kc.control_channel.send(msg)
-            self.interrupt_requested_at = time.monotonic()
             log("info", "interrupt sent")
         except Exception as error:
             log("error", "interrupt failed: %s" % (error,))

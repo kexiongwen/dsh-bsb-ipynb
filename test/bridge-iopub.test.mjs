@@ -1,25 +1,15 @@
 import assert from 'node:assert/strict'
-import { execFile, spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
+import { findPython } from './python-helper.mjs'
 
 const runFile = promisify(execFile)
 const fixture = fileURLToPath(new URL('./bridge_iopub.py', import.meta.url))
 const bridge = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
-const candidates = [...new Set([
-  process.env.DSH_IPYNB_TEST_PYTHON,
-  '/opt/miniconda3/bin/python3',
-  'python3',
-  'python',
-].filter(Boolean))]
-
-function supports(executable, imports) {
-  return spawnSync(executable, ['-c', imports], { stdio: 'ignore', timeout: 10_000 }).status === 0
-}
-
-const python = candidates.find((candidate) => supports(candidate, 'import sys'))
-const kernelPython = candidates.find((candidate) => supports(candidate, 'import jupyter_client, ipykernel'))
+const python = findPython()
+const kernelPython = findPython('jupyter_client, ipykernel')
 
 async function runFixture(executable, ...args) {
   try {

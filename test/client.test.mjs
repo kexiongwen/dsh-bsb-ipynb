@@ -187,7 +187,14 @@ test('markdown image resolver rewrites local images and resolves attachments', a
   const { exports } = await loadClient()
   const { renderMarkdownWithImages } = exports.__test
   const html = renderMarkdownWithImages('![plot](img/plot.png)', () => '/sidebar/file?path=%2Fws%2Fimg%2Fplot.png')
-  assert.match(html, /src="\/sidebar\/file\?path=%2Fws%2Fimg%2Fplot\.png"/)
+  assert.equal(html, '<p><img src="/sidebar/file?path=%2Fws%2Fimg%2Fplot.png" alt="plot" loading="lazy"></p>')
+})
+
+test('markdown image resolver leaves no tag suffix for missing images', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdownWithImages } = exports.__test
+  const html = renderMarkdownWithImages('![plot](missing.png)', () => null)
+  assert.equal(html, '<p><span class="dsh-bsb-ipynb-missing-image">plot</span></p>')
 })
 
 test('html sanitizer falls back to escaping when DOMParser is unavailable', async () => {

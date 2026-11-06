@@ -1,21 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
-import { mkdtemp } from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KernelManager, exceedsMaxLineBytes } from '../lib/kernel.js'
+import { findPython, tempDir } from './python-helper.mjs'
 
 const bridgePath = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
-const python = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
-
-function hasJupyter(executable) {
-  const result = spawnSync(executable, ['-c', 'import jupyter_client, ipykernel'], { timeout: 10_000 })
-  return result.status === 0
-}
-
-const skip = !hasJupyter(python)
+const python = findPython('jupyter_client, ipykernel')
+const skip = !python && 'Requires jupyter_client/ipykernel'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -42,14 +34,14 @@ async function waitFor(predicate, ms = 5_000) {
   throw new Error('condition was not met in time')
 }
 
-async function makeTarget(name) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-kernel-'))
+async function makeTarget(t, name) {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-kernel-')
   return path.join(dir, name)
 }
 
-test('a second execute is rejected without stealing the first listener', { skip }, async () => {
+test('a second execute is rejected without stealing the first listener', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('overlap.ipynb')
+  const target = await makeTarget(t, 'overlap.ipynb')
   try {
     const entry = await manager.getOrStart(target, python)
     const firstEvents = []
@@ -67,9 +59,9 @@ test('a second execute is rejected without stealing the first listener', { skip 
   }
 })
 
-test('restart settles a running cell and leaves a usable kernel', { skip }, async () => {
+test('restart settles a running cell and leaves a usable kernel', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('restart.ipynb')
+  const target = await makeTarget(t, 'restart.ipynb')
   try {
     const entry = await manager.getOrStart(target, python)
     const events = []
@@ -86,10 +78,10 @@ test('restart settles a running cell and leaves a usable kernel', { skip }, asyn
   }
 })
 
-test('shutdown and os._exit settle the running cell', { skip }, async () => {
+test('shutdown and os._exit settle the running cell', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const firstTarget = await makeTarget('shutdown.ipynb')
-  const secondTarget = await makeTarget('exit.ipynb')
+  const firstTarget = await makeTarget(t, 'shutdown.ipynb')
+  const secondTarget = await makeTarget(t, 'exit.ipynb')
   try {
     const entry = await manager.getOrStart(firstTarget, python)
     const run = entry.run('c1', 'import time\ntime.sleep(5)', () => {})
@@ -113,9 +105,9 @@ test('shutdown and os._exit settle the running cell', { skip }, async () => {
   }
 })
 
-test('a broken stdin pipe is handled instead of crashing the host', { skip }, async () => {
+test('a broken stdin pipe is handled instead of crashing the host', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('epipe.ipynb')
+  const target = await makeTarget(t, 'epipe.ipynb')
   try {
     const entry = await manager.getOrStart(target, python)
     entry.proc.stdin.destroy(new Error('write EPIPE'))
@@ -128,9 +120,9 @@ test('a broken stdin pipe is handled instead of crashing the host', { skip }, as
   }
 })
 
-test('a synchronous stdin write failure clears the busy execution state', { skip }, async () => {
+test('a synchronous stdin write failure clears the busy execution state', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('write-failure.ipynb')
+  const target = await makeTarget(t, 'write-failure.ipynb')
   let stdin
   let originalWrite
   try {
@@ -150,9 +142,9 @@ test('a synchronous stdin write failure clears the busy execution state', { skip
   }
 })
 
-test('concurrent getOrStart creates only one kernel entry', { skip }, async () => {
+test('concurrent getOrStart creates only one kernel entry', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('shared.ipynb')
+  const target = await makeTarget(t, 'shared.ipynb')
   try {
     const [first, second] = await Promise.all([
       manager.getOrStart(target, python),
@@ -169,9 +161,9 @@ test('concurrent getOrStart creates only one kernel entry', { skip }, async () =
   }
 })
 
-test('exec ids keep a restarted cell from stealing the next run', { skip }, async () => {
+test('exec ids keep a restarted cell from stealing the next run', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('exec-id.ipynb')
+  const target = await makeTarget(t, 'exec-id.ipynb')
   try {
     const entry = await manager.getOrStart(target, python)
     const oldEvents = []
@@ -200,9 +192,9 @@ test('exec ids keep a restarted cell from stealing the next run', { skip }, asyn
   }
 })
 
-test('an oversized stdout line aborts the running cell and restarts the kernel', { skip }, async () => {
+test('an oversized stdout line aborts the running cell and restarts the kernel', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget('oversize.ipynb')
+  const target = await makeTarget(t, 'oversize.ipynb')
   try {
     const entry = await manager.getOrStart(target, python)
     const events = []

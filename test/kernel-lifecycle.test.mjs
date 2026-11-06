@@ -305,6 +305,57 @@ test('shutdown during initial startup rejects waiting restarts without sending r
   assert.equal(h.activeReadyTimers().length, 0)
 })
 
+test('a disposed manager rejects new starts without spawning a process', async (t) => {
+  const h = harness(t)
+  await h.manager.disposeAll()
+  await assert.rejects(
+    h.manager.getOrStart(h.target, '/controlled/python'),
+    (error) => error.code === 'kernel-unavailable' && /disposed/.test(error.message),
+  )
+  assert.equal(h.processes.length, 0)
+  assert.equal(h.manager.kernelCount, 0)
+})
+
+test('dispose cleans up an initial start whose readiness has just completed', async (t) => {
+  const h = harness(t)
+  const { started, proc } = h.start()
+  const startup = observe(started)
+  proc.event({ type: 'ready' })
+  // Dispose before the startEntry continuation can consume the resolved ready
+  // wait. The late completion must be shut down, not returned to its caller.
+  await h.manager.disposeAll()
+  assert.equal(startup.status, 'rejected')
+  assert.match(startup.error.message, /disposed/)
+  assert.equal(proc.commands.some((command) => command.op === 'shutdown'), true)
+  assert.equal(proc.exitCode, 0)
+  assert.equal(h.manager.peek(h.target), null)
+  assert.equal(h.processes.length, 1)
+  assert.equal(h.activeReadyTimers().length, 0)
+})
+
+test('dispose during an interpreter switch prevents a late replacement spawn', async (t) => {
+  const h = harness(t)
+  const first = await h.startReady()
+  // Hold the old process in its shutdown wait until both operations are in
+  // flight, reproducing the await boundary in startEntry deterministically.
+  first.proc.stdin.write = (line) => {
+    first.proc.commands.push(JSON.parse(line))
+    return true
+  }
+  const switching = observe(h.manager.getOrStart(h.target, '/controlled/other-python'))
+  await flush()
+  assert.equal(first.entry.stopping, true)
+  const disposing = h.manager.disposeAll()
+  await flush()
+  assert.equal(h.processes.length, 1)
+  first.proc.exit()
+  await disposing
+  assert.equal(switching.status, 'rejected')
+  assert.match(switching.error.message, /disposed/)
+  assert.equal(h.processes.length, 1, 'the interpreter switch must not resume after disposal')
+  assert.equal(h.manager.peek(h.target), null)
+})
+
 test('failed startup rejects waiting restarts even while the failed process has not exited', async (t) => {
   const h = harness(t, { exitOnKill: false })
   const { started, entry, proc } = h.start()

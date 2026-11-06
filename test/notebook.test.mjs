@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
-import { mkdtemp, readFile, writeFile, readdir, rm, truncate } from 'node:fs/promises'
-import os from 'node:os'
+import { readFile, writeFile, readdir, truncate } from 'node:fs/promises'
 import path from 'node:path'
 import {
   NOTEBOOK_CAP_BYTES,
@@ -15,10 +14,7 @@ import {
   sha256,
 } from '../lib/notebook.js'
 import { errorPayload } from '../lib/json.js'
-
-async function tempDir() {
-  return mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-test-'))
-}
+import { findPython, tempDir } from './python-helper.mjs'
 
 test('empty notebook is nbformat 4.5 with one code cell', () => {
   const notebook = emptyNotebook()
@@ -100,8 +96,8 @@ test('too-large notebooks are rejected', () => {
   assert.throws(() => parseNotebookBytes(buffer), (error) => error.code === 'too-large')
 })
 
-test('readNotebookFile reads real files', async () => {
-  const dir = await tempDir()
+test('readNotebookFile reads real files', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const text = serializeNotebook(emptyNotebook())
   await writeFile(file, text)
@@ -110,8 +106,8 @@ test('readNotebookFile reads real files', async () => {
   assert.equal(result.version, sha256(Buffer.from(text)))
 })
 
-test('saveNotebookFile writes atomically and changes the version', async () => {
-  const dir = await tempDir()
+test('saveNotebookFile writes atomically and changes the version', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
   await writeFile(file, original)
@@ -125,8 +121,8 @@ test('saveNotebookFile writes atomically and changes the version', async () => {
   assert.deepEqual(entries, ['demo.ipynb'])
 })
 
-test('concurrent saves with the same baseVersion conflict instead of overwriting', async () => {
-  const dir = await tempDir()
+test('concurrent saves with the same baseVersion conflict instead of overwriting', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const read = await readNotebookFile(file)
@@ -149,8 +145,8 @@ test('concurrent saves with the same baseVersion conflict instead of overwriting
   assert.deepEqual(entries, ['demo.ipynb'])
 })
 
-test('saveNotebookFile rejects a stale baseVersion', async () => {
-  const dir = await tempDir()
+test('saveNotebookFile rejects a stale baseVersion', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const read = await readNotebookFile(file)
@@ -162,8 +158,8 @@ test('saveNotebookFile rejects a stale baseVersion', async () => {
   )
 })
 
-test('save validates the notebook before reporting a stale version', async () => {
-  const dir = await tempDir()
+test('save validates the notebook before reporting a stale version', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const read = await readNotebookFile(file)
@@ -175,8 +171,8 @@ test('save validates the notebook before reporting a stale version', async () =>
   )
 })
 
-test('saveNotebookFile requires a valid baseVersion', async () => {
-  const dir = await tempDir()
+test('saveNotebookFile requires a valid baseVersion', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   await assert.rejects(
@@ -185,8 +181,8 @@ test('saveNotebookFile requires a valid baseVersion', async () => {
   )
 })
 
-test('saveNotebookFile maps malformed notebooks to bad-request', async () => {
-  const dir = await tempDir()
+test('saveNotebookFile maps malformed notebooks to bad-request', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
   await writeFile(file, original)
@@ -206,8 +202,8 @@ test('saveNotebookFile maps malformed notebooks to bad-request', async () => {
   assert.equal(await readFile(file, 'utf8'), original)
 })
 
-test('saveNotebookFile leaves unexpected serialization errors as internal failures', async () => {
-  const dir = await tempDir()
+test('saveNotebookFile leaves unexpected serialization errors as internal failures', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
   await writeFile(file, original)
@@ -337,8 +333,8 @@ test('examples/demo.ipynb serializes to an nbformat-legal notebook', async () =>
   assert.equal(parsed.cells[6].outputs[0].execution_count, undefined)
 })
 
-test('saveNotebookFile caps the on-disk file before reading it', async () => {
-  const dir = await tempDir()
+test('saveNotebookFile caps the on-disk file before reading it', async (t) => {
+  const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, '{}')
   await truncate(file, NOTEBOOK_CAP_BYTES + 1)
@@ -491,8 +487,7 @@ test('execution counts preserve nonnegative integers and normalize other values 
 })
 
 test('reading and saving malformed MIME content repairs it without losing valid representations', async (t) => {
-  const dir = await tempDir()
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  const dir = await tempDir(t)
   const file = path.join(dir, 'mixed.ipynb')
   const malformed = malformedMimeNotebook()
   const original = JSON.stringify(malformed)
@@ -511,14 +506,13 @@ test('reading and saving malformed MIME content repairs it without losing valid 
   assert.deepEqual(await readdir(dir), ['mixed.ipynb'])
 })
 
-const schemaPython = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
-const hasNbformat = spawnSync(schemaPython, ['-c', 'import nbformat'], { stdio: 'ignore', timeout: 10_000 }).status === 0
+const schemaPython = findPython('nbformat')
+const hasNbformat = Boolean(schemaPython)
 
 test('real nbformat validation accepts repaired serialized and saved MIME fixtures', {
-  skip: !hasNbformat && 'Requires nbformat in DSH_IPYNB_TEST_PYTHON',
+  skip: !hasNbformat && 'Requires nbformat',
 }, async (t) => {
-  const dir = await tempDir()
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  const dir = await tempDir(t)
   const file = path.join(dir, 'schema.ipynb')
   const malformed = malformedMimeNotebook()
   const original = JSON.stringify(malformed)

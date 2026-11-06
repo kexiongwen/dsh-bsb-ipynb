@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -10,10 +9,10 @@ import { KernelManager } from '../lib/kernel.js'
 import { emptyNotebook } from '../lib/notebook.js'
 import { discoverInterpreters } from '../lib/env.js'
 import { registerIpynbRoutes } from '../lib/routes.js'
+import { findPython } from './python-helper.mjs'
 
-const python = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
-const hasJupyter =
-  spawnSync(python, ['-c', 'import jupyter_client, ipykernel'], { stdio: 'ignore' }).status === 0
+const python = findPython('jupyter_client, ipykernel')
+const hasJupyter = Boolean(python)
 const bridgePath = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
 
 function makeResponse() {
@@ -64,7 +63,10 @@ function parseNdjson(chunks) {
     .map((line) => JSON.parse(line))
 }
 
-test('execute route streams a real kernel run to completion', { skip: !hasJupyter, timeout: 60_000 }, async () => {
+test('execute route streams a real kernel run to completion', {
+  skip: !hasJupyter && 'Requires jupyter_client/ipykernel',
+  timeout: 60_000,
+}, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-bsb-ipynb-e2e-'))
   const notebookPath = path.join(dir, 'e2e.ipynb')
   await writeFile(notebookPath, JSON.stringify(emptyNotebook()), 'utf8')

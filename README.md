@@ -105,7 +105,7 @@ python3 -m py_compile python/bridge.py
 node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 ```
 
-`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；notebook 的真实 schema 验证测试需要 `nbformat`，缺少时同样跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器；未设置时默认使用 `/opt/miniconda3/bin/python3`，该路径不存在时相关测试会**静默跳过**（CI 等环境建议显式设置该变量）。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例只在大小写不敏感的文件系统（如 macOS APFS）上运行，其他平台会跳过。
+`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；notebook 的真实 schema 验证测试需要 `nbformat`，缺少时同样跳过。测试按 `DSH_IPYNB_TEST_PYTHON`、`/opt/miniconda3/bin/python3`、PATH 上的 `python3`/`python` 顺序探测；CI 等环境建议显式设置 `DSH_IPYNB_TEST_PYTHON`、确保依赖可用，并检查是否出现非预期跳过。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例只在大小写不敏感的文件系统（如 macOS APFS）上运行，其他平台会跳过。
 
 ## 可靠性
 

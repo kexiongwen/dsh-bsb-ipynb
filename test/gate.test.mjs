@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
-import os from 'node:os'
+import { mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { tempDir } from './python-helper.mjs'
 import {
   assertNotebookPath,
   isInside,
@@ -12,8 +12,8 @@ import {
   resolveWorkspace,
 } from '../lib/gate.js'
 
-async function workspace() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-gate-'))
+async function workspace(t) {
+  const root = await tempDir(t, 'dsh-bsb-ipynb-gate-')
   const dir = path.join(root, 'project')
   await mkdir(dir)
   await writeFile(path.join(dir, 'a.ipynb'), '{}')
@@ -38,13 +38,13 @@ test('isInside accepts the root and descendants only', () => {
   assert.equal(isInside('/tmp/a', '/tmp'), false)
 })
 
-test('resolveWorkspace resolves the session cwd', async () => {
-  const { dir } = await workspace()
+test('resolveWorkspace resolves the session cwd', async (t) => {
+  const { dir } = await workspace(t)
   assert.equal(await resolveWorkspace(ctxFor(dir), 's1'), await realpath(dir))
 })
 
-test('resolveWorkspace follows the effective working directory', async () => {
-  const { root, dir } = await workspace()
+test('resolveWorkspace follows the effective working directory', async (t) => {
+  const { root, dir } = await workspace(t)
   const other = path.join(root, 'other')
   await mkdir(other)
   const ctx = ctxFor(dir)
@@ -52,8 +52,8 @@ test('resolveWorkspace follows the effective working directory', async () => {
   assert.equal(await resolveWorkspace(ctx, 's1'), await realpath(other))
 })
 
-test('resolveWorkspace falls back to header.cwd when the optional service fails', async () => {
-  const { dir } = await workspace()
+test('resolveWorkspace falls back to header.cwd when the optional service fails', async (t) => {
+  const { dir } = await workspace(t)
   const ctx = ctxFor(dir)
   ctx.get = () => {
     throw new Error('service unavailable')
@@ -66,8 +66,8 @@ test('resolveWorkspace rejects missing sessions and cwd', async () => {
   assert.rejects(resolveWorkspace(ctxFor(''), 's1'), (error) => error.code === 'workspace-unknown')
 })
 
-test('resolveTarget accepts relative and absolute workspace paths', async () => {
-  const { dir } = await workspace()
+test('resolveTarget accepts relative and absolute workspace paths', async (t) => {
+  const { dir } = await workspace(t)
   const cwd = await resolveWorkspace(ctxFor(dir), 's1')
   const rel = await resolveTarget(cwd, 'a.ipynb')
   assert.equal(rel.target, path.join(cwd, 'a.ipynb'))
@@ -75,24 +75,24 @@ test('resolveTarget accepts relative and absolute workspace paths', async () => 
   assert.equal(abs.target, path.join(cwd, 'a.ipynb'))
 })
 
-test('resolveTarget rejects traversal and outside absolute paths', async () => {
-  const { root, dir } = await workspace()
+test('resolveTarget rejects traversal and outside absolute paths', async (t) => {
+  const { root, dir } = await workspace(t)
   await writeFile(path.join(root, 'outside.ipynb'), '{}')
   const cwd = await resolveWorkspace(ctxFor(dir), 's1')
   await assert.rejects(resolveTarget(cwd, '../outside.ipynb'), (error) => error.code === 'path-outside-root')
   await assert.rejects(resolveTarget(cwd, path.join(root, 'outside.ipynb')), (error) => error.code === 'path-outside-root')
 })
 
-test('resolveTarget rejects symlink escapes', async () => {
-  const { root, dir } = await workspace()
+test('resolveTarget rejects symlink escapes', async (t) => {
+  const { root, dir } = await workspace(t)
   await writeFile(path.join(root, 'secret.ipynb'), '{}')
   await symlink(root, path.join(dir, 'escape'))
   const cwd = await resolveWorkspace(ctxFor(dir), 's1')
   await assert.rejects(resolveTarget(cwd, 'escape/secret.ipynb'), (error) => error.code === 'path-outside-root')
 })
 
-test('resolveExistingFile requires an existing file', async () => {
-  const { dir } = await workspace()
+test('resolveExistingFile requires an existing file', async (t) => {
+  const { dir } = await workspace(t)
   const found = await resolveExistingFile(ctxFor(dir), 's1', 'a.ipynb')
   assert.equal(found.target, path.join(await realpath(dir), 'a.ipynb'))
   await assert.rejects(resolveExistingFile(ctxFor(dir), 's1', 'missing.ipynb'), (error) => error.code === 'not-found')
@@ -103,8 +103,8 @@ test('assertNotebookPath enforces the extension', async () => {
   assert.throws(() => assertNotebookPath('/tmp/a.txt'), (error) => error.code === 'not-notebook')
 })
 
-test('resolveControlTarget accepts a deleted notebook inside the workspace', async () => {
-  const { root, dir } = await workspace()
+test('resolveControlTarget accepts a deleted notebook inside the workspace', async (t) => {
+  const { root, dir } = await workspace(t)
   const cwd = await resolveWorkspace(ctxFor(dir), 's1')
   assert.equal(await resolveControlTarget(ctxFor(dir), 's1', 'a.ipynb'), path.join(cwd, 'a.ipynb'))
   await rm(path.join(dir, 'a.ipynb'))
@@ -140,8 +140,7 @@ test('resolveControlTarget accepts a deleted notebook inside the workspace', asy
 })
 
 test('control paths retain the canonical target of dangling file and directory symlinks', async (t) => {
-  const { root, dir } = await workspace()
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const { root, dir } = await workspace(t)
   const cwd = await realpath(dir)
   await mkdir(path.join(dir, 'notebooks'))
   const target = path.join(cwd, 'notebooks', 'real.ipynb')
@@ -165,8 +164,7 @@ test('control paths retain the canonical target of dangling file and directory s
 })
 
 test('dangling symlink targets are still checked against the workspace and notebook extension', async (t) => {
-  const { root, dir } = await workspace()
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const { root, dir } = await workspace(t)
   await symlink('../missing.ipynb', path.join(dir, 'escape.ipynb'))
   await symlink(path.join(root, 'missing-directory'), path.join(dir, 'escape-directory'))
   for (const alias of ['escape.ipynb', 'escape-directory/nb.ipynb']) {
@@ -179,8 +177,7 @@ test('dangling symlink targets are still checked against the workspace and noteb
 })
 
 test('missing-target resolution expands symlinks before parent components', async (t) => {
-  const { root, dir } = await workspace()
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const { root, dir } = await workspace(t)
   const outside = path.join(root, 'outside', 'nested')
   await mkdir(outside, { recursive: true })
   await symlink(outside, path.join(dir, 'jump'))
@@ -196,8 +193,7 @@ test('missing-target resolution expands symlinks before parent components', asyn
 })
 
 test('control paths reject symlink cycles and non-directory ancestors', async (t) => {
-  const { root, dir } = await workspace()
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const { root, dir } = await workspace(t)
   await symlink('two.ipynb', path.join(dir, 'one.ipynb'))
   await symlink('one.ipynb', path.join(dir, 'two.ipynb'))
   await symlink('a.ipynb/child.ipynb', path.join(dir, 'invalid.ipynb'))
@@ -212,8 +208,7 @@ test('control paths reject symlink cycles and non-directory ancestors', async (t
 })
 
 test('missing-target resolution still rejects an existing directory named as a notebook', async (t) => {
-  const { root, dir } = await workspace()
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const { root, dir } = await workspace(t)
   await mkdir(path.join(dir, 'folder.ipynb'))
   await symlink('missing/../folder.ipynb', path.join(dir, 'alias.ipynb'))
   await assert.rejects(resolveControlTarget(ctxFor(dir), 's1', 'alias.ipynb'),

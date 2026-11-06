@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFile, spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -7,13 +7,11 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { test } from 'node:test'
 import { KernelManager } from '../lib/kernel.js'
+import { findPython } from './python-helper.mjs'
 
 const execFileAsync = promisify(execFile)
-const basePython = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
-const hasJupyter = spawnSync(basePython, ['-c', 'import jupyter_client, ipykernel'], {
-  stdio: 'ignore',
-  timeout: 10_000,
-}).status === 0
+const basePython = findPython('jupyter_client, ipykernel')
+const hasJupyter = Boolean(basePython)
 const bridgePath = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
 const moduleName = 'dsh_ipynb_selected_env_probe'
 const specEnvironmentMarker = `DSH_IPYNB_TEST_KERNELSPEC_${process.pid}`
@@ -61,7 +59,7 @@ function assertSelectedEnvironment(actual, environment, phase) {
 }
 
 test('selected Python controls real kernels despite a conflicting kernelspec, across restart and environment switches', {
-  skip: !hasJupyter && 'Requires jupyter_client/ipykernel in DSH_IPYNB_TEST_PYTHON',
+  skip: !hasJupyter && 'Requires jupyter_client/ipykernel',
   timeout: 150_000,
 }, async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'dsh-kernel-interpreter-'))

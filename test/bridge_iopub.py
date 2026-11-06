@@ -460,6 +460,57 @@ class IOPubTests(unittest.TestCase):
         self.assertEqual(self.bridge.pending, {})
         self.assertEqual(self.bridge.idle_events, {})
 
+    def test_interrupt_deadline_starts_before_send_and_survives_retries(self):
+        self.client = SilentClient()
+        self.bridge.kc = self.client
+        bridge = self.bridge
+        run = self.start_run()
+        self.wait(self.client.shell_entered)
+        clock = [10.0]
+        attempts = []
+        restarts = []
+        original_monotonic = bridge_module.time.monotonic
+        original_restart = bridge.restart
+
+        class Session:
+            def msg(self, _msg_type, content):
+                return content
+
+        class Control:
+            def send(self, _msg):
+                attempts.append((clock[0], bridge.interrupt_requested_at))
+                if len(attempts) == 3:
+                    raise RuntimeError("controlled interrupt failure")
+
+        def restart():
+            restarts.append(clock[0] - bridge.interrupt_requested_at)
+            return True
+
+        self.client.session = Session()
+        self.client.control_channel = Control()
+        bridge.restart = restart
+        bridge_module.time.monotonic = lambda: clock[0]
+        try:
+            # The third send fails. All attempts must retain the first request's
+            # deadline so the silent execution still reaches automatic recovery.
+            for requested_at in (10.0, 11.0, 12.0):
+                clock[0] = requested_at
+                bridge.interrupt()
+            clock[0] = 13.01
+            self.join(run)
+        finally:
+            bridge_module.time.monotonic = original_monotonic
+            bridge.restart = original_restart
+        self.assertEqual([requested_at for requested_at, _deadline in attempts], [10.0, 11.0, 12.0])
+        self.assertEqual([deadline for _requested_at, deadline in attempts], [10.0, 10.0, 10.0],
+                         "the deadline must exist before send and never move on retries")
+        self.assertEqual(len(restarts), 1)
+        self.assertAlmostEqual(restarts[0], 3.01)
+        replies = [event for event in self.events if event["type"] == "execute_reply"]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0]["status"], "interrupted")
+        self.assertTrue(replies[0]["kernel_restarted"])
+
     def test_concurrent_restarts_share_one_restart_and_echo_operation_ids(self):
         entered = threading.Event()
         release = threading.Event()

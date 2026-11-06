@@ -366,10 +366,10 @@ window.__ModuleLoader__.load({
     function renderMarkdownWithImages(source, resolveImage) {
       let html = renderMarkdown(source)
       if (typeof resolveImage !== 'function') return html
-      return html.replace(/<img src="([^"]*)" alt="([^"]*)"/g, (match, src, alt) => {
+      return html.replace(/<img src="([^"]*)" alt="([^"]*)" loading="lazy">/g, (match, src, alt) => {
         const resolved = resolveImage(src)
         if (!resolved) return '<span class="dsh-bsb-ipynb-missing-image">' + alt + '</span>'
-        return '<img src="' + escapeHtml(resolved) + '" alt="' + alt + '" loading="lazy"'
+        return '<img src="' + escapeHtml(resolved) + '" alt="' + alt + '" loading="lazy">'
       })
     }
 

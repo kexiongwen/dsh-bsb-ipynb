@@ -1,19 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { spawn } from 'node:child_process'
-import { spawnSync } from 'node:child_process'
-import { mkdtemp } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { findPython, tempDir } from './python-helper.mjs'
 
 const bridge = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
-const python = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
-
-function hasJupyter(executable) {
-  const result = spawnSync(executable, ['-c', 'import jupyter_client, ipykernel'], { timeout: 10_000 })
-  return result.status === 0
-}
+const python = findPython('jupyter_client, ipykernel')
 
 function startBridge(cwd) {
   const proc = spawn(python, ['-u', bridge, '--cwd', cwd], {
@@ -84,8 +76,8 @@ async function shutdown(proc) {
   })
 }
 
-test('bridge executes code, preserves variables and reports errors', { skip: !hasJupyter(python) }, async () => {
-  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-'))
+test('bridge executes code, preserves variables and reports errors', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-')
   const context = startBridge(cwd)
   try {
     await context.waitFor((event) => event.type === 'ready')
@@ -149,8 +141,8 @@ test('bridge executes code, preserves variables and reports errors', { skip: !ha
   }
 })
 
-test('bridge rejects non-object JSON commands and continues executing', { skip: !hasJupyter(python) }, async () => {
-  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-invalid-'))
+test('bridge rejects non-object JSON commands and continues executing', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-invalid-')
   const context = startBridge(cwd)
   try {
     await context.waitFor((event) => event.type === 'ready')
@@ -186,8 +178,8 @@ test('bridge rejects non-object JSON commands and continues executing', { skip: 
   }
 })
 
-test('bridge marks interrupt-timeout restarts and clears old kernel state', { skip: !hasJupyter(python) }, async () => {
-  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-restart-'))
+test('bridge marks interrupt-timeout restarts and clears old kernel state', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-restart-')
   const context = startBridge(cwd)
   try {
     await context.waitFor((event) => event.type === 'ready')
@@ -244,8 +236,8 @@ test('bridge marks interrupt-timeout restarts and clears old kernel state', { sk
   }
 })
 
-test('bridge tags every execution event with its exec_id and fails input() fast', { skip: !hasJupyter(python) }, async () => {
-  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-exec-'))
+test('bridge tags every execution event with its exec_id and fails input() fast', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-exec-')
   const context = startBridge(cwd)
   try {
     await context.waitFor((event) => event.type === 'ready')

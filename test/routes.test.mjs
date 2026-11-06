@@ -7,6 +7,7 @@ import { registerIpynbRoutes } from '../lib/routes.js'
 import { readJsonBody } from '../lib/json.js'
 import { discoverInterpreters } from '../lib/env.js'
 import { NOTEBOOK_CAP_BYTES, emptyNotebook, serializeNotebook, sha256 } from '../lib/notebook.js'
+import { tempDir } from './python-helper.mjs'
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
 function makeRes() {
@@ -209,8 +210,8 @@ test('non-JSON POST bodies are rejected', async () => {
   assert.equal(json.error.code, 'bad-request')
 })
 
-test('JSON Content-Type accepts parameters but rejects look-alike media types', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('JSON Content-Type accepts parameters but rejects look-alike media types', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   for (const contentType of ['application/json; charset=utf-8', 'Application/JSON ; charset=UTF-8']) {
     const { state, json } = await invoke(
@@ -243,8 +244,8 @@ test('JSON Content-Type accepts parameters but rejects look-alike media types', 
   }
 })
 
-test('read rejects paths outside the session workspace', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('read rejects paths outside the session workspace', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const ctx = makeCtx({ cwd: dir })
   const { state, json } = await invoke(
     ctx,
@@ -255,8 +256,8 @@ test('read rejects paths outside the session workspace', async () => {
   assert.equal(json.error.code, 'path-outside-root')
 })
 
-test('read returns the parsed notebook and its version', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('read returns the parsed notebook and its version', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const { state, json } = await invoke(
@@ -270,8 +271,8 @@ test('read returns the parsed notebook and its version', async () => {
   assert.equal(json.value.notebook.cells.length, 1)
 })
 
-test('save reports a write conflict for a stale baseVersion', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('save reports a write conflict for a stale baseVersion', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const notebook = emptyNotebook()
@@ -290,8 +291,8 @@ test('save reports a write conflict for a stale baseVersion', async () => {
   assert.equal(json.error.details.version.length, 64)
 })
 
-test('save writes a fresh version when baseVersion matches', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('save writes a fresh version when baseVersion matches', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const read = await invoke(
@@ -314,8 +315,8 @@ test('save writes a fresh version when baseVersion matches', async () => {
   assert.notEqual(json.value.version, read.json.value.version)
 })
 
-test('save rejects malformed client notebooks without modifying the file', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('save rejects malformed client notebooks without modifying the file', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
   await writeFile(file, original)
@@ -386,7 +387,7 @@ test('execute streams NDJSON events', async (t) => {
     t.skip('no Python interpreter with jupyter_client/ipykernel')
     return
   }
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   const kernels = makeKernels()
   const { state, text } = await invoke(
@@ -411,8 +412,8 @@ test('execute streams NDJSON events', async (t) => {
   assert.equal(kernels.calls[0].python, discovered.default)
 })
 
-test('execute validates the notebook path before opening a stream', async () => {
-  const base = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('execute validates the notebook path before opening a stream', async (t) => {
+  const base = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const dir = path.join(base, 'session')
   await mkdir(dir)
   await writeFile(path.join(base, 'outside.ipynb'), serializeNotebook(emptyNotebook()))
@@ -459,8 +460,8 @@ test('interrupt needs a running kernel; shutdown without one is a no-op', async 
   }
 })
 
-test('execute waits for drain instead of dropping the final reply', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('execute waits for drain instead of dropping the final reply', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   const ctx = makeCtx({ cwd: dir })
   const kernels = makeKernels()
@@ -515,8 +516,8 @@ test('execute waits for drain instead of dropping the final reply', async () => 
   assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
 })
 
-test('status, interrupt, restart and shutdown work after the notebook is deleted', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('status, interrupt, restart and shutdown work after the notebook is deleted', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const kernels = makeKernels()
@@ -554,8 +555,8 @@ test('status, interrupt, restart and shutdown work after the notebook is deleted
   }
 })
 
-test('save rejects a notebook that grew past the cap on disk', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('save rejects a notebook that grew past the cap on disk', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
   await truncate(file, NOTEBOOK_CAP_BYTES + 1)
@@ -577,8 +578,8 @@ test('save rejects a notebook that grew past the cap on disk', async () => {
   assert.equal(json.error.code, 'too-large')
 })
 
-test('execute does nothing when the client disconnects while the kernel starts', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('execute does nothing when the client disconnects while the kernel starts', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   const kernels = makeKernels()
   let resolveStart
@@ -613,8 +614,8 @@ test('execute does nothing when the client disconnects while the kernel starts',
   assert.equal(kernels.calls.filter((call) => call.interrupt).length, 0)
 })
 
-test('execute interrupts an active run when the client disconnects', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('execute interrupts an active run when the client disconnects', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   const kernels = makeKernels()
   let resumeRun
@@ -650,8 +651,8 @@ test('execute interrupts an active run when the client disconnects', async () =>
   await pending
 })
 
-test('a close after a normal execute does not interrupt the kernel', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+test('a close after a normal execute does not interrupt the kernel', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   const kernels = makeKernels()
   const ctx = makeCtx({ cwd: dir })

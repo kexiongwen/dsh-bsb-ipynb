@@ -6,15 +6,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { discoverInterpreters, resetInterpreterCache, resolveInterpreter } from '../lib/env.js'
+import { findPython } from './python-helper.mjs'
 
 const execFileAsync = promisify(execFile)
-const basePython = process.env.DSH_IPYNB_TEST_PYTHON || '/opt/miniconda3/bin/python3'
-const hasJupyter = spawnSync(basePython, ['-c', 'import jupyter_client, ipykernel'], {
-  stdio: 'ignore',
-  timeout: 10_000,
-}).status === 0
+const basePython = findPython('jupyter_client, ipykernel')
+const hasJupyter = Boolean(basePython)
 
-test('discovery preserves two venvs that share one base Python', { skip: !hasJupyter, timeout: 90_000 }, async () => {
+test('discovery preserves two venvs that share one base Python', {
+  skip: !hasJupyter && 'Requires jupyter_client/ipykernel',
+  timeout: 90_000,
+}, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-venv-'))
   const environments = [path.join(root, 'venv-a'), path.join(root, 'venv-b')]
   const home = path.join(root, 'home')
