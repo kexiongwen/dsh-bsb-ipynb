@@ -9,6 +9,8 @@ window.__ModuleLoader__.load({
     const AUTOSAVE_MS = 1500
     const STATUS_POLL_MS = 10000
     const MAX_MARKDOWN_QUOTE_DEPTH = 64
+    const METADATA_DEPTH_LIMIT = 100
+    const METADATA_NODE_LIMIT = 10_000
 
     const STRINGS = {
       en: {
@@ -46,6 +48,7 @@ window.__ModuleLoader__.load({
         saved: 'Saved',
         saveFailed: 'Save failed',
         capacityTooLarge: 'Notebook is {size} MiB; the save limit is 32 MiB. Clear outputs and save again.',
+        metadataTooComplex: 'Notebook metadata is too complex to save. Reduce its nesting or number of entries.',
         clearCellOutputs: 'Clear outputs',
         clearAllOutputs: 'Clear all outputs',
         clearAllOutputsConfirm: 'Clear the outputs of every cell? They can only be restored by running the cells again.',
@@ -94,6 +97,7 @@ window.__ModuleLoader__.load({
         saved: '已保存',
         saveFailed: '保存失败',
         capacityTooLarge: 'notebook 内容约 {size} MiB，保存上限为 32 MiB。请清空输出后再保存。',
+        metadataTooComplex: 'notebook 的 metadata 过于复杂，无法保存。请减少嵌套层级或条目数量。',
         clearCellOutputs: '清空输出',
         clearAllOutputs: '清空全部输出',
         clearAllOutputsConfirm: '清空所有单元格的输出？只有重新运行才能恢复。',
@@ -745,6 +749,50 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function assertMetadataWithinLimits(metadata, label) {
+      // Walk iteratively so validation itself cannot overflow the call stack.
+      // Repeated references count as repeated JSON output; only active ancestors are cycles.
+      const ancestors = new WeakSet()
+      const stack = [{ value: metadata, depth: 0, exit: false }]
+      let nodes = 0
+      while (stack.length) {
+        const frame = stack.pop()
+        if (frame.exit) {
+          ancestors.delete(frame.value)
+          continue
+        }
+        nodes += 1
+        if (nodes > METADATA_NODE_LIMIT) {
+          const error = new Error(`${label} exceeds the maximum node count of ${METADATA_NODE_LIMIT}`)
+          error.code = 'metadata-too-complex'
+          throw error
+        }
+        if (frame.depth > METADATA_DEPTH_LIMIT) {
+          const error = new Error(`${label} exceeds the maximum depth of ${METADATA_DEPTH_LIMIT}`)
+          error.code = 'metadata-too-complex'
+          throw error
+        }
+        const value = frame.value
+        if (!value || typeof value !== 'object') continue
+        if (ancestors.has(value)) throw new TypeError('Converting circular structure to JSON')
+        ancestors.add(value)
+        stack.push({ value, depth: frame.depth, exit: true })
+        const children = Array.isArray(value) ? value : Object.values(value)
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          stack.push({ value: children[index], depth: frame.depth + 1, exit: false })
+        }
+      }
+    }
+
+    function assertNotebookMetadataWithinLimits(notebook) {
+      assertMetadataWithinLimits(notebook.metadata, 'Notebook metadata')
+      for (const cell of notebook.cells) {
+        assertMetadataWithinLimits(cell.metadata, 'Cell metadata')
+        if (!Array.isArray(cell.outputs)) continue
+        for (const output of cell.outputs) assertMetadataWithinLimits(output?.metadata, 'Output metadata')
+      }
+    }
+
     function serializeNotebook(notebook) {
       const value = normalizeNotebook(notebook)
       value.nbformat = 4
@@ -761,6 +809,7 @@ window.__ModuleLoader__.load({
         copy.source = source === '' ? [] : source.split(/(?<=\n)/)
         return copy
       })
+      assertNotebookMetadataWithinLimits(value)
       return JSON.stringify(value, null, 2) + '\n'
     }
 
@@ -772,7 +821,13 @@ window.__ModuleLoader__.load({
 
     function notebookCapacity(notebook, limit = NOTEBOOK_CAP_BYTES) {
       if (!notebook || !Array.isArray(notebook.cells)) return { ok: true, bytes: 0 }
-      const bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
+      let bytes
+      try {
+        bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
+      } catch (error) {
+        if (error && error.code === 'metadata-too-complex') return { ok: false, reason: 'metadata-too-complex', bytes: 0 }
+        throw error
+      }
       return { ok: bytes <= limit, bytes }
     }
 
@@ -1431,7 +1486,11 @@ window.__ModuleLoader__.load({
           // repeat on every autosave and cannot be fixed by editing the source.
           setSaveState('failed')
           setCapacityBlocked(true)
-          setBanner({ kind: 'error', reason: 'capacity', text: capacityText(capacity.bytes), action: 'clear-outputs' })
+          if (capacity.reason === 'metadata-too-complex') {
+            setBanner({ kind: 'error', reason: capacity.reason, text: t('metadataTooComplex') })
+          } else {
+            setBanner({ kind: 'error', reason: 'capacity', text: capacityText(capacity.bytes), action: 'clear-outputs' })
+          }
           return
         }
         setCapacityBlocked(false)
@@ -2285,6 +2344,8 @@ window.__ModuleLoader__.load({
       outputsSize,
       MAX_CELL_OUTPUT_BYTES,
       NOTEBOOK_CAP_BYTES,
+      METADATA_DEPTH_LIMIT,
+      METADATA_NODE_LIMIT,
       notebookCapacity,
       capacityText,
       shouldScheduleAutosave,

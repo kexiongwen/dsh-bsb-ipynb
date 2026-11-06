@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 import { readFile, writeFile, readdir, truncate } from 'node:fs/promises'
 import path from 'node:path'
 import {
+  METADATA_DEPTH_LIMIT,
+  METADATA_NODE_LIMIT,
   NOTEBOOK_CAP_BYTES,
   emptyNotebook,
   normalizeNotebook,
@@ -61,6 +64,49 @@ test('normalize accepts string arrays and generates missing ids', () => {
   })
   assert.equal(notebook.cells[0].source, 'ab')
   assert.match(notebook.cells[0].id, /^cell-/)
+})
+
+function nestedMetadata(depth) {
+  let value = null
+  for (let index = 0; index < depth; index += 1) value = { child: value }
+  return value
+}
+
+test('metadata depth limits cover notebook, cell and output metadata', () => {
+  const placements = [
+    (notebook) => { notebook.metadata = nestedMetadata(METADATA_DEPTH_LIMIT + 1) },
+    (notebook) => { notebook.cells[0].metadata = nestedMetadata(METADATA_DEPTH_LIMIT + 1) },
+    (notebook) => {
+      notebook.cells[0].outputs = [{
+        output_type: 'display_data',
+        data: {},
+        metadata: nestedMetadata(METADATA_DEPTH_LIMIT + 1),
+      }]
+    },
+  ]
+  for (const place of placements) {
+    const notebook = emptyNotebook()
+    place(notebook)
+    assert.throws(
+      () => serializeNotebook(notebook),
+      (error) => error.code === 'bad-request' && error.status === 400 && /maximum depth/.test(error.message),
+    )
+  }
+  const valid = emptyNotebook()
+  valid.metadata = nestedMetadata(METADATA_DEPTH_LIMIT)
+  assert.doesNotThrow(() => serializeNotebook(valid))
+})
+
+test('metadata node limit rejects broad trees before pretty serialization', () => {
+  const valid = emptyNotebook()
+  valid.metadata = { values: new Array(METADATA_NODE_LIMIT - 2).fill(0) }
+  assert.doesNotThrow(() => serializeNotebook(valid))
+  const invalid = emptyNotebook()
+  invalid.metadata = { values: new Array(METADATA_NODE_LIMIT - 1).fill(0) }
+  assert.throws(
+    () => serializeNotebook(invalid),
+    (error) => error.code === 'bad-request' && error.status === 400 && /maximum node count/.test(error.message),
+  )
 })
 
 test('invalid JSON returns status invalid without throwing', () => {
@@ -143,6 +189,40 @@ test('concurrent saves with the same baseVersion conflict instead of overwriting
   assert.ok(['first', 'second'].includes(onDisk.cells[0].source[0]))
   const entries = await readdir(dir)
   assert.deepEqual(entries, ['demo.ipynb'])
+})
+
+test('save rechecks the version after the temporary write and preserves external edits', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const baseVersion = sha256(Buffer.from(original))
+  const externalNotebook = emptyNotebook()
+  externalNotebook.cells[0].source = 'EXTERNAL_EDIT'
+  const external = serializeNotebook(externalNotebook)
+  const next = emptyNotebook()
+  next.cells[0].source = 'PLUGIN_SAVE'
+  const originalWrite = fs.promises.writeFile
+  let injected = false
+  fs.promises.writeFile = async (target, data, options) => {
+    if (!injected && String(target).includes('.dsh-bsb-ipynb-')) {
+      injected = true
+      await originalWrite(file, external)
+    }
+    return originalWrite(target, data, options)
+  }
+  try {
+    await assert.rejects(
+      saveNotebookFile(file, next, baseVersion),
+      (error) => error.code === 'write-conflict' && error.status === 409 &&
+        error.details.version === sha256(Buffer.from(external)),
+    )
+  } finally {
+    fs.promises.writeFile = originalWrite
+  }
+  assert.equal(injected, true)
+  assert.equal(await readFile(file, 'utf8'), external)
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'])
 })
 
 test('saveNotebookFile rejects a stale baseVersion', async (t) => {

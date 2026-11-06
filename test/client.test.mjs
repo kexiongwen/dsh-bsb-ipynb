@@ -347,6 +347,115 @@ test('the save preflight measures the same serialized size the server caps', asy
   assert.match(capacityText(exact), new RegExp((exact / 1048576).toFixed(1)))
 })
 
+function notebookWithMetadata(metadata, location = 'notebook') {
+  const notebook = {
+    cells: [{
+      id: 'cell-1',
+      cell_type: 'code',
+      source: '',
+      execution_count: null,
+      metadata: {},
+      outputs: [{ output_type: 'display_data', data: {}, metadata: {} }],
+    }],
+    metadata: {},
+    nbformat: 4,
+    nbformat_minor: 5,
+  }
+  if (location === 'notebook') notebook.metadata = metadata
+  else if (location === 'cell') notebook.cells[0].metadata = metadata
+  else notebook.cells[0].outputs[0].metadata = metadata
+  return notebook
+}
+
+function nestedMetadata(depth) {
+  let metadata = {}
+  for (let index = 0; index < depth; index += 1) metadata = { child: metadata }
+  return metadata
+}
+
+test('metadata depth preflight covers notebook, cell and output metadata', async () => {
+  const { exports } = await loadClient()
+  const { serializeNotebook, notebookCapacity, METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT } = exports.__test
+  assert.equal(METADATA_DEPTH_LIMIT, 100)
+  assert.equal(METADATA_NODE_LIMIT, 10_000)
+  for (const location of ['notebook', 'cell', 'output']) {
+    const notebook = notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT + 1), location)
+    assert.throws(() => serializeNotebook(notebook), (error) => {
+      assert.equal(error.code, 'metadata-too-complex')
+      assert.match(error.message, /maximum depth of 100/)
+      return true
+    })
+    assert.deepEqual(notebookCapacity(notebook), { ok: false, reason: 'metadata-too-complex', bytes: 0 })
+  }
+})
+
+test('metadata node limits and normal depth and node boundaries are enforced exactly', async () => {
+  const { exports } = await loadClient()
+  const { serializeNotebook, notebookCapacity, METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT } = exports.__test
+  assert.doesNotThrow(() => serializeNotebook(notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT))))
+  assert.doesNotThrow(() => serializeNotebook(notebookWithMetadata(new Array(METADATA_NODE_LIMIT - 1).fill(null))))
+
+  const tooManyNodes = notebookWithMetadata(new Array(METADATA_NODE_LIMIT).fill(null))
+  assert.throws(() => serializeNotebook(tooManyNodes), (error) => {
+    assert.equal(error.code, 'metadata-too-complex')
+    assert.match(error.message, /maximum node count of 10000/)
+    return true
+  })
+  assert.deepEqual(notebookCapacity(tooManyNodes), { ok: false, reason: 'metadata-too-complex', bytes: 0 })
+
+  const shared = { value: 'shared references are not cycles' }
+  assert.doesNotThrow(() => serializeNotebook(notebookWithMetadata({ left: shared, right: shared })))
+})
+
+test('metadata cycles keep the original TypeError serialization behavior', async () => {
+  const { exports } = await loadClient()
+  const { serializeNotebook, notebookCapacity } = exports.__test
+  for (const location of ['notebook', 'cell', 'output']) {
+    const metadata = {}
+    metadata.circular = metadata
+    const notebook = notebookWithMetadata(metadata, location)
+    assert.throws(() => serializeNotebook(notebook), TypeError)
+    assert.throws(() => notebookCapacity(notebook), TypeError)
+  }
+})
+
+test('metadata capacity failure shows its own message without a clear-outputs action', async () => {
+  const stateCalls = []
+  let stateIndex = 0
+  const { exports } = await loadClient({
+    useState(initial) {
+      const index = stateIndex++
+      return [initial, (value) => stateCalls.push({ index, value })]
+    },
+    useRef(value) {
+      return { current: value }
+    },
+    useCallback(callback) {
+      return callback
+    },
+  })
+  const { NotebookView, STRINGS, METADATA_DEPTH_LIMIT } = exports.__test
+  const tree = NotebookView({
+    ctx: {},
+    scope: {},
+    path: '/workspace/demo.ipynb',
+    visible: false,
+    customData: {
+      status: 'ok',
+      version: 'v1',
+      notebook: notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT + 1)),
+    },
+  })
+  tree.props.children[0].props.onSave()
+  const banner = stateCalls.map((call) => call.value).find((value) => value && value.reason === 'metadata-too-complex')
+  assert.ok(banner)
+  const strings = /^zh/i.test(globalThis.navigator?.language || '') ? STRINGS.zh : STRINGS.en
+  assert.equal(banner.text, strings.metadataTooComplex)
+  assert.equal(Object.hasOwn(banner, 'action'), false)
+  assert.equal(typeof STRINGS.en.metadataTooComplex, 'string')
+  assert.equal(typeof STRINGS.zh.metadataTooComplex, 'string')
+})
+
 test('autosave recovers after a failed save only when the notebook changes', async () => {
   const { exports } = await loadClient()
   const { shouldScheduleAutosave } = exports.__test

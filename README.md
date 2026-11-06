@@ -9,7 +9,7 @@
 - Notebook 渲染：Markdown、代码、raw cell，执行计数，流式 stdout/stderr、`text/html`、`image/png|jpeg|svg`、`text/markdown`、JSON、ANSI 彩色 traceback。
 - 编辑：点击 cell 进入编辑（语法高亮预览 → 文本编辑），支持增删、上移/下移、切换 cell 类型、Markdown 预览、清空单个或全部 cell 的输出。
 - 执行：每个 notebook 一个持久 Python 内核（按文件路径共享），变量跨 cell 保留；Run all、中断、重启、关闭。
-- 保存：写回 nbformat 4.5，保存前做基础字段规范化（例如移除 `display_data.execution_count`、过滤非法 MIME 数据和附件结构、修正非法执行计数），未进行完整 schema 校验；用 sha256 版本号做乐观并发控制，读取前检测到的外部修改返回 409 冲突而不覆盖（校验到原子 rename 之间的外部写入属已知竞态），磁盘文件超过 32 MiB 返回 413；保存前按落盘格式预检整本大小，超限时提示清空输出而不是上传后被拒；编辑后 1.5 秒自动保存。
+- 保存：写回 nbformat 4.5，保存前做基础字段规范化（例如移除 `display_data.execution_count`、过滤非法 MIME 数据和附件结构、修正非法执行计数），未进行完整 schema 校验；用 sha256 版本号做乐观并发控制，初始校验及 rename 前二次校验发现的外部修改返回 409 冲突而不覆盖（二次校验到原子 rename 之间仍属已知竞态），磁盘文件超过 32 MiB 返回 413；保存前按落盘格式预检整本大小，超限时提示清空输出而不是上传后被拒；编辑后 1.5 秒自动保存。
 - 解释器：自动发现 `DSH_IPYNB_PYTHON`、conda 环境、PATH 上的 `python3`/`python`、DSH 内置 Python；只有带 `jupyter_client` + `ipykernel` 的环境会被选中。
 - 安全：所有文件访问都限制在会话工作区内（realpath + `path.relative` 检查）；HTTP 路由复用 DSH 的 admission fence（`ctx.connection.requestRejection`）；内核输出 HTML 经 DOMParser 白名单清洗后才渲染，不执行 `<script>`。
 
@@ -132,6 +132,7 @@ node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 
 ## 内部限制与环境变量
 
+- notebook、cell 和 output 的 metadata 最多允许 100 层嵌套、10,000 个节点；超限时读取结果标记为 `invalid`，保存返回 `bad-request`（400）。
 - POST 请求体上限 64 MiB（`lib/json.js`，适用于所有 POST 路由；notebook 落盘上限为 32 MiB）。
 - 内核空闲回收由 `DSH_IPYNB_KERNEL_IDLE_MS` 控制，默认 30 分钟。
 - 客户端内核状态轮询间隔 10 秒；`/ipynb/execute` 的 NDJSON ping 间隔 15 秒。
