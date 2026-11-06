@@ -370,3 +370,250 @@ test('aborting an already-submitted request does not release the active executio
   assert.equal(entry.busy, false)
   assert.equal(entry.currentRun, null)
 })
+
+// Keep the failed child alive long enough to deliver events after its
+// replacement has been spawned. These are real manager/entry operations;
+// only child-process scheduling is controlled by the harness.
+async function replaceFailedProcess(t, failure = 'kernel-died') {
+  const h = harness(t, { exitOnKill: false })
+  let oldProc
+  if (failure === 'startup-error') {
+    const first = h.start()
+    oldProc = first.proc
+    const firstState = observe(first.started)
+    oldProc.emit('error', new Error('first process failed during startup'))
+    await flush()
+    assert.equal(firstState.status, 'rejected')
+  } else {
+    const first = await h.startReady()
+    oldProc = first.proc
+    oldProc.event({ type: 'kernel_died', message: 'first kernel died' })
+  }
+  assert.equal(oldProc.exitCode, null, 'the old process has not exited yet')
+  const replacement = h.start()
+  const startup = observe(replacement.started)
+  assert.notEqual(replacement.proc, oldProc, 'recovery must spawn a replacement process')
+  return { h, oldProc, ...replacement, startup }
+}
+
+for (const failure of ['kernel-died', 'startup-error']) {
+  for (const phase of ['starting', 'idle', 'executing']) {
+    test(`old process exit after ${failure} cannot disturb a replacement that is ${phase}`, async (t) => {
+      const { h, oldProc, entry, proc, started, startup } = await replaceFailedProcess(t, failure)
+      let running
+      let runState
+      let command
+      if (phase !== 'starting') {
+        proc.event({ type: 'ready' })
+        await started
+      }
+      if (phase === 'executing') {
+        running = entry.run('replacement-cell', 'new work')
+        runState = observe(running)
+        command = proc.commands.at(-1)
+      }
+      const before = entry.status()
+      oldProc.exit(7)
+      await flush()
+      assert.equal(entry.proc, proc, 'old exit must not discard the new process handle')
+      assert.equal(h.manager.peek(h.target), entry, 'old exit must not forget the replacement entry')
+      assert.deepEqual(entry.status(), before)
+      assert.deepEqual(proc.kills, [], 'old exit must not kill the new process')
+      if (phase === 'starting') {
+        assert.equal(startup.status, 'pending', 'only the replacement may settle its readiness wait')
+        assert.equal(h.activeReadyTimers().length, 1)
+        proc.event({ type: 'ready' })
+        await started
+      } else if (phase === 'executing') {
+        assert.equal(runState.status, 'pending', 'old exit must not settle the new execution')
+        reply(proc, command)
+        assert.equal((await running).ok, true)
+      }
+      // Filtering the old child must not disable lifecycle handling for the
+      // current one: its own exit still removes the entry.
+      proc.exit(9)
+      await flush()
+      assert.equal(entry.proc, null)
+      assert.equal(h.manager.peek(h.target), null)
+    })
+  }
+}
+
+const staleProcessEvents = {
+  'stdin error': (proc) => proc.stdin.emit('error', new Error('stale EPIPE')),
+  'process error': (proc) => proc.emit('error', new Error('stale process failure')),
+  'ready output': (proc) => proc.event({ type: 'ready' }),
+  'kernel death output': (proc) => proc.event({ type: 'kernel_died', message: 'stale kernel death' }),
+  'untagged stream output': (proc) => proc.event({ type: 'stream', text: 'STALE OUTPUT', name: 'stdout' }),
+  'partial stdout line': (proc) => proc.stdout.emit('data', '{"type":"stream","text":"STALE'),
+  stderr: (proc) => proc.stderr.emit('data', 'STALE STDERR'),
+}
+
+for (const [name, emitStale] of Object.entries(staleProcessEvents)) {
+  for (const phase of ['starting', 'executing']) {
+    test(`old process ${name} cannot affect a replacement that is ${phase}`, async (t) => {
+      const { h, oldProc, entry, proc, started, startup } = await replaceFailedProcess(t)
+      const events = []
+      let running
+      let runState
+      let command
+      if (phase === 'executing') {
+        proc.event({ type: 'ready' })
+        await started
+        running = entry.run('replacement-cell', 'new work', (event) => events.push(event))
+        runState = observe(running)
+        command = proc.commands.at(-1)
+      }
+      const before = entry.status()
+      const stderrBefore = entry.stderrTail
+      const stdoutBefore = entry.stdoutBuffer
+      emitStale(oldProc)
+      await flush()
+      assert.equal(entry.proc, proc)
+      assert.equal(h.manager.peek(h.target), entry)
+      assert.deepEqual(entry.status(), before, 'stale child events must not change replacement status')
+      assert.equal(entry.stderrTail, stderrBefore, 'old stderr must not pollute replacement diagnostics')
+      assert.equal(entry.stdoutBuffer, stdoutBefore, 'old stdout must not pollute replacement framing')
+      assert.deepEqual(proc.kills, [])
+      assert.deepEqual(events, [], 'old events must not reach the replacement execution listener')
+      if (phase === 'starting') {
+        assert.equal(startup.status, 'pending')
+        assert.equal(h.activeReadyTimers().length, 1)
+        proc.event({ type: 'ready' })
+        await started
+        running = entry.run('replacement-cell', 'new work', (event) => events.push(event))
+        runState = observe(running)
+        command = proc.commands.at(-1)
+      }
+      assert.equal(runState.status, 'pending')
+      proc.event({ type: 'stream', cell_id: command.cell_id, exec_id: command.exec_id, text: 'CURRENT OUTPUT' })
+      assert.equal(events.at(-1).text, 'CURRENT OUTPUT', 'current child output must still be delivered')
+      proc.exit(8)
+      assert.equal((await running).ok, false, 'current child exit must still fail its active execution')
+      assert.equal(h.manager.peek(h.target), null)
+    })
+  }
+}
+
+test('completion of an older shutdown cannot delete a replacement entry created during its exit', async (t) => {
+  const h = harness(t)
+  const first = await h.startReady()
+  let replacement
+  first.proc.once('exit', () => {
+    // The old entry's exit handler has run, but its async shutdown has not
+    // resumed yet. A new execute may create an entry in this interval.
+    replacement = h.start()
+    observe(replacement.started)
+    replacement.proc.event({ type: 'ready' })
+  })
+  await h.manager.shutdown(h.target)
+  assert.ok(replacement)
+  await replacement.started
+  assert.equal(h.manager.peek(h.target), replacement.entry, 'old shutdown must not delete the new map entry')
+  assert.equal(replacement.entry.proc, replacement.proc)
+  assert.equal(h.manager.status(h.target).ready, true)
+  assert.deepEqual(replacement.proc.kills, [])
+})
+
+for (const phase of ['starting', 'executing']) {
+  test(`a cleared old ready-timeout callback cannot fail a replacement that is ${phase}`, async (t) => {
+    const { h, entry, proc, started, startup } = await replaceFailedProcess(t)
+    const oldTimer = h.readyTimers[0]
+    assert.equal(oldTimer.active, false, 'the superseded ready timer was cleared')
+    let running
+    let runState
+    let command
+    if (phase === 'executing') {
+      proc.event({ type: 'ready' })
+      await started
+      running = entry.run('replacement-cell', 'new work')
+      runState = observe(running)
+      command = proc.commands.at(-1)
+    }
+    const before = entry.status()
+    // Model a callback already dispatched by the timer machinery. It must
+    // check its owner even if cancellation can no longer prevent invocation.
+    oldTimer.callback()
+    await flush()
+    assert.equal(entry.proc, proc)
+    assert.equal(h.manager.peek(h.target), entry)
+    assert.deepEqual(entry.status(), before)
+    assert.deepEqual(proc.kills, [])
+    if (phase === 'starting') {
+      assert.equal(startup.status, 'pending')
+      assert.equal(h.activeReadyTimers().length, 1, 'the current ready timeout remains armed')
+      proc.event({ type: 'ready' })
+      await started
+    } else {
+      assert.equal(runState.status, 'pending')
+      reply(proc, command)
+      assert.equal((await running).ok, true)
+    }
+  })
+}
+
+test('an older idle sweep cannot delete a replacement entry created during shutdown', async (t) => {
+  const h = harness(t)
+  const first = await h.startReady()
+  first.entry.lastActivity = 0
+  let replacement
+  first.proc.once('exit', () => {
+    replacement = h.start()
+    observe(replacement.started)
+    replacement.proc.event({ type: 'ready' })
+  })
+  await h.manager.sweepIdle()
+  assert.ok(replacement)
+  await replacement.started
+  assert.equal(h.manager.peek(h.target), replacement.entry, 'old sweep cleanup must not remove the new entry')
+  assert.equal(replacement.entry.proc, replacement.proc)
+  assert.equal(h.manager.status(h.target).ready, true)
+  assert.deepEqual(replacement.proc.kills, [])
+})
+
+for (const origin of ['startup', 'previous restart']) {
+  test(`a cleared ${origin} timer cannot settle a newer restart on the same process`, async (t) => {
+    const h = harness(t, { exitOnKill: false })
+    const { entry, proc } = await h.startReady()
+    if (origin === 'previous restart') {
+      const previousRestart = entry.restart()
+      proc.event({ type: 'ready' })
+      await previousRestart
+    }
+    const oldTimer = h.readyTimers.at(-1)
+    assert.equal(oldTimer.active, false)
+    const restarting = entry.restart()
+    const state = observe(restarting)
+    const currentTimer = h.readyTimers.at(-1)
+    assert.notEqual(currentTimer, oldTimer)
+    oldTimer.callback()
+    await flush()
+    assert.equal(state.status, 'pending', 'old wait callbacks cannot reject the newer readiness wait')
+    assert.equal(entry.proc, proc)
+    assert.equal(entry.ready, false)
+    assert.equal(currentTimer.active, true)
+    assert.deepEqual(proc.kills, [])
+    proc.event({ type: 'ready' })
+    await restarting
+    assert.equal(entry.ready, true)
+    assert.equal(h.activeReadyTimers().length, 0)
+  })
+}
+
+test('a replacement process starts with fresh stderr diagnostics', async (t) => {
+  const h = harness(t, { exitOnKill: false })
+  const first = h.start()
+  const startup = observe(first.started)
+  first.proc.stderr.emit('data', 'FIRST PROCESS DIAGNOSTIC')
+  first.proc.emit('error', new Error('first process failed'))
+  await flush()
+  assert.equal(startup.status, 'rejected')
+  const replacement = h.start()
+  observe(replacement.started)
+  assert.equal(replacement.entry.stderrTail, '')
+  replacement.proc.stderr.emit('data', 'CURRENT PROCESS DIAGNOSTIC')
+  first.proc.stderr.emit('data', 'STALE PROCESS DIAGNOSTIC')
+  assert.equal(replacement.entry.stderrTail, 'CURRENT PROCESS DIAGNOSTIC')
+  replacement.proc.event({ type: 'ready' })
+  await replacement.started
+})
