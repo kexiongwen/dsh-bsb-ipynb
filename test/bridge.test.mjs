@@ -148,3 +148,149 @@ test('bridge executes code, preserves variables and reports errors', { skip: !ha
     await shutdown(context.proc)
   }
 })
+
+test('bridge rejects non-object JSON commands and continues executing', { skip: !hasJupyter(python) }, async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-invalid-'))
+  const context = startBridge(cwd)
+  try {
+    await context.waitFor((event) => event.type === 'ready')
+
+    const invalidCommands = [null, [], 'status', 42, true]
+    for (const command of invalidCommands) {
+      context.proc.stdin.write(JSON.stringify(command) + '\n')
+    }
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'after-invalid', exec_id: 'exec-valid', code: '6 * 7' }) + '\n',
+    )
+    const reply = await context.waitFor(
+      (event) => event.type === 'execute_reply' && event.cell_id === 'after-invalid',
+    )
+    assert.equal(reply.ok, true)
+    assert.equal(reply.exec_id, 'exec-valid')
+    const invalidLogs = context.events.filter(
+      (event) =>
+        event.type === 'log' && event.level === 'error' && event.message === 'invalid command: expected JSON object',
+    )
+    assert.equal(invalidLogs.length, invalidCommands.length)
+
+    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 5000)
+      context.proc.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  } finally {
+    await shutdown(context.proc)
+  }
+})
+
+test('bridge marks interrupt-timeout restarts and clears old kernel state', { skip: !hasJupyter(python) }, async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-restart-'))
+  const context = startBridge(cwd)
+  try {
+    await context.waitFor((event) => event.type === 'ready')
+
+    const code = [
+      'import signal, time',
+      'restart_marker = "old-kernel"',
+      'signal.signal(signal.SIGINT, signal.SIG_IGN)',
+      'print("sigint-ignored", flush=True)',
+      'while True:',
+      '    time.sleep(0.1)',
+    ].join('\n')
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'interrupt-timeout', exec_id: 'exec-timeout', code }) + '\n',
+    )
+    await context.waitFor(
+      (event) =>
+        event.type === 'stream' && event.cell_id === 'interrupt-timeout' && event.text.includes('sigint-ignored'),
+    )
+    context.proc.stdin.write(JSON.stringify({ op: 'interrupt' }) + '\n')
+    const reply = await context.waitFor(
+      (event) => event.type === 'execute_reply' && event.cell_id === 'interrupt-timeout',
+    )
+    assert.equal(reply.ok, false)
+    assert.equal(reply.status, 'interrupted')
+    assert.equal(reply.kernel_restarted, true)
+    assert.match(reply.error, /interrupt timed out; kernel restarted/)
+
+    context.proc.stdin.write(
+      JSON.stringify({
+        op: 'execute',
+        cell_id: 'after-restart',
+        exec_id: 'exec-after-restart',
+        code: 'print("restart_marker" in globals())',
+      }) + '\n',
+    )
+    const afterReply = await context.waitFor(
+      (event) => event.type === 'execute_reply' && event.cell_id === 'after-restart',
+    )
+    assert.equal(afterReply.ok, true)
+    const markerStream = context.events.find((event) => event.type === 'stream' && event.cell_id === 'after-restart')
+    assert.equal(markerStream.text, 'False\n')
+
+    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 5000)
+      context.proc.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  } finally {
+    await shutdown(context.proc)
+  }
+})
+
+test('bridge tags every execution event with its exec_id and fails input() fast', { skip: !hasJupyter(python) }, async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-bridge-exec-'))
+  const context = startBridge(cwd)
+  try {
+    await context.waitFor((event) => event.type === 'ready')
+
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'e1', exec_id: 'exec-a', code: 'print("tagged")' }) + '\n',
+    )
+    const reply = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'e1')
+    assert.equal(reply.ok, true)
+    assert.equal(reply.exec_id, 'exec-a')
+    const touched = context.events.filter((event) => event.cell_id === 'e1')
+    assert.ok(touched.length >= 2)
+    for (const event of touched) assert.equal(event.exec_id, 'exec-a')
+
+    // allow_stdin is disabled, so input() must fail immediately instead of
+    // hanging the executor thread until an interrupt.
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'in1', exec_id: 'exec-in', code: 'input("x")' }) + '\n',
+    )
+    const stdinReply = await context.waitFor(
+      (event) => event.type === 'execute_reply' && event.cell_id === 'in1',
+      20_000,
+    )
+    assert.equal(stdinReply.ok, false)
+    assert.equal(stdinReply.exec_id, 'exec-in')
+    const stdinError = context.events.find((event) => event.type === 'error' && event.cell_id === 'in1')
+    assert.ok(stdinError)
+    assert.match(stdinError.ename, /StdinNotImplementedError/)
+
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'e2', exec_id: 'exec-b', code: '2 + 2' }) + '\n',
+    )
+    const third = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'e2')
+    assert.equal(third.ok, true)
+    assert.equal(third.exec_id, 'exec-b')
+
+    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 5000)
+      context.proc.once('exit', () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  } finally {
+    await shutdown(context.proc)
+  }
+})

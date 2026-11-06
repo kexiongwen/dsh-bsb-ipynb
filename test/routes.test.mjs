@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { registerIpynbRoutes } from '../lib/routes.js'
 import { readJsonBody } from '../lib/json.js'
 import { discoverInterpreters } from '../lib/env.js'
-import { emptyNotebook, serializeNotebook } from '../lib/notebook.js'
+import { NOTEBOOK_CAP_BYTES, emptyNotebook, serializeNotebook, sha256 } from '../lib/notebook.js'
 
 function makeRes() {
   const state = { status: 0, headers: {}, chunks: [], ended: false }
@@ -28,6 +28,40 @@ function makeRes() {
     },
     on() {
       return res
+    },
+  }
+  return { res, state }
+}
+
+function trackedRes() {
+  const state = { status: 0, headers: {}, chunks: [], ended: false, handlers: new Map() }
+  const res = {
+    headersSent: false,
+    writeHead(status, headers) {
+      state.status = status
+      Object.assign(state.headers, headers || {})
+      res.headersSent = true
+      return res
+    },
+    write(chunk) {
+      state.chunks.push(Buffer.from(chunk))
+      return true
+    },
+    end(chunk) {
+      if (chunk) state.chunks.push(Buffer.from(chunk))
+      state.ended = true
+    },
+    on(event, callback) {
+      const handlers = state.handlers.get(event) || []
+      handlers.push(callback)
+      state.handlers.set(event, handlers)
+      return res
+    },
+    once(event, callback) {
+      return res.on(event, callback)
+    },
+    emit(event) {
+      for (const callback of state.handlers.get(event) || []) callback()
     },
   }
   return { res, state }
@@ -100,6 +134,9 @@ function makeKernels() {
     peek() {
       return entry
     },
+    async interrupt() {
+      calls.push({ interrupt: true })
+    },
     async shutdown() {
       calls.push({ shutdown: true })
       return true
@@ -168,6 +205,40 @@ test('non-JSON POST bodies are rejected', async () => {
   )
   assert.equal(state.status, 400)
   assert.equal(json.error.code, 'bad-request')
+})
+
+test('JSON Content-Type accepts parameters but rejects look-alike media types', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  for (const contentType of ['application/json; charset=utf-8', 'Application/JSON ; charset=UTF-8']) {
+    const { state, json } = await invoke(
+      makeCtx({ cwd: dir }),
+      makeKernels(),
+      makeReq({
+        method: 'POST',
+        url: '/ipynb/read',
+        body: { sessionId: 's1', path: 'demo.ipynb' },
+        headers: { 'content-type': contentType },
+      }),
+    )
+    assert.equal(state.status, 200, contentType)
+    assert.equal(json.ok, true, contentType)
+  }
+  for (const contentType of ['application/jsonp', 'application/jsonp; charset=utf-8']) {
+    const { state, json } = await invoke(
+      makeCtx({ cwd: dir }),
+      makeKernels(),
+      makeReq({
+        method: 'POST',
+        url: '/ipynb/read',
+        body: { sessionId: 's1', path: 'demo.ipynb' },
+        headers: { 'content-type': contentType },
+      }),
+    )
+    assert.equal(state.status, 400, contentType)
+    assert.equal(json.error.code, 'bad-request', contentType)
+    assert.match(json.error.message, /Content-Type/)
+  }
 })
 
 test('read rejects paths outside the session workspace', async () => {
@@ -239,6 +310,37 @@ test('save writes a fresh version when baseVersion matches', async () => {
   )
   assert.equal(state.status, 200)
   assert.notEqual(json.value.version, read.json.value.version)
+})
+
+test('save rejects malformed client notebooks without modifying the file', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const baseVersion = sha256(Buffer.from(original))
+  const malformed = [
+    null,
+    { nbformat: 4 },
+    { nbformat: 4, cells: 'not-an-array' },
+    { nbformat: 4, cells: [null] },
+    { nbformat: 4, cells: [{ cell_type: 'invalid' }] },
+    { nbformat: 3, cells: [] },
+  ]
+  for (const notebook of malformed) {
+    const { state, json } = await invoke(
+      makeCtx({ cwd: dir }),
+      makeKernels(),
+      makeReq({
+        method: 'POST',
+        url: '/ipynb/save',
+        body: { sessionId: 's1', path: 'demo.ipynb', notebook, baseVersion },
+      }),
+    )
+    assert.equal(state.status, 400, JSON.stringify(notebook))
+    assert.equal(json.error.code, 'bad-request', JSON.stringify(notebook))
+  }
+  assert.equal(await readFile(file, 'utf8'), original)
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'])
 })
 
 test('readJsonBody enforces its byte limit', async () => {
@@ -364,4 +466,159 @@ test('execute waits for drain instead of dropping the final reply', async () => 
     .map((line) => JSON.parse(line))
   assert.ok(events.some((event) => event.type === 'stream'))
   assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
+})
+
+test('status, interrupt, restart and shutdown work after the notebook is deleted', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  const ctx = makeCtx({ cwd: dir })
+  await rm(file)
+
+  const status = await invoke(
+    ctx,
+    kernels,
+    makeReq({ url: '/ipynb/status?sessionId=s1&path=demo.ipynb' }),
+  )
+  assert.equal(status.state.status, 200)
+  assert.equal(status.json.value.running, true, 'control status must find the kernel by path')
+
+  for (const [url, expected] of [
+    ['/ipynb/interrupt', { interrupt: true }],
+    ['/ipynb/restart', { restart: true }],
+    ['/ipynb/shutdown', { shutdown: true }],
+  ]) {
+    const { state, json } = await invoke(
+      ctx,
+      kernels,
+      makeReq({
+        method: 'POST',
+        url,
+        body: { sessionId: 's1', path: 'demo.ipynb' },
+      }),
+    )
+    assert.equal(state.status, 200, url)
+    assert.equal(json.ok, true, url)
+    assert.ok(
+      kernels.calls.some((call) => call[Object.keys(expected)[0]]),
+      `${url} must reach the kernel`,
+    )
+  }
+})
+
+test('save rejects a notebook that grew past the cap on disk', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: {
+        sessionId: 's1',
+        path: 'demo.ipynb',
+        notebook: emptyNotebook(),
+        baseVersion: '0'.repeat(64),
+      },
+    }),
+  )
+  assert.equal(state.status, 413)
+  assert.equal(json.error.code, 'too-large')
+})
+
+test('execute does nothing when the client disconnects while the kernel starts', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  let resolveStart
+  let markStarted
+  const startReached = new Promise((resolve) => {
+    markStarted = resolve
+  })
+  kernels.getOrStart = (target, python) => {
+    kernels.calls.push({ target, python })
+    markStarted()
+    return new Promise((resolve) => {
+      resolveStart = () => resolve(kernels.entry)
+    })
+  }
+  const ctx = makeCtx({ cwd: dir })
+  registerIpynbRoutes(ctx, kernels)
+  const handler = ctx.registered[0].handler
+  const { res } = trackedRes()
+  const pending = handler(
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/execute',
+      body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: 'print(1)' },
+    }),
+    res,
+  )
+  await startReached
+  res.emit('close')
+  resolveStart()
+  await pending
+  assert.equal(kernels.calls.filter((call) => call.cellId).length, 0, 'dead client must not run the cell')
+  assert.equal(kernels.calls.filter((call) => call.interrupt).length, 0)
+})
+
+test('execute interrupts an active run when the client disconnects', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  let resumeRun
+  let markRunStarted
+  const runReached = new Promise((resolve) => {
+    markRunStarted = resolve
+  })
+  kernels.entry.run = async (cellId, code) => {
+    kernels.calls.push({ cellId, code })
+    markRunStarted()
+    await new Promise((resolve) => {
+      resumeRun = resolve
+    })
+    return { type: 'execute_reply', cell_id: cellId, ok: false }
+  }
+  const ctx = makeCtx({ cwd: dir })
+  registerIpynbRoutes(ctx, kernels)
+  const handler = ctx.registered[0].handler
+  const { res } = trackedRes()
+  const pending = handler(
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/execute',
+      body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: 'while True: pass' },
+    }),
+    res,
+  )
+  await runReached
+  res.emit('close')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(kernels.calls.filter((call) => call.interrupt).length, 1)
+  resumeRun()
+  await pending
+})
+
+test('a close after a normal execute does not interrupt the kernel', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  const ctx = makeCtx({ cwd: dir })
+  registerIpynbRoutes(ctx, kernels)
+  const handler = ctx.registered[0].handler
+  const { res } = trackedRes()
+  await handler(
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/execute',
+      body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: 'print(1)' },
+    }),
+    res,
+  )
+  res.emit('close')
+  assert.equal(kernels.calls.filter((call) => call.interrupt).length, 0)
 })

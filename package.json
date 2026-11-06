@@ -14,7 +14,8 @@
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
-    "./python/bridge.py": "./python/bridge.py"
+    "./python/bridge.py": "./python/bridge.py",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",

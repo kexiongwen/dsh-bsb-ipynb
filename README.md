@@ -9,7 +9,7 @@
 - Notebook 渲染：Markdown、代码、raw cell，执行计数，流式 stdout/stderr、`text/html`、`image/png|jpeg|svg`、`text/markdown`、JSON、ANSI 彩色 traceback。
 - 编辑：点击 cell 进入编辑（语法高亮预览 → 文本编辑），支持增删、上移/下移、切换 cell 类型、Markdown 预览。
 - 执行：每个 notebook 一个持久 Python 内核（按文件路径共享），变量跨 cell 保留；Run all、中断、重启、关闭。
-- 保存：写回 nbformat 4.5，保存前用 sha256 版本号做乐观并发控制；外部修改时返回 409 冲突而不覆盖；编辑后 1.5 秒自动保存。
+- 保存：写回 nbformat 4.5，保存前按 nbformat schema 规范化（未知/非法字段会被丢弃，例如 `display_data.execution_count`）；用 sha256 版本号做乐观并发控制，外部修改返回 409 冲突而不覆盖，磁盘文件超过 32 MiB 返回 413；编辑后 1.5 秒自动保存。
 - 解释器：自动发现 `DSH_IPYNB_PYTHON`、conda 环境、PATH 上的 `python3`/`python`、DSH 内置 Python；只有带 `jupyter_client` + `ipykernel` 的环境会被选中。
 - 安全：所有文件访问都限制在会话工作区内（realpath + `path.relative` 检查）；HTTP 路由复用 DSH 的 admission fence（`ctx.connection.requestRejection`）；内核输出 HTML 经 DOMParser 白名单清洗后才渲染，不执行 `<script>`。
 
@@ -27,15 +27,17 @@
 
   插件会优先使用 `DSH_IPYNB_PYTHON` 指定的解释器；没有设置时按 conda 环境、PATH、DSH 内置 Python 的顺序探测，并跳过缺少依赖的环境。
 
+  内核首次启动和重启都直接使用所选 Python。插件在进程内构造启动配置，系统注册的同名 kernelspec 不会改变所选解释器，也不会被插件改写。
+
 ## 安装
 
 在 DSH 的插件管理里把这个目录作为本地 bundle 安装：
 
 ```text
-dsh-bsb-ipynb
+/path/to/dsh-bsb-ipynb
 ```
 
-安装后刷新页面（桌面端 `Cmd+R`），在右侧文件树中打开任意 `.ipynb` 即可。`examples/demo.ipynb` 是一个可直接运行的示例。
+安装后刷新页面（桌面端 `Cmd+R`），在右侧文件树中打开任意 `.ipynb` 即可。`examples/demo.ipynb` 是一个可直接运行、且通过 `nbformat.validate` 校验的示例。
 
 ## 使用
 
@@ -48,6 +50,8 @@ dsh-bsb-ipynb
 | 退出编辑 | `Esc` |
 
 工具栏提供解释器选择、Run all、中断、重启、保存、重新加载和关闭内核。切换解释器会重启内核（运行中会先确认）；API 返回的 409 冲突会在顶部显示，只允许重新加载，不会静默覆盖磁盘内容。
+
+单元格执行或 Run all 期间，自动保存、保存按钮和保存快捷键均暂停，避免将临时清空或尚未完整的输出写入磁盘。执行结束后恢复保存；确认重新加载并成功读取新内容后，旧执行会取消，迟到的执行结果和保存响应不会覆盖新内容。
 
 ## 结构
 
@@ -83,7 +87,11 @@ dsh-bsb-ipynb/
 | POST | `/ipynb/restart` | 重启内核，可同时切换 `python` |
 | POST | `/ipynb/shutdown` | 关闭内核 |
 
-错误码：`bad-request`、`workspace-unknown`、`path-outside-root`、`not-found`、`not-notebook`、`too-large`、`write-conflict`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
+除 `/health` 与 `/interpreters` 外，上述接口都必须提供非空 `sessionId` 和 `path`：`/status` 通过查询参数提供，其余通过 JSON 请求体提供；缺失时返回 `bad-request`（400）。请求被宿主 admission fence 拒绝时返回 `forbidden`，HTTP 状态码由宿主拒绝结果决定（未提供时为 403）。
+
+`/execute` 在写入 NDJSON 响应头之前失败（例如请求体、路径或解释器解析失败）时，仍返回上述 JSON 错误 envelope 和对应 HTTP 状态码；响应头写入后，内核启动或执行失败会返回 NDJSON 事件 `{type:'fatal',code,message}` 并结束流，不再改写 HTTP 状态或返回 JSON envelope。
+
+错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`not-notebook`、`too-large`、`write-conflict`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
 
 ## 开发与测试
 
@@ -97,20 +105,25 @@ python3 -m py_compile python/bridge.py
 node --test --test-timeout=180000 test/*.test.mjs   # 或 npm test
 ```
 
-`test/bridge.test.mjs` 会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器。
+`test/bridge.test.mjs`、`test/kernel-interpreter.test.mjs` 等真实内核测试会在解释器缺少 `jupyter_client`/`ipykernel` 时自动跳过；可用 `DSH_IPYNB_TEST_PYTHON` 指定测试解释器。解释器回归测试使用临时虚拟环境和冲突 kernelspec，验证启动、重启及环境切换。
 
 ## 可靠性
 
 - 同一 notebook 的保存按路径串行化：并发保存只有第一个成功，其余返回 `write-conflict`（409），不会静默覆盖。
 - 某个 cell 执行期间收到 restart、shutdown、内核崩溃或 `os._exit()` 时，NDJSON 流会收到一个失败终态并结束，不会永久挂起。
+- notebook 删除后仍可通过原路径查询和控制已有内核；若通过符号链接打开，链接未被删除或改写时仍会解析到原目标。控制路径同样受会话工作区边界限制。
 - 每个请求最多缓冲 64 MiB 的 NDJSON；客户端每个 cell 最多保留 32 MiB 输出，超出后显示截断提示。
+- 服务端把 notebook 按 nbformat schema 规范化后再写回，未知/非法字段会被丢弃，保证落盘内容是合法的 nbformat 4.5。
+- 保存前先 `stat` 磁盘文件：文件超过 32 MiB 时返回 `too-large`（413），不会先整体读入内存；序列化后的内容同样受 32 MiB 上限约束。
+- 单行内核输出超过 64 MiB 时，本次执行会收到失败终态并重启内核，避免桥进程内存无限增长。
 - 内核 stdin 写失败（EPIPE）会被捕获并清理当前执行，不会冒泡成宿主进程的 `uncaughtException`。
 
 ## 已知限制
 
 - 仅支持 Python 内核（`nbformat` 4.x）。
 - 不渲染需要 JavaScript 的交互输出（ipywidgets、plotly、bokeh 等）；HTML 输出会按白名单清洗成静态内容。
-- 不支持 `%%` cell magic 和 `input()`（与所用的 bridge 一致）；`!cmd`、`%pip`、`%cd`、`%pwd` 可用。
+- 不支持 `input()`：内核以 `allow_stdin=False` 启动，调用会立即报错而不是挂起；`%%` cell magic 由 IPython 内核支持；`!cmd`、`%pip`、`%cd`、`%pwd` 可用。
+- 中断后内核约 3 秒仍无响应时会强制重启，所有变量和其他内核状态都会被清空。
 - 执行结果由客户端写回并在保存时落盘；服务端不会在后台追加输出。
 - 当前没有“新建 notebook”向导，请在文件树里新建 `.ipynb` 空文件，或直接打开已有文件。
 

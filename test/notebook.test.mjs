@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, readdir, truncate } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -13,6 +13,7 @@ import {
   serializeNotebook,
   sha256,
 } from '../lib/notebook.js'
+import { errorPayload } from '../lib/json.js'
 
 async function tempDir() {
   return mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-test-'))
@@ -167,5 +168,171 @@ test('saveNotebookFile requires a valid baseVersion', async () => {
   await assert.rejects(
     saveNotebookFile(file, emptyNotebook(), 'not-a-version'),
     (error) => error.code === 'bad-request',
+  )
+})
+
+test('saveNotebookFile maps malformed notebooks to bad-request', async () => {
+  const dir = await tempDir()
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const read = await readNotebookFile(file)
+  const malformed = [
+    null,
+    { nbformat: 4 },
+    { nbformat: 4, cells: [{ cell_type: 'invalid' }] },
+    { nbformat: 3, cells: [] },
+  ]
+  for (const notebook of malformed) {
+    await assert.rejects(
+      saveNotebookFile(file, notebook, read.version),
+      (error) => error.code === 'bad-request' && error.status === 400,
+    )
+  }
+  assert.equal(await readFile(file, 'utf8'), original)
+})
+
+test('saveNotebookFile leaves unexpected serialization errors as internal failures', async () => {
+  const dir = await tempDir()
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const read = await readNotebookFile(file)
+  const notebook = emptyNotebook()
+  notebook.metadata.circular = notebook.metadata
+  await assert.rejects(saveNotebookFile(file, notebook, read.version), (error) => {
+    assert.equal(errorPayload(error).status, 500)
+    return true
+  })
+  assert.equal(await readFile(file, 'utf8'), original)
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'])
+})
+
+test('normalize drops fields that nbformat does not allow', () => {
+  const notebook = normalizeNotebook({
+    extra_top_level: 'drop',
+    nbformat: 4,
+    nbformat_minor: 5,
+    metadata: { kernelspec: { name: 'python3' } },
+    cells: [
+      {
+        cell_type: 'code',
+        id: 'code-cell',
+        metadata: {},
+        source: 'print(1)',
+        execution_count: 1,
+        attachments: { 'x.txt': { 'text/plain': 'x' } },
+        extra_cell: true,
+        outputs: [
+          { output_type: 'stream', name: 'stderr', text: 'oops\n', extra: 1 },
+          {
+            output_type: 'execute_result',
+            data: { 'text/plain': '1' },
+            metadata: {},
+            execution_count: 1,
+            extra: 1,
+          },
+          {
+            output_type: 'display_data',
+            data: { 'text/plain': 'plot' },
+            metadata: {},
+            execution_count: null,
+            display_id: 'd1',
+            extra: 1,
+          },
+          {
+            output_type: 'error',
+            ename: 'ValueError',
+            evalue: 'bad',
+            traceback: ['tb'],
+            extra: 1,
+          },
+          { output_type: 'mystery', data: {} },
+        ],
+      },
+      {
+        cell_type: 'markdown',
+        id: 'md-cell',
+        metadata: {},
+        source: '# hi',
+        attachments: { 'a.txt': { 'text/plain': 'a' } },
+        outputs: [],
+        execution_count: 2,
+        extra: 1,
+      },
+      { cell_type: 'raw', id: 'raw-cell', metadata: {}, source: 'raw', outputs: [] },
+    ],
+  })
+  assert.deepEqual(Object.keys(notebook).sort(), ['cells', 'metadata', 'nbformat', 'nbformat_minor'])
+  const [code, markdown, raw] = notebook.cells
+  assert.deepEqual(Object.keys(code).sort(), [
+    'cell_type',
+    'execution_count',
+    'id',
+    'metadata',
+    'outputs',
+    'source',
+  ])
+  assert.equal(code.attachments, undefined)
+  assert.equal(code.extra_cell, undefined)
+  assert.equal(code.outputs.length, 4, 'unknown output_type is dropped')
+  assert.deepEqual(Object.keys(code.outputs[0]).sort(), ['name', 'output_type', 'text'])
+  assert.deepEqual(Object.keys(code.outputs[1]).sort(), [
+    'data',
+    'execution_count',
+    'metadata',
+    'output_type',
+  ])
+  assert.equal(code.outputs[1].execution_count, 1)
+  assert.deepEqual(Object.keys(code.outputs[2]).sort(), ['data', 'metadata', 'output_type'])
+  assert.equal(code.outputs[2].display_id, undefined)
+  assert.equal(code.outputs[2].execution_count, undefined)
+  assert.deepEqual(Object.keys(code.outputs[3]).sort(), [
+    'ename',
+    'evalue',
+    'output_type',
+    'traceback',
+  ])
+  assert.deepEqual(Object.keys(markdown).sort(), [
+    'attachments',
+    'cell_type',
+    'id',
+    'metadata',
+    'source',
+  ])
+  assert.deepEqual(Object.keys(raw).sort(), ['cell_type', 'id', 'metadata', 'source'])
+})
+
+test('examples/demo.ipynb serializes to an nbformat-legal notebook', async () => {
+  const file = new URL('../examples/demo.ipynb', import.meta.url)
+  const raw = JSON.parse(await readFile(file, 'utf8'))
+  const serialized = serializeNotebook(raw)
+  const parsed = JSON.parse(serialized)
+  assert.equal(parsed.nbformat, 4)
+  assert.equal(parsed.nbformat_minor, 5)
+  for (const cell of parsed.cells) {
+    assert.ok(['code', 'markdown', 'raw'].includes(cell.cell_type))
+    if (cell.cell_type !== 'code') continue
+    for (const output of cell.outputs) {
+      if (output.output_type === 'display_data') {
+        assert.deepEqual(Object.keys(output).sort(), ['data', 'metadata', 'output_type'])
+      }
+    }
+  }
+  // The historical fixture bug: a display_data output carried execution_count.
+  assert.equal(parsed.cells[6].outputs[0].execution_count, undefined)
+})
+
+test('saveNotebookFile caps the on-disk file before reading it', async () => {
+  const dir = await tempDir()
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, '{}')
+  await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+  await assert.rejects(
+    saveNotebookFile(file, emptyNotebook(), '0'.repeat(64)),
+    (error) =>
+      error.code === 'too-large' &&
+      error.status === 413 &&
+      error.details.size === NOTEBOOK_CAP_BYTES + 1,
   )
 })

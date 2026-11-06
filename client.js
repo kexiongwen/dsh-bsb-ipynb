@@ -33,9 +33,11 @@ window.__ModuleLoader__.load({
         moveUp: 'Move up',
         moveDown: 'Move down',
         deleteCell: 'Delete cell',
+        deleteCellConfirm: 'Delete this cell? Its contents will be lost.',
         runCell: 'Run cell',
         editCell: 'Edit cell',
         doneEditing: 'Done editing',
+        changeTypeConfirm: 'Changing the cell type will discard its outputs or attachments. Continue?',
         emptyHint: 'This notebook is empty. Add a code cell and start typing.',
         invalid: 'This file could not be read as a Jupyter notebook.',
         unsupported: 'Only nbformat 4 notebooks are supported.',
@@ -45,7 +47,9 @@ window.__ModuleLoader__.load({
         saved: 'Saved',
         saveFailed: 'Save failed',
         kernelDied: 'The kernel stopped unexpectedly.',
+        kernelRestarted: 'Interrupt timed out, so the kernel was restarted. All variables and kernel state have been cleared.',
         streamIncomplete: 'Execution ended before the cell finished.',
+        outputTruncated: 'Output was truncated because it exceeded the display limit.',
         kernelUnavailable: 'No Python interpreter with jupyter_client and ipykernel was found.',
         installHint: 'Install them with: python -m pip install jupyter_client ipykernel',
         restartConfirm: 'Restart the kernel to switch interpreter?',
@@ -77,9 +81,11 @@ window.__ModuleLoader__.load({
         moveUp: '上移',
         moveDown: '下移',
         deleteCell: '删除单元格',
+        deleteCellConfirm: '删除此单元格？其内容将丢失。',
         runCell: '运行单元格',
         editCell: '编辑单元格',
         doneEditing: '完成编辑',
+        changeTypeConfirm: '切换单元格类型将丢弃其输出或附件，是否继续？',
         emptyHint: '这个 notebook 是空的。添加一个代码单元格开始使用。',
         invalid: '无法将该文件解析为 Jupyter notebook。',
         unsupported: '仅支持 nbformat 4 的 notebook。',
@@ -89,7 +95,9 @@ window.__ModuleLoader__.load({
         saved: '已保存',
         saveFailed: '保存失败',
         kernelDied: '内核意外退出。',
+        kernelRestarted: '中断超时，内核已强制重启；所有变量和内核状态均已清空。',
         streamIncomplete: '执行流在单元格完成前中断。',
+        outputTruncated: '输出超过显示上限，已截断。',
         kernelUnavailable: '未找到安装了 jupyter_client 和 ipykernel 的 Python 解释器。',
         installHint: '可使用以下命令安装：python -m pip install jupyter_client ipykernel',
         restartConfirm: '切换解释器需要重启内核，是否继续？',
@@ -612,6 +620,7 @@ window.__ModuleLoader__.load({
       }
     }
 
+    const CELL_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/
     let cellCounter = 0
 
     function newCellId() {
@@ -630,20 +639,91 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // nbformat output objects are strict (additionalProperties: false): only
+    // execute_result may carry execution_count, and display_id is a transient
+    // Jupyter message field that must never reach a .ipynb file.
+    function stripIllegalOutputFields(output) {
+      if (!output || typeof output !== 'object') return output
+      const clean = { ...output }
+      delete clean.display_id
+      if (clean.output_type !== 'execute_result') delete clean.execution_count
+      return clean
+    }
+
+    // Autosave must recover after a failed save once the user edits again,
+    // but must not retry the same failing snapshot in a loop.
+    function shouldScheduleAutosave(state) {
+      if (state.loadStatus !== 'ok' || !state.dirty) return false
+      if (state.conflict || state.autosaveBlocked || state.runningCell) return false
+      if (state.saveState === 'saving') return false
+      if (state.saveState === 'failed' && !state.notebookChangedSinceFailure) return false
+      return true
+    }
+
+    // Toolbar click handlers are invoked with a DOM/Synthetic event; only a
+    // real interpreter path string may be forwarded to the restart route.
+    function resolveRestartPython(nextPython, currentPython) {
+      if (typeof nextPython === 'string' && nextPython) return nextPython
+      return currentPython || undefined
+    }
+
+    function executeReplyFailed(event) {
+      return Boolean(event && event.type === 'execute_reply' && event.ok === false)
+    }
+
+    function kernelRestartedReply(event) {
+      return Boolean(event && event.type === 'execute_reply' && event.kernel_restarted === true)
+    }
+
+    function shouldHandleCellEvent(cellId, event) {
+      return !event.cell_id || event.cell_id === cellId
+    }
+
+    function cellTypeChangeLosesData(cell, type) {
+      const losesOutputs = type !== 'code' && Array.isArray(cell.outputs) && cell.outputs.length > 0
+      const losesAttachments = type !== 'markdown' && cell.attachments && typeof cell.attachments === 'object' && Object.keys(cell.attachments).length > 0
+      return Boolean(losesOutputs || losesAttachments)
+    }
+
+    function saveButtonDisabled({ dirty, saveState, conflict, running }) {
+      return Boolean(conflict) || Boolean(running) || !dirty || saveState === 'saving'
+    }
+
+    function isStaleSaveResponse(currentSeq, responseSeq) {
+      return currentSeq !== responseSeq
+    }
+
+    // A run that ends without an execute_reply did not produce a real terminal
+    // state (fatal / kernel_died / truncated stream / abort); keep the pre-run
+    // outputs instead of leaving the cell wiped.
+    function shouldRestoreOutputsAfterRun(replySeen) {
+      return !replySeen
+    }
+
     function normalizeNotebook(value) {
       if (!value || typeof value !== 'object' || !Array.isArray(value.cells)) return emptyNotebook()
+      const cellIds = new Set()
       return {
         ...value,
         nbformat: 4,
         nbformat_minor: typeof value.nbformat_minor === 'number' ? value.nbformat_minor : 5,
         cells: value.cells.map((cell) => {
+          let id = typeof cell.id === 'string' && CELL_ID_PATTERN.test(cell.id) ? cell.id : ''
+          if (!id || cellIds.has(id)) {
+            do {
+              id = newCellId()
+            } while (cellIds.has(id))
+          }
+          cellIds.add(id)
           const output = {
             ...cell,
-            id: cell.id || newCellId(),
+            id,
             source: Array.isArray(cell.source) ? cell.source.join('') : String(cell.source ?? ''),
           }
           if (output.cell_type === 'code') {
-            output.outputs = Array.isArray(output.outputs) ? output.outputs : []
+            output.outputs = Array.isArray(output.outputs)
+              ? output.outputs.map(stripIllegalOutputFields)
+              : []
             output.execution_count = typeof output.execution_count === 'number' ? output.execution_count : null
           }
           return output
@@ -658,7 +738,9 @@ window.__ModuleLoader__.load({
       value.cells = value.cells.map((cell) => {
         const copy = { ...cell, id: cell.id || newCellId() }
         if (copy.cell_type === 'code') {
-          copy.outputs = Array.isArray(copy.outputs) ? copy.outputs : []
+          copy.outputs = Array.isArray(copy.outputs)
+            ? copy.outputs.map(stripIllegalOutputFields)
+            : []
           copy.execution_count = typeof copy.execution_count === 'number' ? copy.execution_count : null
         }
         const source = String(copy.source ?? '')
@@ -758,7 +840,7 @@ window.__ModuleLoader__.load({
       return value == null ? '' : String(value)
     }
 
-    function OutputView({ output }) {
+    function OutputView({ output, resolveImage }) {
       if (!output || typeof output !== 'object') return null
       if (output.output_type === 'stream') {
         return h('pre', {
@@ -791,7 +873,9 @@ window.__ModuleLoader__.load({
       if (data['text/markdown'] != null) {
         return h('div', {
           className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-markdown',
-          dangerouslySetInnerHTML: { __html: renderMarkdown(mimeText(data['text/markdown'])) },
+          // Output markdown can reference attachment:/relative images just like
+          // markdown cells, so use the image-aware renderer here too.
+          dangerouslySetInnerHTML: { __html: renderMarkdownWithImages(mimeText(data['text/markdown']), resolveImage) },
         })
       }
       if (typeof data['application/json'] !== 'undefined') {
@@ -884,7 +968,7 @@ window.__ModuleLoader__.load({
               ? h(IconButton, { title: t('runCell'), disabled: running, onClick: () => onRun(cell.id) }, running ? '…' : t('run'))
               : null,
             code || markdown
-              ? h(IconButton, { title: editing ? t('doneEditing') : t('editCell'), onClick: () => (editing ? onDone() : onEdit(cell.id)) }, editing ? 'Done' : 'Edit')
+              ? h(IconButton, { title: editing ? t('doneEditing') : t('editCell'), onClick: () => (editing ? onDone() : onEdit(cell.id)) }, editing ? t('doneEditing') : t('editCell'))
               : null,
             h(IconButton, { title: t('moveUp'), disabled: index === 0, onClick: () => onMove(cell.id, -1) }, '↑'),
             h(IconButton, { title: t('moveDown'), disabled: index === count - 1, onClick: () => onMove(cell.id, 1) }, '↓'),
@@ -940,13 +1024,13 @@ window.__ModuleLoader__.load({
                 })
             : h('pre', { className: 'dsh-bsb-ipynb-raw' }, source),
         code && Array.isArray(cell.outputs) && cell.outputs.length
-          ? h('div', { className: 'dsh-bsb-ipynb-outputs' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output })))
+          ? h('div', { className: 'dsh-bsb-ipynb-outputs' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output, resolveImage })))
           : null,
       )
     }
 
     function Toolbar(props) {
-      const { kernel, python, interpreters, running, runAllRunning, onRunAll, onInterrupt, onRestart, onShutdown, onSave, onReload, onPython, saveState, dirty } = props
+      const { kernel, python, interpreters, running, runAllRunning, onRunAll, onInterrupt, onRestart, onShutdown, onSave, onReload, onPython, saveState, dirty, conflict } = props
       const state = !kernel.running ? t('off') : kernel.busy ? t('busy') : t('idle')
       return h(
         'div',
@@ -982,8 +1066,8 @@ window.__ModuleLoader__.load({
           { className: 'dsh-bsb-ipynb-toolbar-group' },
           h(IconButton, { title: t('runAll'), disabled: !python || running || runAllRunning, onClick: onRunAll }, '▶▶'),
           h(IconButton, { title: t('interrupt'), disabled: !kernel.running, onClick: onInterrupt }, '■'),
-          h(IconButton, { title: t('restart'), disabled: !kernel.running || running, onClick: onRestart }, '↻'),
-          h(IconButton, { title: t('save'), disabled: !dirty || saveState === 'saving', onClick: onSave }, saveState === 'saving' ? '…' : t('save')),
+          h(IconButton, { title: t('restart'), disabled: !kernel.running || running, onClick: () => onRestart() }, '↻'),
+          h(IconButton, { title: t('save'), disabled: saveButtonDisabled({ dirty, saveState, conflict, running }), onClick: onSave }, saveState === 'saving' ? '…' : t('save')),
           h(IconButton, { title: t('reload'), onClick: onReload }, t('reload')),
           h(IconButton, { title: t('shutdown'), disabled: !kernel.running, onClick: onShutdown }, '⏻'),
         ),
@@ -1032,18 +1116,22 @@ window.__ModuleLoader__.load({
       const notebookRef = useRef(notebook)
       const versionRef = useRef(version)
       const runningRef = useRef(null)
-      const savingRef = useRef(false)
+      const activeRunRef = useRef(null)
+      const savingRef = useRef(null)
       const saveRef = useRef(null)
       const pythonRef = useRef('')
       const forceReloadRef = useRef(false)
       const saveTimerRef = useRef(null)
       const clearPendingRef = useRef(new Set())
       const stopRef = useRef(false)
-      const runAllRef = useRef(false)
-      const runFailedRef = useRef(false)
-      const replySeenRef = useRef(false)
+      const runAllRef = useRef(null)
       const abortRef = useRef(null)
       const pollRef = useRef(null)
+      const failedSnapshotRef = useRef(null)
+      const documentSeqRef = useRef(0)
+      const notebookRevisionRef = useRef(0)
+      const outputTruncatedRef = useRef(false)
+      const truncationNotifiedRef = useRef(false)
 
       dirtyRef.current = dirty
       notebookRef.current = notebook
@@ -1052,13 +1140,40 @@ window.__ModuleLoader__.load({
 
       const markDirty = useCallback(() => {
         forceReloadRef.current = false
+        notebookRevisionRef.current += 1
+        dirtyRef.current = true
         setDirty(true)
       }, [])
 
+      const invalidateDocumentWork = useCallback(() => {
+        // Invalidate first: aborting the old stream can immediately reject it.
+        documentSeqRef.current += 1
+        notebookRevisionRef.current += 1
+        savingRef.current = null
+        activeRunRef.current = null
+        runningRef.current = null
+        runAllRef.current = null
+        stopRef.current = true
+        clearPendingRef.current.clear()
+        outputTruncatedRef.current = false
+        truncationNotifiedRef.current = false
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+        if (abortRef.current) abortRef.current.abort()
+        abortRef.current = null
+      }, [])
+
       const adopt = useCallback((data) => {
+        // A confirmed reload replaces the document; a cancelled prompt never
+        // reaches this point and must leave its execution and draft intact.
+        invalidateDocumentWork()
+        setRunningCell(null)
+        setRunAllRunning(false)
+        setSaveState('idle')
         if (!data || typeof data !== 'object') {
           setLoadStatus('error')
           setLoadMessage('Invalid server response')
+          notebookRef.current = null
           setNotebook(null)
           return
         }
@@ -1066,17 +1181,21 @@ window.__ModuleLoader__.load({
           setLoadStatus('ok')
           setLoadError(null)
           setLoadMessage(null)
-          setNotebook(normalizeNotebook(data.notebook))
+          const nextNotebook = normalizeNotebook(data.notebook)
+          notebookRef.current = nextNotebook
+          setNotebook(nextNotebook)
           setVersion(data.version || '')
           versionRef.current = data.version || ''
           setEmptyFile(Boolean(data.emptyFile))
+          dirtyRef.current = false
           setDirty(false)
-          setSaveState('idle')
           setConflict(null)
           setAutosaveBlocked(false)
+          failedSnapshotRef.current = null
           setBanner(data.emptyFile ? { kind: 'info', text: t('emptyFile') } : null)
           return
         }
+        notebookRef.current = null
         setNotebook(null)
         setVersion(data.version || '')
         versionRef.current = data.version || ''
@@ -1084,7 +1203,7 @@ window.__ModuleLoader__.load({
         setLoadError(data.error || null)
         setLoadMessage(data.message || null)
         setBanner(null)
-      }, [])
+      }, [invalidateDocumentWork])
 
       useEffect(() => {
         if (customData === customRef.current) return
@@ -1095,59 +1214,88 @@ window.__ModuleLoader__.load({
       }, [customData, adopt])
 
       const reload = useCallback(() => {
-        setBanner(null)
-        setConflict(null)
         forceReloadRef.current = true
         // The host owns the unsaved-changes confirmation and the reload itself.
         // Delegating avoids overwriting the draft when the user cancels the
-        // host's "discard changes?" prompt.
+        // host's "discard changes?" prompt. Conflict/banner state is only
+        // cleared by a successful adopt(), so a cancelled prompt keeps the
+        // conflict explanation and keeps saving blocked.
         if (typeof onReload === 'function') {
           onReload()
           return
         }
-        setDirty(false)
-        setSaveState('idle')
         readNotebook(ctx, path, scope).then((data) => adopt(data)).catch(() => {})
       }, [ctx, path, scope, onReload, adopt])
 
       const openAsEmpty = useCallback(() => {
-        setNotebook(emptyNotebook())
+        invalidateDocumentWork()
+        setRunningCell(null)
+        setRunAllRunning(false)
+        setSaveState('idle')
+        const nextNotebook = emptyNotebook()
+        notebookRef.current = nextNotebook
+        setNotebook(nextNotebook)
         setLoadStatus('ok')
         setLoadError(null)
         setLoadMessage(null)
+        dirtyRef.current = false
         setDirty(false)
         setAutosaveBlocked(true)
         setBanner({ kind: 'info', text: t('emptyHint') })
-      }, [])
+      }, [invalidateDocumentWork])
 
       const save = useCallback(async () => {
-        if (savingRef.current || !notebookRef.current || loadStatus !== 'ok' || conflict) return
-        savingRef.current = true
+        // All entry points (including Ctrl+S and an already queued autosave)
+        // must avoid persisting the transient, cleared outputs of a running cell.
+        if (runningRef.current || runAllRef.current || savingRef.current || !notebookRef.current || loadStatus !== 'ok') return
+        if (conflict) {
+          // A 409 blocks saving until the user reloads; surface that instead of
+          // silently ignoring the click or Ctrl+S.
+          setSaveState('failed')
+          setBanner({ kind: 'error', text: t('conflict'), action: 'reload' })
+          return
+        }
         const snapshot = notebookRef.current
+        const seq = documentSeqRef.current
+        const revision = notebookRevisionRef.current
+        const request = { seq }
+        savingRef.current = request
+        const isCurrentSave = () => savingRef.current === request && !isStaleSaveResponse(documentSeqRef.current, seq)
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
         setSaveState('saving')
         setAutosaveBlocked(false)
         try {
           const value = await postJson(ctx, 'save', {
             sessionId: scope && scope.sessionId,
             path,
-            notebook: snapshot,
+            // Never send display_id / schema-illegal output fields to the
+            // server; the in-memory notebook keeps display_id for live updates.
+            notebook: normalizeNotebook(snapshot),
             baseVersion: versionRef.current,
           })
+          if (!isCurrentSave()) return
           versionRef.current = value.version
           setVersion(value.version)
-          if (notebookRef.current === snapshot) {
+          failedSnapshotRef.current = null
+          if (notebookRef.current === snapshot && notebookRevisionRef.current === revision) {
+            dirtyRef.current = false
             setDirty(false)
           } else {
             // The user kept typing while the request was in flight. Keep the
             // newer draft dirty and let the autosave effect write it too.
+            dirtyRef.current = true
             setDirty(true)
           }
           setSaveState('saved')
           setConflict(null)
           setBanner(null)
           if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-          saveTimerRef.current = setTimeout(() => setSaveState((current) => (current === 'saved' ? 'idle' : current)), 1000)
+          saveTimerRef.current = setTimeout(() => {
+            setSaveState((current) => (!isStaleSaveResponse(documentSeqRef.current, seq) && current === 'saved' ? 'idle' : current))
+          }, 1000)
         } catch (error) {
+          if (!isCurrentSave()) return
+          failedSnapshotRef.current = snapshot
           setSaveState('failed')
           if (error && error.code === 'write-conflict') {
             setConflict((error.details && error.details.version) || 'conflict')
@@ -1156,7 +1304,7 @@ window.__ModuleLoader__.load({
             setBanner({ kind: 'error', text: t('saveFailed') + (error && error.message ? ': ' + error.message : '') })
           }
         } finally {
-          savingRef.current = false
+          if (isCurrentSave()) savingRef.current = null
         }
       }, [ctx, path, scope, loadStatus, conflict])
 
@@ -1221,55 +1369,75 @@ window.__ModuleLoader__.load({
       }, [refreshKernel, visible])
 
       useEffect(() => {
-        if (loadStatus !== 'ok' || !dirty || conflict || autosaveBlocked || runningCell || saveState === 'saving' || saveState === 'failed') return undefined
+        const changedSinceFailure = failedSnapshotRef.current === null || notebook !== failedSnapshotRef.current
+        if (!shouldScheduleAutosave({ loadStatus, dirty, conflict, autosaveBlocked, runningCell, saveState, notebookChangedSinceFailure: changedSinceFailure })) return undefined
         const timer = setTimeout(() => {
           void saveRef.current()
         }, AUTOSAVE_MS)
         return () => clearTimeout(timer)
       }, [dirty, notebook, conflict, autosaveBlocked, saveState, loadStatus, runningCell])
 
+      // Truncation happens deep inside a setNotebook updater; surface it as a
+      // one-time info banner after the state change commits.
+      useEffect(() => {
+        if (!outputTruncatedRef.current || truncationNotifiedRef.current) return
+        truncationNotifiedRef.current = true
+        setBanner((current) => (current && current.kind === 'error' ? current : { kind: 'info', text: t('outputTruncated') }))
+      }, [notebook])
+
       useEffect(() => {
         return () => {
-          if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
           if (pollRef.current) clearInterval(pollRef.current)
-          stopRef.current = true
-          if (abortRef.current) abortRef.current.abort()
+          invalidateDocumentWork()
         }
+      }, [invalidateDocumentWork])
+
+      const updateRunCell = useCallback((seq, cellId, updater) => {
+        // React may apply this after the stream has completed. Keep normal
+        // terminal updates, but never apply them to a replacement document.
+        setNotebook((previous) => isStaleSaveResponse(documentSeqRef.current, seq)
+          ? previous
+          : updateCell(previous, cellId, (cell) => cell.cell_type === 'code' ? updater(cell) : cell))
       }, [])
 
-      const appendOutput = useCallback((cellId, output) => {
-        setNotebook((previous) =>
-          updateCell(previous, cellId, (cell) => {
-            let outputs = Array.isArray(cell.outputs) ? cell.outputs : []
-            if (clearPendingRef.current.has(cellId)) {
-              clearPendingRef.current.delete(cellId)
-              outputs = []
-            }
-            let next
-            if (output.output_type === 'stream' && outputs.length) {
-              const last = outputs[outputs.length - 1]
-              if (last.output_type === 'stream' && last.name === output.name) {
-                const merged = { ...last, text: String(last.text || '') + String(output.text || '') }
-                if (merged.text.length > 5_000_000) merged.text = merged.text.slice(0, 5_000_000) + '\n…[output truncated]'
-                next = [...outputs.slice(0, -1), merged]
+      const appendOutput = useCallback((seq, cellId, output) => {
+        updateRunCell(seq, cellId, (cell) => {
+          let outputs = Array.isArray(cell.outputs) ? cell.outputs : []
+          if (clearPendingRef.current.has(cellId)) {
+            clearPendingRef.current.delete(cellId)
+            outputs = []
+          }
+          let next
+          if (output.output_type === 'stream' && outputs.length) {
+            const last = outputs[outputs.length - 1]
+            if (last.output_type === 'stream' && last.name === output.name) {
+              const merged = { ...last, text: String(last.text || '') + String(output.text || '') }
+              if (merged.text.length > 5_000_000) {
+                merged.text = merged.text.slice(0, 5_000_000) + '\n…[output truncated]'
+                outputTruncatedRef.current = true
               }
+              next = [...outputs.slice(0, -1), merged]
             }
-            if (!next) next = [...outputs, output]
-            if (outputsSize(next) > MAX_CELL_OUTPUT_BYTES) {
-              // Alternating stdout/stderr and huge displays could otherwise grow
-              // a single cell without bound. Keep a bounded marker instead.
-              return {
-                ...cell,
-                outputs: [{ output_type: 'stream', name: 'stderr', text: '…[output limit reached, remaining output dropped]' }],
-              }
+          }
+          if (!next) next = [...outputs, output]
+          if (outputsSize(next) > MAX_CELL_OUTPUT_BYTES) {
+            // Alternating stdout/stderr and huge displays could otherwise grow
+            // a single cell without bound. Keep a bounded marker instead.
+            outputTruncatedRef.current = true
+            return {
+              ...cell,
+              outputs: [{ output_type: 'stream', name: 'stderr', text: '…[output limit reached, remaining output dropped]' }],
             }
-            return { ...cell, outputs: next }
-          }),
-        )
-      }, [])
+          }
+          return { ...cell, outputs: next }
+        })
+      }, [updateRunCell])
 
-      const handleEvent = useCallback((cellId, event) => {
+      const handleEvent = useCallback((run, event) => {
+        if (activeRunRef.current !== run || isStaleSaveResponse(documentSeqRef.current, run.seq)) return
+        const { seq, cellId } = run
         if (!event || typeof event.type !== 'string') return
+        if (!shouldHandleCellEvent(cellId, event)) return
         if (event.type === 'ping') return
         if (event.type === 'status') {
           const state = event.execution_state || 'idle'
@@ -1277,7 +1445,7 @@ window.__ModuleLoader__.load({
           return
         }
         if (event.type === 'stream') {
-          appendOutput(cellId, { output_type: 'stream', name: event.name || 'stdout', text: String(event.text || '') })
+          appendOutput(seq, cellId, { output_type: 'stream', name: event.name || 'stdout', text: String(event.text || '') })
           return
         }
         if (event.type === 'display_data' || event.type === 'execute_result') {
@@ -1285,41 +1453,45 @@ window.__ModuleLoader__.load({
             output_type: event.type,
             data: event.data || {},
             metadata: event.metadata || {},
-            execution_count: event.execution_count ?? null,
           }
+          // nbformat only allows an integer execution_count on execute_result;
+          // display_data must never carry one.
+          if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) {
+            output.execution_count = event.execution_count
+          }
+          // display_id is a Jupyter transient used to match update_display_data;
+          // it stays in memory only and is stripped before saving.
           if (event.display_id) output.display_id = event.display_id
-          appendOutput(cellId, output)
-          if (event.type === 'execute_result' && typeof event.execution_count === 'number') {
-            setNotebook((previous) => updateCell(previous, cellId, (cell) => ({ ...cell, execution_count: event.execution_count })))
+          appendOutput(seq, cellId, output)
+          if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) {
+            updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
           return
         }
         if (event.type === 'update_display_data') {
-          setNotebook((previous) =>
-            updateCell(previous, cellId, (cell) => {
-              if (!event.display_id) return cell
-              return {
-                ...cell,
-                outputs: (cell.outputs || []).map((output) =>
-                  output.display_id === event.display_id
-                    ? { ...output, data: event.data || {}, metadata: event.metadata || {} }
-                    : output,
-                ),
-              }
-            }),
-          )
+          updateRunCell(seq, cellId, (cell) => {
+            if (!event.display_id) return cell
+            return {
+              ...cell,
+              outputs: (cell.outputs || []).map((output) =>
+                output.display_id === event.display_id
+                  ? { ...output, data: event.data || {}, metadata: event.metadata || {} }
+                  : output,
+              ),
+            }
+          })
           return
         }
         if (event.type === 'clear_output') {
           if (event.wait) {
             clearPendingRef.current.add(cellId)
           } else {
-            setNotebook((previous) => updateCell(previous, cellId, (cell) => ({ ...cell, outputs: [] })))
+            updateRunCell(seq, cellId, (cell) => ({ ...cell, outputs: [] }))
           }
           return
         }
         if (event.type === 'error') {
-          appendOutput(cellId, {
+          appendOutput(seq, cellId, {
             output_type: 'error',
             ename: event.ename || 'Error',
             evalue: event.evalue || '',
@@ -1328,41 +1500,63 @@ window.__ModuleLoader__.load({
           return
         }
         if (event.type === 'execute_reply') {
-          replySeenRef.current = true
+          run.replySeen = true
+          // A normal Python error is still a real terminal reply; mark the run
+          // failed so run-all stops instead of racing through later cells.
+          if (executeReplyFailed(event)) run.failed = true
+          if (kernelRestartedReply(event)) {
+            run.failed = true
+            setBanner({ kind: 'error', text: t('kernelRestarted') })
+          }
           if (typeof event.execution_count === 'number') {
-            setNotebook((previous) => updateCell(previous, cellId, (cell) => ({ ...cell, execution_count: event.execution_count })))
+            updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
           markDirty()
           setKernel((previous) => ({ ...previous, running: true, busy: false, executionState: 'idle' }))
           return
         }
         if (event.type === 'kernel_died') {
-          runFailedRef.current = true
+          run.failed = true
           setBanner({ kind: 'error', text: event.message || t('kernelDied') })
           setKernel((previous) => ({ ...previous, running: false, ready: false, busy: false, executionState: 'none' }))
           return
         }
         if (event.type === 'fatal') {
-          runFailedRef.current = true
+          run.failed = true
           setBanner({ kind: 'error', text: event.message || t('loadError') })
         }
-      }, [appendOutput])
+      }, [appendOutput, updateRunCell, markDirty])
 
       const runCell = useCallback(async (cellId) => {
         if (runningRef.current || conflict || loadStatus !== 'ok') return false
         const current = notebookRef.current
         const cell = current && current.cells.find((entry) => entry.id === cellId)
         if (!cell || cell.cell_type !== 'code') return false
+        // Snapshot the displayed outputs so a run that never reaches an
+        // execute_reply (fatal / kernel_died / truncated stream / abort) can
+        // restore them instead of leaving the cell wiped.
+        const previousOutputs = Array.isArray(cell.outputs) ? cell.outputs : []
+        const previousExecutionCount = typeof cell.execution_count === 'number' ? cell.execution_count : null
+        const controller = typeof AbortController === 'function' ? new AbortController() : null
+        const run = { seq: documentSeqRef.current, cellId, replySeen: false, failed: false }
+        const isCurrentRun = () => activeRunRef.current === run && !isStaleSaveResponse(documentSeqRef.current, run.seq)
+        activeRunRef.current = run
+        abortRef.current = controller
+        // A save started before execution must not clear dirty using a ref
+        // that React has not yet updated with this run's queued changes.
+        notebookRevisionRef.current += 1
         setEditingCell(null)
-        runFailedRef.current = false
-        replySeenRef.current = false
         runningRef.current = cellId
         setRunningCell(cellId)
         clearPendingRef.current.delete(cellId)
         setKernel((previous) => ({ ...previous, running: true, busy: true, executionState: 'busy' }))
-        setNotebook((previous) => updateCell(previous, cellId, (entry) => ({ ...entry, outputs: [], execution_count: null })))
-        const controller = typeof AbortController === 'function' ? new AbortController() : null
-        abortRef.current = controller
+        updateRunCell(run.seq, cellId, (entry) => ({ ...entry, outputs: [], execution_count: null }))
+        const restorePreRunOutputs = () => {
+          if (!isCurrentRun()) return
+          // No save can start during execution. Restore only the outputs and
+          // preserve dirty/source edits (including a pre-run save completing).
+          updateRunCell(run.seq, cellId, (entry) => ({ ...entry, outputs: previousOutputs, execution_count: previousExecutionCount }))
+        }
         try {
           await streamExecute(
             ctx,
@@ -1373,11 +1567,24 @@ window.__ModuleLoader__.load({
               code: cell.source,
               python: pythonRef.current || undefined,
             },
-            (event) => handleEvent(cellId, event),
+            (event) => handleEvent(run, event),
             controller ? controller.signal : undefined,
           )
+          if (!isCurrentRun()) return false
+          // Missing terminal replies must not turn temporary output loss into
+          // a saved result, nor restore a snapshot over a reloaded document.
+          if (shouldRestoreOutputsAfterRun(run.replySeen)) {
+            restorePreRunOutputs()
+            if (!run.failed) setBanner({ kind: 'error', text: t('streamIncomplete') })
+            run.failed = true
+          }
+          return !run.failed
         } catch (error) {
-          if (error && error.name === 'AbortError') return false
+          if (!isCurrentRun()) return false
+          if (error && error.name === 'AbortError') {
+            if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
+            return false
+          }
           const code = error && error.code
           if (code === 'kernel-unavailable' || code === 'interpreter-unknown') {
             setBanner({ kind: 'error', text: t('kernelUnavailable') + ' ' + t('installHint') })
@@ -1385,38 +1592,37 @@ window.__ModuleLoader__.load({
             setBanner({ kind: 'error', text: (error && error.message) || t('kernelDied') })
           }
           setKernel((previous) => ({ ...previous, busy: false, executionState: 'idle' }))
+          if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
           return false
         } finally {
-          runningRef.current = null
-          setRunningCell(null)
-        }
-        // A truncated stream (server output cap, lost socket, proxy reset)
-        // must not be reported as a successful cell.
-        if (!replySeenRef.current) {
-          if (!runFailedRef.current) {
-            setBanner({ kind: 'error', text: t('streamIncomplete') })
+          if (isCurrentRun()) {
+            activeRunRef.current = null
+            abortRef.current = null
+            runningRef.current = null
+            setRunningCell(null)
           }
-          runFailedRef.current = true
         }
-        return !runFailedRef.current
-      }, [ctx, path, scope, conflict, loadStatus, handleEvent])
+      }, [ctx, path, scope, conflict, loadStatus, handleEvent, updateRunCell])
 
       const runAll = useCallback(async () => {
         if (runAllRef.current || conflict) return
-        runAllRef.current = true
+        const batch = { seq: documentSeqRef.current }
+        runAllRef.current = batch
         stopRef.current = false
         setRunAllRunning(true)
         try {
           for (const cell of notebookRef.current && notebookRef.current.cells ? [...notebookRef.current.cells] : []) {
-            if (stopRef.current) break
+            if (runAllRef.current !== batch || isStaleSaveResponse(documentSeqRef.current, batch.seq) || stopRef.current) break
             if (cell.cell_type !== 'code') continue
             const succeeded = await runCell(cell.id)
-            if (!succeeded) break
+            if (!succeeded || runAllRef.current !== batch) break
           }
         } finally {
-          runAllRef.current = false
-          stopRef.current = false
-          setRunAllRunning(false)
+          if (runAllRef.current === batch) {
+            runAllRef.current = null
+            stopRef.current = false
+            setRunAllRunning(false)
+          }
         }
       }, [conflict, runCell])
 
@@ -1434,7 +1640,7 @@ window.__ModuleLoader__.load({
           const value = await postJson(ctx, 'restart', {
             sessionId: scope && scope.sessionId,
             path,
-            python: nextPython || pythonRef.current || undefined,
+            python: resolveRestartPython(nextPython, pythonRef.current),
           })
           setBanner({ kind: 'info', text: t('kernel') + ': ' + (value.python || pythonRef.current || '') })
           await refreshKernel()
@@ -1497,18 +1703,23 @@ window.__ModuleLoader__.load({
       }, [markDirty])
 
       const deleteCell = useCallback((cellId) => {
+        if (typeof window === 'undefined' || !window.confirm || !window.confirm(t('deleteCellConfirm'))) return
         setNotebook((previous) => (previous ? { ...previous, cells: previous.cells.filter((cell) => cell.id !== cellId) } : previous))
         setEditingCell((current) => (current === cellId ? null : current))
         markDirty()
       }, [markDirty])
 
       const changeType = useCallback((cellId, type) => {
+        const current = notebookRef.current
+        const cell = current && current.cells.find((entry) => entry.id === cellId)
+        if (!cell) return
+        if (cellTypeChangeLosesData(cell, type) && (typeof window === 'undefined' || !window.confirm || !window.confirm(t('changeTypeConfirm')))) return
         setNotebook((previous) =>
-          updateCell(previous, cellId, (cell) => {
-            const next = { ...cell, cell_type: type }
+          updateCell(previous, cellId, (currentCell) => {
+            const next = { ...currentCell, cell_type: type }
             if (type === 'code') {
-              next.outputs = Array.isArray(cell.outputs) ? cell.outputs : []
-              next.execution_count = cell.execution_count ?? null
+              next.outputs = Array.isArray(currentCell.outputs) ? currentCell.outputs : []
+              next.execution_count = currentCell.execution_count ?? null
             } else {
               delete next.outputs
               delete next.execution_count
@@ -1587,6 +1798,7 @@ window.__ModuleLoader__.load({
           onPython: changePython,
           saveState,
           dirty,
+          conflict,
         }),
         h(Banner, { banner, onReload: reload }),
         h(
@@ -1896,12 +2108,23 @@ window.__ModuleLoader__.load({
       highlightPython,
       normalizeNotebook,
       serializeNotebook,
+      stripIllegalOutputFields,
+      shouldScheduleAutosave,
+      resolveRestartPython,
+      executeReplyFailed,
+      kernelRestartedReply,
+      shouldHandleCellEvent,
+      cellTypeChangeLosesData,
+      saveButtonDisabled,
+      isStaleSaveResponse,
+      shouldRestoreOutputsAfterRun,
       emptyNotebook,
       readNotebook,
       normalizePosix,
       dirnamePosix,
       apply,
       NotebookView,
+      CellView,
     }
 
     return { inject: ['betterSidebar'], apply, __test }

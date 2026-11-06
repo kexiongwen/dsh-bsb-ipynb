@@ -11,7 +11,7 @@ handling stays in the Python ecosystem — no native ZMQ bindings in Node.
 
 Commands (one JSON object per line on stdin):
   {"op": "status"}                          -> {"type": "status_reply", "alive": bool}
-  {"op": "execute", "cell_id": str, "code": str}
+  {"op": "execute", "cell_id": str, "code": str, "exec_id": str}
   {"op": "interrupt"}
   {"op": "restart"}
   {"op": "shutdown"}                        -> clean shutdown, then exit(0)
@@ -26,9 +26,16 @@ Events (one JSON object per line on stdout):
   {"type": "execute_result", "cell_id": ..., "data": {...}, "execution_count": N}
   {"type": "error", "cell_id": ..., "ename": ..., "evalue": ..., "traceback": [...]}
   {"type": "clear_output", "cell_id": ..., "wait": bool}
-  {"type": "execute_reply", "cell_id": ..., "ok": bool, "execution_count": N}
+  {"type": "execute_reply", "cell_id": ..., "ok": bool, "execution_count": N,
+   "kernel_restarted": bool}  # present after an interrupt-timeout restart attempt
   {"type": "kernel_died", "message": ...}
   {"type": "log", "level": "info"|"error"|"warn", "message": ...}
+
+Every event produced by one execution (status/stream/display_data/
+update_display_data/execute_result/error/clear_output/execute_reply, plus a
+kernel_died that belongs to it) echoes the exec_id supplied with that execute
+command, so the host can discard events from a superseded run after restart.
+ready/status_reply/log events carry no exec_id.
 
 Executions are serialized: a second execute while one is in flight is queued
 and run after the first completes (Jupyter kernels execute one request at a
@@ -77,7 +84,7 @@ class Bridge:
         self.kernel_name = kernel_name or None
         self.km = None          # KernelManager
         self.kc = None          # BlockingKernelClient
-        self.pending = {}       # shell msg_id -> cell_id
+        self.pending = {}       # shell msg_id -> (cell_id, exec_id)
         self.idle_events = {}   # shell msg_id -> threading.Event (iopub idle seen)
         # iopub can beat the shell reply that tells us msg_id -> cell_id.
         # Buffer a bounded number of those messages and replay them once the
@@ -86,7 +93,7 @@ class Bridge:
         self.early_idle = set() # msg_ids whose idle status arrived early
         self.executing = False
         self.pending_lock = threading.Lock()
-        self.exec_queue = queue.Queue()   # (cell_id, code)
+        self.exec_queue = queue.Queue()   # (cell_id, exec_id, code)
         self.stop = threading.Event()
         self.executor = None
         self.interrupt_requested_at = None
@@ -96,9 +103,34 @@ class Bridge:
 
     def start_kernel(self, cwd=None):
         from jupyter_client import KernelManager
-        from jupyter_client.kernelspec import KernelSpecManager
+        from jupyter_client.kernelspec import KernelSpec, KernelSpecManager
 
-        km = KernelManager(kernel_name=self.kernel_name) if self.kernel_name else KernelManager()
+        class SelectedPythonSpecManager(KernelSpecManager):
+            def get_kernel_spec(self, kernel_name):
+                # The host selected the interpreter that launched this bridge.
+                # Keep its invocation path: realpath would discard venv identity.
+                # A registered spec may point at another Python or add its own
+                # environment/provisioner, so supply our own in-memory spec.
+                return KernelSpec(
+                    name=kernel_name,
+                    display_name="Python (selected interpreter)",
+                    language="python",
+                    argv=[sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+                    env={},
+                    metadata={
+                        "kernel_provisioner": {
+                            "provisioner_name": "local-provisioner",
+                            "config": {},
+                        },
+                    },
+                )
+
+        # Restart reuses this manager and its controlled spec. No kernelspec is
+        # installed on disk, and an optional kernel name is only a label.
+        km = KernelManager(
+            kernel_name=self.kernel_name or "python3",
+            kernel_spec_manager=SelectedPythonSpecManager(),
+        )
         try:
             # Redirect the kernel's own stdio away from the bridge's pipes so
             # kernel chatter can never pollute the JSON-lines protocol.
@@ -113,17 +145,16 @@ class Bridge:
         kc = km.client()
         kc.start_channels()
         try:
-            kc.wait_for_ready(timeout=90)
+            # Keep this below the host's 30s ready timeout: self-report a
+            # kernel_died instead of being SIGTERM'd mid-bootstrap (which
+            # would orphan the kernel process).
+            kc.wait_for_ready(timeout=25)
         except Exception as error:
             km.shutdown_kernel(now=True)
             raise
         self.km = km
         self.kc = kc
-        try:
-            info = kc.kernel_info()
-            language_info = info.get("content", {}).get("language_info", {})
-        except Exception:
-            language_info = {}
+        language_info = {}
         emit({
             "type": "ready",
             "kernel_name": getattr(km, "kernel_name", "python3") or "python3",
@@ -146,15 +177,15 @@ class Bridge:
 
     # ----------------------------------------------------------- execution
 
-    def execute(self, cell_id, code):
+    def execute(self, cell_id, exec_id, code):
         """Queue one cell for execution; the executor thread runs it."""
-        self.exec_queue.put((cell_id, code))
+        self.exec_queue.put((cell_id, exec_id, code))
 
     def executor_loop(self):
         """Run queued executions serially; read shell replies."""
         while not self.stop.is_set():
             try:
-                cell_id, code = self.exec_queue.get(timeout=0.3)
+                cell_id, exec_id, code = self.exec_queue.get(timeout=0.3)
             except queue.Empty:
                 continue
             except Exception:
@@ -162,11 +193,12 @@ class Bridge:
             if self.stop.is_set():
                 break
             try:
-                self.run_one(cell_id, code)
+                self.run_one(cell_id, exec_id, code)
             except Exception as error:
                 emit({
                     "type": "error",
                     "cell_id": cell_id,
+                    "exec_id": exec_id,
                     "ename": type(error).__name__,
                     "evalue": str(error),
                     "traceback": traceback.format_exception(type(error), error, error.__traceback__),
@@ -174,43 +206,52 @@ class Bridge:
                 emit({
                     "type": "execute_reply",
                     "cell_id": cell_id,
+                    "exec_id": exec_id,
                     "ok": False,
                     "execution_count": None,
                 })
 
-    def run_one(self, cell_id, code):
+    def run_one(self, cell_id, exec_id, code):
         kc = self.kc
         self.interrupt_requested_at = None
         self.executing = True
         finished = False
         msg_id = None
 
-        def finish(status, error=None, execution_count=None):
+        def finish(status, error=None, execution_count=None, kernel_restarted=None):
             nonlocal finished
             if finished:
                 return
             finished = True
-            emit({
+            event = {
                 "type": "execute_reply",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "ok": status == "ok",
                 "execution_count": execution_count,
                 "status": status,
                 "error": error,
-            })
+            }
+            if kernel_restarted is not None:
+                event["kernel_restarted"] = kernel_restarted
+            emit(event)
 
         try:
             if kc is None or not kc.is_alive():
                 emit({
                     "type": "kernel_died",
                     "cell_id": cell_id,
+                    "exec_id": exec_id,
                     "message": "kernel is not running",
                 })
                 finish("error", "kernel is not running")
                 return
-            msg_id = kc.execute(code, silent=False, store_history=True)
+            # allow_stdin=False is deliberate: this bridge never forwards stdin
+            # requests to the host, so input()/getpass must fail fast with
+            # StdinNotImplementedError instead of blocking forever.
+            msg_id = kc.execute(code, silent=False, store_history=True, allow_stdin=False)
             with self.pending_lock:
-                self.pending[msg_id] = cell_id
+                self.pending[msg_id] = (cell_id, exec_id)
                 idle = threading.Event()
                 self.idle_events[msg_id] = idle
                 early = self.early_iopub.pop(msg_id, [])
@@ -238,8 +279,13 @@ class Bridge:
                     if self.interrupt_requested_at is not None:
                         waited = time.monotonic() - self.interrupt_requested_at
                         if waited > 3:
-                            self.restart()
-                            finish("interrupted", "interrupt timed out; kernel restarted")
+                            restarted = self.restart()
+                            message = (
+                                "interrupt timed out; kernel restarted"
+                                if restarted
+                                else "interrupt timed out; kernel restart failed"
+                            )
+                            finish("interrupted", message, kernel_restarted=restarted)
                             return
                     continue
                 except Exception as error:
@@ -270,6 +316,7 @@ class Bridge:
             emit({
                 "type": "error",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "ename": type(error).__name__,
                 "evalue": str(error),
                 "traceback": traceback.format_exception(type(error), error, error.__traceback__),
@@ -329,9 +376,12 @@ class Bridge:
         parent = msg.get("parent_header", {})
         msg_type = header.get("msg_type", "")
         cell_id = None
+        exec_id = None
         parent_id = parent.get("msg_id")
         with self.pending_lock:
-            cell_id = self.pending.get(parent_id)
+            mapping = self.pending.get(parent_id)
+        if mapping is not None:
+            cell_id, exec_id = mapping
         content = msg.get("content", {})
         if cell_id is None and self.executing and parent_id:
             # The shell reply has not registered this msg_id yet. Buffer the
@@ -351,6 +401,7 @@ class Bridge:
                 "type": "status",
                 "execution_state": state,
                 "cell_id": cell_id,
+                "exec_id": exec_id,
             })
             if state == "idle":
                 with self.pending_lock:
@@ -361,6 +412,7 @@ class Bridge:
             emit({
                 "type": "stream",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "name": content.get("name", "stdout"),
                 "text": content.get("text", ""),
             })
@@ -369,6 +421,7 @@ class Bridge:
             emit({
                 "type": "display_data",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "data": content.get("data", {}),
                 "metadata": content.get("metadata", {}),
                 "display_id": transient.get("display_id"),
@@ -378,6 +431,7 @@ class Bridge:
             emit({
                 "type": "update_display_data",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "data": content.get("data", {}),
                 "metadata": content.get("metadata", {}),
                 "display_id": transient.get("display_id"),
@@ -386,6 +440,7 @@ class Bridge:
             emit({
                 "type": "execute_result",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "data": content.get("data", {}),
                 "execution_count": content.get("execution_count"),
                 "metadata": content.get("metadata", {}),
@@ -394,6 +449,7 @@ class Bridge:
             emit({
                 "type": "error",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "ename": content.get("ename", "Error"),
                 "evalue": content.get("evalue", ""),
                 "traceback": content.get("traceback", []),
@@ -402,6 +458,7 @@ class Bridge:
             emit({
                 "type": "clear_output",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "wait": bool(content.get("wait", False)),
             })
 
@@ -418,10 +475,11 @@ class Bridge:
                 dropped.append(self.exec_queue.get_nowait())
             except queue.Empty:
                 break
-        for cell_id, _code in dropped:
+        for cell_id, exec_id, _code in dropped:
             emit({
                 "type": "execute_reply",
                 "cell_id": cell_id,
+                "exec_id": exec_id,
                 "ok": False,
                 "execution_count": None,
                 "status": status,
@@ -453,7 +511,7 @@ class Bridge:
     def restart(self):
         if self.km is None or self.kc is None:
             log("warn", "no kernel to restart")
-            return
+            return False
         # Same batch semantics: a restart cancels cells queued behind the
         # running one (they would otherwise execute after the fresh kernel).
         self.drain_queue("restarted")
@@ -467,7 +525,7 @@ class Bridge:
                 self.km.restart_kernel(now=True)
             except Exception as error:
                 log("error", "restart failed: %s" % (error,))
-                return
+                return False
             try:
                 # jupyter_client channel threads cannot be restarted on the same
                 # client ("threads can only be started once"), so create a fresh
@@ -475,25 +533,23 @@ class Bridge:
                 # re-read self.kc every iteration, so the swap is safe.
                 kc = self.km.client()
                 kc.start_channels()
-                kc.wait_for_ready(timeout=60)
+                kc.wait_for_ready(timeout=25)
                 self.kc = kc
                 with self.pending_lock:
                     self.pending.clear()
                     self.idle_events.clear()
                 self.interrupt_requested_at = None
-                try:
-                    info = kc.kernel_info()
-                    language_info = info.get("content", {}).get("language_info", {})
-                except Exception:
-                    language_info = {}
+                language_info = {}
                 emit({
                     "type": "ready",
                     "kernel_name": getattr(self.km, "kernel_name", "python3") or "python3",
                     "language_info": language_info,
                 })
                 log("info", "kernel restarted")
+                return True
             except Exception as error:
                 log("error", "restart channels failed: %s" % (error,))
+                return False
         finally:
             self.restarting = False
 
@@ -509,13 +565,20 @@ class Bridge:
             except Exception:
                 log("error", "invalid command line: %r" % (line[:200],))
                 continue
+            if not isinstance(command, dict):
+                log("error", "invalid command: expected JSON object")
+                continue
             op = command.get("op")
             try:
                 if op == "status":
                     alive = self.km is not None and self.kc is not None and self.kc.is_alive()
                     emit({"type": "status_reply", "alive": bool(alive)})
                 elif op == "execute":
-                    self.execute(command.get("cell_id") or "", command.get("code") or "")
+                    self.execute(
+                        command.get("cell_id") or "",
+                        command.get("exec_id"),
+                        command.get("code") or "",
+                    )
                 elif op == "interrupt":
                     self.interrupt()
                 elif op == "restart":
@@ -557,7 +620,10 @@ class Bridge:
 def main():
     parser = argparse.ArgumentParser(description="dsh-bsb-ipynb kernel bridge")
     parser.add_argument("--cwd", default=None, help="working directory for the kernel")
-    parser.add_argument("--kernel-name", default=None, help="Jupyter kernel name")
+    parser.add_argument(
+        "--kernel-name", default=None,
+        help="kernel label (always launches this Python interpreter)",
+    )
     args = parser.parse_args()
     bridge = Bridge(cwd=args.cwd, kernel_name=args.kernel_name)
     code = bridge.run()
