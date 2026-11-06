@@ -21,7 +21,7 @@
     "index.js",
     "client.js",
     "lib",
-    "python",
+    "python/bridge.py",
     "locale",
     "icon.svg",
     "cordis.patch.yml",
