@@ -54,6 +54,7 @@ import argparse
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -192,6 +193,32 @@ class Bridge:
                 self.km.shutdown_kernel(now=True)
         except Exception:
             pass
+
+    def terminate(self, _signum=None, _frame=None):
+        """Clean up the kernel deterministically, then leave without unwinding.
+
+        The host escalates to SIGTERM when the bridge cannot answer an
+        operation (for example while a slow restart blocks the command loop).
+        The kernel must still get the same cleanup as an explicit shutdown
+        instead of relying on ipykernel's parent poller, which leaves the
+        jupyter_client connection file behind.
+        """
+        try:
+            self.shutdown_kernel()
+        finally:
+            os._exit(0)
+
+    def install_signal_handlers(self):
+        """Route SIGTERM/SIGINT through terminate() where the platform allows."""
+        for name in ("SIGTERM", "SIGINT"):
+            number = getattr(signal, name, None)
+            if number is None:
+                continue
+            try:
+                signal.signal(number, self.terminate)
+            except (ValueError, OSError):
+                # Signal handlers can only be installed from the main thread.
+                pass
 
     # ----------------------------------------------------------- execution
 
@@ -660,6 +687,7 @@ class Bridge:
                 log("error", "op %s failed: %s" % (op, error))
 
     def run(self):
+        self.install_signal_handlers()
         cwd = (
             self.cwd
             or os.environ.get("DSH_IPYNB_KERNEL_CWD")

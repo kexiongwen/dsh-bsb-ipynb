@@ -545,6 +545,33 @@ class IOPubTests(unittest.TestCase):
         finally:
             self.bridge.restarting = False
 
+    def test_terminate_signal_runs_the_deterministic_kernel_shutdown(self):
+        calls = []
+        original_exit = bridge_module.os._exit
+        original_shutdown = self.bridge.shutdown_kernel
+        self.bridge.shutdown_kernel = lambda: calls.append("shutdown")
+        bridge_module.os._exit = lambda status: calls.append(("exit", status))
+        try:
+            self.bridge.terminate(15, None)
+        finally:
+            bridge_module.os._exit = original_exit
+            self.bridge.shutdown_kernel = original_shutdown
+        self.assertEqual(calls, ["shutdown", ("exit", 0)],
+                         "a termination signal must clean up the kernel before exiting")
+
+    def test_termination_signals_are_installed_on_the_deterministic_handler(self):
+        registered = {}
+        original_signal = bridge_module.signal.signal
+        bridge_module.signal.signal = lambda number, handler: registered.__setitem__(number, handler)
+        try:
+            self.bridge.install_signal_handlers()
+        finally:
+            bridge_module.signal.signal = original_signal
+        for name in ("SIGTERM", "SIGINT"):
+            number = getattr(bridge_module.signal, name)
+            self.assertEqual(registered.get(number), self.bridge.terminate,
+                             "%s must route through the deterministic cleanup" % name)
+
 
 def real_kernel_regression():
     bridge = bridge_module.Bridge()
