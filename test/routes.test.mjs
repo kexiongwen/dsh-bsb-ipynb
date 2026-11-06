@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { registerIpynbRoutes } from '../lib/routes.js'
@@ -169,6 +169,7 @@ test('health reports version, kernels and interpreter counts', async () => {
   assert.equal(json.ok, true)
   assert.equal(json.value.version, packageJson.version)
   assert.equal(json.value.kernels, 1)
+  assert.equal(typeof json.value.interpreters.checked, 'boolean')
   assert.equal(typeof json.value.interpreters.total, 'number')
 })
 
@@ -342,6 +343,36 @@ test('save rejects malformed client notebooks without modifying the file', async
   }
   assert.equal(await readFile(file, 'utf8'), original)
   assert.deepEqual(await readdir(dir), ['demo.ipynb'])
+})
+
+test('save distinguishes bad requests and inaccessible paths from write conflicts', { skip: process.getuid?.() === 0 }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const ctx = makeCtx({ cwd: dir })
+  try {
+    const badNotebook = await invoke(ctx, makeKernels(), makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: { sessionId: 's1', path: 'demo.ipynb', notebook: {}, baseVersion: 'a'.repeat(64) },
+    }))
+    assert.equal(badNotebook.state.status, 400)
+    assert.equal(badNotebook.json.error.code, 'bad-request')
+
+    const protectedDir = path.join(dir, 'protected')
+    await mkdir(protectedDir)
+    await writeFile(path.join(protectedDir, 'p.ipynb'), serializeNotebook(emptyNotebook()))
+    await chmod(protectedDir, 0o000)
+    const denied = await invoke(ctx, makeKernels(), makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: { sessionId: 's1', path: 'protected/p.ipynb', notebook: emptyNotebook(), baseVersion: 'a'.repeat(64) },
+    }))
+    assert.equal(denied.state.status, 404)
+    assert.equal(denied.json.error.code, 'not-found')
+  } finally {
+    try { await chmod(path.join(dir, 'protected'), 0o755) } catch { /* already gone */ }
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('readJsonBody enforces its byte limit', async () => {

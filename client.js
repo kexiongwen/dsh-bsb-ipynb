@@ -8,6 +8,7 @@ window.__ModuleLoader__.load({
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
     const STATUS_POLL_MS = 10000
+    const MAX_MARKDOWN_QUOTE_DEPTH = 64
 
     const STRINGS = {
       en: {
@@ -243,6 +244,7 @@ window.__ModuleLoader__.load({
 
     function renderMarkdown(source, options) {
       const settings = options || {}
+      const depth = typeof settings.depth === 'number' ? settings.depth : 0
       const resolveImage = typeof settings.resolveImage === 'function' ? settings.resolveImage : null
       const lines = String(source ?? '').replace(/\r\n?/g, '\n').split('\n')
       let index = 0
@@ -253,13 +255,19 @@ window.__ModuleLoader__.load({
           index += 1
           continue
         }
-        const fence = line.match(/^\s*(```+|~~~+)\s*([\w-]*)\s*$/)
-        if (fence) {
-          const marker = fence[1][0] === '`' ? '```' : '~~~'
-          const language = fence[2]
+        const fence = line.match(/^\s*(`{3,}|~{3,})\s*(.*)$/)
+        // A backtick fence's info string may not contain a backtick.
+        if (fence && !(fence[1][0] === '`' && fence[2].includes('`'))) {
+          const char = fence[1][0]
+          const length = fence[1].length
+          const info = fence[2].trim()
+          const language = (info.split(/\s+/)[0] || '').replace(/[^\w-]/g, '')
+          // CommonMark: a closing fence uses the same character and at least
+          // as many of them, and may only be followed by spaces.
+          const closing = new RegExp('^\\s*' + char + '{' + length + ',}\\s*$')
           const body = []
           index += 1
-          while (index < lines.length && !new RegExp('^\\s*' + marker + '\\s*$').test(lines[index])) {
+          while (index < lines.length && !closing.test(lines[index])) {
             body.push(lines[index])
             index += 1
           }
@@ -290,7 +298,13 @@ window.__ModuleLoader__.load({
             quote.push(lines[index].replace(/^\s*>\s?/, ''))
             index += 1
           }
-          html += '<blockquote>' + renderMarkdown(quote.join('\n'), settings) + '</blockquote>'
+          if (depth >= MAX_MARKDOWN_QUOTE_DEPTH) {
+            // Deeper nesting becomes plain text instead of growing the call
+            // stack without bound on crafted documents.
+            html += '<blockquote>' + escapeHtml(quote.join('\n')) + '</blockquote>'
+            continue
+          }
+          html += '<blockquote>' + renderMarkdown(quote.join('\n'), { ...settings, depth: depth + 1 }) + '</blockquote>'
           continue
         }
         if (/^\s*([-+*]|\d+[.)])\s+/.test(line)) {
@@ -785,6 +799,7 @@ window.__ModuleLoader__.load({
     }
 
     function imageSource(data, mime) {
+      if (typeof mime !== 'string' || !/^image\//i.test(mime)) return ''
       const value = Array.isArray(data) ? data.join('') : String(data ?? '')
       if (!value) return ''
       return 'data:' + mime + ';base64,' + (mime === 'image/svg+xml' ? toBase64(value) : value)
@@ -805,10 +820,17 @@ window.__ModuleLoader__.load({
       return (source) => {
         if (!source) return null
         if (source.startsWith('attachment:')) {
-          const name = decodeURIComponent(source.slice('attachment:'.length))
+          let name
+          try {
+            name = decodeURIComponent(source.slice('attachment:'.length))
+          } catch {
+            // A malformed percent escape must not throw during render: degrade
+            // to the missing-image marker instead.
+            return null
+          }
           const attachment = attachments[name]
           if (!attachment) return null
-          const mime = Object.keys(attachment)[0]
+          const mime = Object.keys(attachment).find((candidate) => /^image\//i.test(candidate))
           if (!mime) return null
           return imageSource(attachment[mime], mime)
         }
@@ -1210,7 +1232,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dsh-bsb-ipynb-toolbar-group' },
-          h(IconButton, { title: t('runAll'), disabled: !python || running || runAllRunning, onClick: onRunAll }, '▶▶'),
+          h(IconButton, { title: t('runAll'), disabled: running || runAllRunning, onClick: onRunAll }, '▶▶'),
           h(IconButton, { title: t('interrupt'), disabled: !kernel.running, onClick: onInterrupt }, '■'),
           h(IconButton, { title: t('restart'), disabled: !kernel.running || running, onClick: () => onRestart() }, '↻'),
           h(IconButton, { title: t('save'), disabled: saveButtonDisabled({ dirty, saveState, conflict, running }), onClick: onSave }, saveState === 'saving' ? '…' : t('save')),
@@ -1491,27 +1513,37 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         let cancelled = false
-        getJson(ctx, 'interpreters')
-          .then((value) => {
-            if (cancelled) return
-            const usable = (value.interpreters || []).filter((entry) => entry.ok)
-            setInterpreters(usable)
-            let stored = ''
-            try {
-              stored = window.localStorage.getItem('dsh-bsb-ipynb:python:' + path) || ''
-            } catch {
-              stored = ''
-            }
-            const chosen = usable.some((entry) => entry.path === stored)
-              ? stored
-              : usable.some((entry) => entry.path === value.default)
-                ? value.default
-                : usable[0] && usable[0].path
-            if (chosen) setPython(chosen)
-          })
-          .catch(() => {})
+        let retryTimer = null
+        const load = (attempt) => {
+          getJson(ctx, 'interpreters')
+            .then((value) => {
+              if (cancelled) return
+              const usable = (value.interpreters || []).filter((entry) => entry.ok)
+              setInterpreters(usable)
+              let stored = ''
+              try {
+                stored = window.localStorage.getItem('dsh-bsb-ipynb:python:' + path) || ''
+              } catch {
+                stored = ''
+              }
+              const chosen = usable.some((entry) => entry.path === stored)
+                ? stored
+                : usable.some((entry) => entry.path === value.default)
+                  ? value.default
+                  : usable[0] && usable[0].path
+              if (chosen) setPython(chosen)
+            })
+            .catch(() => {
+              // A transient failure must not disable Run all forever: retry once
+              // and otherwise fall back to the server's default interpreter.
+              if (cancelled || attempt > 0) return
+              retryTimer = setTimeout(() => load(1), 2000)
+            })
+        }
+        load(0)
         return () => {
           cancelled = true
+          if (retryTimer) clearTimeout(retryTimer)
         }
       }, [ctx, path])
 
@@ -2237,6 +2269,7 @@ window.__ModuleLoader__.load({
       STRINGS,
       escapeHtml,
       mimeText,
+      imageSource,
       sanitizeUrl,
       sanitizeHtml,
       ALLOWED_ATTRS,

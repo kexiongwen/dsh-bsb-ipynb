@@ -819,3 +819,25 @@ test('the empty-file hint disappears once the notebook is saved', async (t) => {
     'a successful save clears the empty-file hint')
   assert.equal(app.toolbar.dirty, false)
 })
+
+test('a malformed attachment reference degrades instead of crashing the render', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const data = notebookData()
+  data.notebook.cells[0] = {
+    cell_type: 'markdown',
+    id: 'cell-1',
+    metadata: {},
+    source: 'before ![x](attachment:%ZZ) after',
+  }
+  app.reload(data)
+  await app.settle()
+  assert.equal(app.cell.cell.cell_type, 'markdown')
+  const cellView = app.component('CellView')
+  const rendered = cellView.type(cellView.props)
+  const markdown = findElement(rendered, (value) => (
+    typeof value.props?.dangerouslySetInnerHTML?.__html === 'string' &&
+    value.props.dangerouslySetInnerHTML.__html.includes('dsh-bsb-ipynb-missing-image')
+  ))
+  assert.ok(markdown, 'the malformed attachment renders as a missing image instead of throwing')
+})

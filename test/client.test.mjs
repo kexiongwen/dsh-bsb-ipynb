@@ -789,3 +789,36 @@ test('client translations expose the same keys', async () => {
   const { STRINGS } = exports.__test
   assert.deepEqual(Object.keys(STRINGS.en).sort(), Object.keys(STRINGS.zh).sort())
 })
+
+test('markdown fences follow CommonMark closing rules and accept info strings', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown } = exports.__test
+  const longer = renderMarkdown('````\ncode\n````\nafter')
+  assert.match(longer, /<code>code<\/code>/)
+  assert.match(longer, /<p>after<\/p>/, 'a longer closing fence ends the block')
+  assert.equal((longer.match(/<pre/g) || []).length, 1)
+  const info = renderMarkdown('```python title="x"\ncode\n```')
+  assert.match(info, /class="language-python"/)
+  assert.match(info, /<code[^>]*>code<\/code>/)
+  const shorter = renderMarkdown('````\ncode\n```\nmore\n````')
+  assert.match(shorter, /code\n```\nmore/, 'a shorter fence does not close the block')
+})
+
+test('deeply nested blockquotes are capped instead of overflowing the stack', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown } = exports.__test
+  let html
+  assert.doesNotThrow(() => { html = renderMarkdown('>'.repeat(8000) + ' x') })
+  assert.match(html, /<blockquote>/)
+  assert.ok((html.match(/<blockquote>/g) || []).length <= 65, 'nesting depth is capped')
+  assert.ok(html.length < 40000, 'the escaped remainder stays bounded')
+})
+
+test('image data URIs require an image MIME type', async () => {
+  const { exports } = await loadClient()
+  const { imageSource } = exports.__test
+  assert.equal(imageSource('abc', 'text/plain'), '')
+  assert.equal(imageSource('abc', 'application/json'), '')
+  assert.match(imageSource('abc', 'image/png'), /^data:image\/png;base64,abc$/)
+  assert.match(imageSource('<svg></svg>', 'image/svg+xml'), /^data:image\/svg\+xml;base64,/)
+})

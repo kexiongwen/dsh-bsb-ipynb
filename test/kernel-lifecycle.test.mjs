@@ -663,3 +663,68 @@ test('a replacement process starts with fresh stderr diagnostics', async (t) => 
   replacement.proc.event({ type: 'ready' })
   await replacement.started
 })
+
+test('a failed spawn clears the entry instead of reporting a running kernel', async (t) => {
+  const h = harness(t)
+  const { started, entry, proc } = h.start()
+  const state = observe(started)
+  proc.emit('error', new Error('spawn ENOENT'))
+  await flush()
+  assert.equal(state.status, 'rejected')
+  assert.match(state.error.message, /spawn ENOENT/)
+  assert.equal(entry.proc, null)
+  assert.equal(h.manager.peek(h.target), null)
+  assert.equal(h.manager.status(h.target).running, false)
+  assert.equal(h.manager.kernelCount, 0)
+})
+
+test('a successful restart clears stale status errors', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  entry.lastError = 'STALE FAILURE'
+  const restarting = entry.restart()
+  restartReady(proc)
+  await restarting
+  assert.equal(entry.lastError, null)
+  assert.equal(h.manager.status(h.target).lastError, null)
+})
+
+test('a malformed frame during restart does not overwrite the framing error', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const cause = 'Kernel output line exceeded 64 MiB; execution aborted and kernel restarted'
+  entry.lastError = cause
+  const restarting = entry.restart()
+  entry.handleLine('TAIL-OF-GIANT-LINE-NOT-JSON')
+  assert.equal(entry.lastError, cause)
+  restartReady(proc)
+  await restarting
+  assert.equal(entry.lastError, null)
+})
+
+test('a ready-timeout cause survives the exit event that follows it', async (t) => {
+  const h = harness(t, { exitOnKill: false })
+  const { started, entry, proc } = h.start()
+  const state = observe(started)
+  const [timer] = h.activeReadyTimers()
+  assert.ok(timer)
+  timer.active = false
+  timer.callback()
+  await flush()
+  assert.equal(state.status, 'rejected')
+  proc.exit(1)
+  await flush()
+  assert.match(entry.lastError, /did not become ready within 30 seconds/)
+})
+
+test('the idle sweep skips entries that are already shutting down', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  entry.stopping = true
+  entry.lastActivity = 0
+  await h.manager.sweepIdle()
+  assert.equal(h.manager.peek(h.target), entry)
+  assert.equal(entry.proc, proc)
+  assert.deepEqual(proc.kills, [])
+  entry.stopping = false
+})

@@ -162,6 +162,19 @@ test('saveNotebookFile rejects a stale baseVersion', async () => {
   )
 })
 
+test('save validates the notebook before reporting a stale version', async () => {
+  const dir = await tempDir()
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const read = await readNotebookFile(file)
+  // Change the file so the version is stale, and send a malformed notebook.
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  await assert.rejects(
+    saveNotebookFile(file, { nbformat: 4 }, read.version),
+    (error) => error.code === 'bad-request' && error.status === 400,
+  )
+})
+
 test('saveNotebookFile requires a valid baseVersion', async () => {
   const dir = await tempDir()
   const file = path.join(dir, 'demo.ipynb')

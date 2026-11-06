@@ -77,7 +77,7 @@ dsh-bsb-ipynb/
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/ipynb/health` | 版本、内核数、解释器统计 |
+| GET | `/ipynb/health` | 版本、内核数、解释器统计（不阻塞解释器探测；未预热时 `interpreters.checked` 为 `false`，探测在后台进行） |
 | GET | `/ipynb/interpreters` | 解释器列表与默认项 |
 | GET | `/ipynb/status?sessionId=&path=` | 某个 notebook 的内核状态 |
 | POST | `/ipynb/read` | 读取并解析 notebook（`{status:'ok'|'invalid'|'unsupported', notebook?, version, size, emptyFile?, error?}`） |

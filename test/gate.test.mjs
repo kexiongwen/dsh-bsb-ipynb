@@ -219,3 +219,9 @@ test('missing-target resolution still rejects an existing directory named as a n
   await assert.rejects(resolveControlTarget(ctxFor(dir), 's1', 'alias.ipynb'),
     (error) => error.code === 'not-notebook' && error.status === 400)
 })
+
+test('resolveWorkspace rejects a relative session cwd', async () => {
+  await assert.rejects(resolveWorkspace(ctxFor('relative/project'), 's1'), (error) => (
+    error.code === 'workspace-unknown' && error.status === 400
+  ))
+})

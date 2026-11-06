@@ -64,3 +64,8 @@ test('discovery preserves two venvs that share one base Python', { skip: !hasJup
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('resolveInterpreter rejects malformed python arguments before probing', async () => {
+  await assert.rejects(resolveInterpreter(123), (error) => error.code === 'bad-request' && error.status === 400)
+  await assert.rejects(resolveInterpreter('   '), (error) => error.code === 'bad-request' && error.status === 400)
+})
