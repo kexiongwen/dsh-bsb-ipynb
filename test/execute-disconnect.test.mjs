@@ -90,11 +90,13 @@ async function setup(t) {
   let startGate = null
   let runGate = null
   let runSignal
+  let runHandler = null
   let started = false
   const entry = {
     async run(cellId, code, onEvent, options) {
       calls.push({ operation: 'run', cellId, code })
       runSignal = options?.signal
+      if (runHandler) return runHandler({ cellId, code, onEvent, signal: runSignal })
       if (runGate) await runGate.wait()
       onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text: 'result\n' })
       const reply = { type: 'execute_reply', cell_id: cellId, ok: true }
@@ -135,6 +137,7 @@ async function setup(t) {
     get runSignal() { return runSignal },
     holdStart(value) { startGate = value },
     holdRun(value) { runGate = value },
+    duringRun(handler) { runHandler = handler },
     request(bodyGate = null) {
       return {
         method: 'POST',
@@ -315,5 +318,72 @@ for (const stage of ['before handling', 'during body read']) {
     }
     await within(pending)
     assert.deepEqual(h.calls, [])
+  })
+}
+
+for (const throwsOnEnd of [false, true]) {
+  test(`output queue overflow cancels before ending the response${throwsOnEnd ? ', even when end throws' : ''}`, async (t) => {
+    const h = await setup(t)
+    const held = gate()
+    const res = response()
+    const ended = []
+    let writes = 0
+    let aborts = 0
+    let pending
+    const interrupts = () => h.calls.filter((call) => call.operation === 'interrupt').length
+    // Block the initial status write. Real stream frames then accumulate in
+    // the route's queue; each is well below the bridge's per-line limit.
+    res.write = () => { writes += 1; return false }
+    res.end = (chunk) => {
+      ended.push({ event: JSON.parse(String(chunk)), aborted: h.runSignal.aborted, interrupts: interrupts() })
+      res.ended = true
+      // Deliberately emit neither close nor error and do not alter the flags
+      // observed by isDisconnected: cancellation must precede end itself.
+      if (throwsOnEnd) throw new Error('Controlled end failure')
+    }
+    h.duringRun(async ({ cellId, onEvent, signal }) => {
+      signal.addEventListener('abort', () => {
+        aborts += 1
+        // Abort listeners run synchronously. Re-entering the writer and the
+        // response callbacks must observe cancellation already in progress.
+        onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text: 'late abort output' })
+        res.emit('drain')
+        res.emit('error', new Error('Response error during abort'))
+      })
+      const text = 'x'.repeat(17 * 1024 * 1024)
+      for (let index = 0; index < 4; index += 1) {
+        onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text })
+      }
+      // No more kernel output: the assertion below cannot be rescued by a
+      // later write, a response-close callback, or the 15-second heartbeat.
+      await held.wait()
+      return { type: 'execute_reply', cell_id: cellId, ok: false }
+    })
+    t.after(async () => {
+      held.release()
+      if (pending) await within(pending)
+    })
+    pending = h.handler(h.request(), res)
+    await within(held.entered)
+    assert.equal(ended.length, 1, 'overflow must attempt exactly one terminal response')
+    assert.equal(ended[0].event.type, 'fatal')
+    assert.equal(ended[0].event.code, 'output-too-large')
+    assert.equal(ended[0].aborted, true, 'the execution signal must already be aborted inside res.end')
+    assert.equal(ended[0].interrupts, 1, 'the running kernel must already be interrupted inside res.end')
+    assert.equal(h.runSignal.aborted, true)
+    assert.equal(aborts, 1)
+    assert.equal(interrupts(), 1)
+    assert.equal(writes, 1, 'only the initial status reached the backpressured response')
+
+    for (const event of ['drain', 'error', 'close', 'drain']) {
+      res.emit(event, event === 'error' ? new Error('Late response failure') : undefined)
+    }
+    held.release()
+    await within(pending)
+    res.emit('close')
+    assert.equal(aborts, 1, 'late response events must not cancel twice')
+    assert.equal(interrupts(), 1, 'late response events must not interrupt twice')
+    assert.equal(ended.length, 1, 'late events must not send another fatal or end')
+    assert.equal(writes, 1, 'late drains must not flush discarded output')
   })
 }

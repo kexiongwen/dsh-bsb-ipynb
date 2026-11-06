@@ -28,6 +28,8 @@ Events (one JSON object per line on stdout):
   {"type": "clear_output", "cell_id": ..., "wait": bool}
   {"type": "execute_reply", "cell_id": ..., "ok": bool, "execution_count": N,
    "kernel_restarted": bool}  # present after an interrupt-timeout restart attempt
+  # Incomplete output also emits an error and marks execute_reply with
+  # ok=false and output_incomplete=true; a successful shell reply is not enough.
   {"type": "kernel_died", "message": ...}
   {"type": "log", "level": "info"|"error"|"warn", "message": ...}
 
@@ -221,8 +223,10 @@ class Bridge:
         self.interrupt_requested_at = None
         finished = False
         msg_id = None
+        idle = None
 
-        def finish(status, error=None, execution_count=None, kernel_restarted=None):
+        def finish(status, error=None, execution_count=None, kernel_restarted=None,
+                   output_incomplete=False):
             nonlocal finished
             if finished:
                 return
@@ -238,6 +242,8 @@ class Bridge:
             }
             if kernel_restarted is not None:
                 event["kernel_restarted"] = kernel_restarted
+            if output_incomplete:
+                event["output_incomplete"] = True
             emit(event)
 
         try:
@@ -310,8 +316,35 @@ class Bridge:
             if reply is None:
                 finish("error", "kernel stopped before the cell finished")
                 return
-            idle.wait(timeout=10)
+            idle_seen = idle.wait(timeout=10)
             content = reply.get("content", {})
+            with self.pending_lock:
+                stopped = self.stop.is_set()
+                # Control operations set idle events to wake their waiters,
+                # then clear their mappings under this same lock. Check the
+                # registered Event identity as well as client/request identity:
+                # even a completed or failed restart cannot impersonate idle.
+                current = (
+                    not stopped and not self.restarting and kc is self.kc
+                    and self.pending.get(msg_id) == (cell_id, exec_id)
+                    and self.idle_events.get(msg_id) is idle
+                )
+            if not idle_seen or not current:
+                if not current:
+                    reason = "Kernel stopped" if stopped else "Kernel restarted or changed"
+                    reason += " before output delivery completed; output may be incomplete"
+                    ename = "KernelInterrupted"
+                    status = "interrupted"
+                else:
+                    reason = "Timed out waiting for IOPub idle after 10 seconds; output may be incomplete"
+                    ename = "IOPubTimeout"
+                    status = "error"
+                emit({
+                    "type": "error", "cell_id": cell_id, "exec_id": exec_id,
+                    "ename": ename, "evalue": reason, "traceback": [],
+                })
+                finish(status, reason, content.get("execution_count"), output_incomplete=True)
+                return
             status = content.get("status", "error")
             finish(status, content.get("ename") or None, content.get("execution_count"))
         except Exception as error:
@@ -327,8 +360,9 @@ class Bridge:
         finally:
             if msg_id is not None:
                 with self.pending_lock:
-                    self.pending.pop(msg_id, None)
-                    self.idle_events.pop(msg_id, None)
+                    if self.idle_events.get(msg_id) is idle:
+                        self.pending.pop(msg_id, None)
+                        self.idle_events.pop(msg_id, None)
             self.interrupt_requested_at = None
 
     # -------------------------------------------------------------- iopub
@@ -351,9 +385,8 @@ class Bridge:
                     continue
                 emit({"type": "kernel_died", "message": "kernel process exited"})
                 with self.pending_lock:
-                    for event in self.idle_events.values():
-                        event.set()
-                self.stop.set()
+                    self.stop.set()
+                    self.clear_pending_locked()
                 # The kernel is gone and the bridge has no way to pump its
                 # replacement: exit so the host observes EOF and can forget
                 # this entry instead of keeping a zombie process around.

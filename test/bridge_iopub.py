@@ -273,22 +273,40 @@ class IOPubTests(unittest.TestCase):
         self.wait(self.client.shell_entered)
         idle = self.bridge.idle_events[self.client.parent]
         entered_idle_wait = threading.Event()
+        operation_complete = threading.Event()
+        self.releases.append(operation_complete)
         original_wait = idle.wait
 
         def wait_for_idle(timeout=None):
             entered_idle_wait.set()
-            return original_wait(timeout)
+            result = original_wait(timeout)
+            # Resume only after the control operation returns. In particular,
+            # a fast/failed restart has already reset its transient flag.
+            operation_complete.wait(3)
+            return result
 
         idle.wait = wait_for_idle
         self.client.shell_release.set()
         self.wait(entered_idle_wait)
         try:
             operation()
+            operation_complete.set()
             run.join(1)
             self.assertFalse(run.is_alive(), "control operation must release the in-flight idle wait immediately")
             self.assertEqual(self.bridge.pending, {})
             self.assertEqual(self.bridge.idle_events, {})
+            replies = [event for event in self.events if event["type"] == "execute_reply"]
+            self.assertEqual(len(replies), 1)
+            self.assertFalse(replies[0]["ok"], "a control-triggered wakeup is not proof that output finished")
+            self.assertEqual(replies[0]["status"], "interrupted")
+            self.assertTrue(replies[0]["output_incomplete"])
+            errors = [event for event in self.events if event["type"] == "error"]
+            self.assertEqual(errors[-1]["ename"], "KernelInterrupted")
+            self.assertIn("output may be incomplete", errors[-1]["evalue"])
+            self.assertEqual(errors[-1]["cell_id"], "current-cell")
+            self.assertEqual(errors[-1]["exec_id"], "current-exec")
         finally:
+            operation_complete.set()
             idle.set()
             self.join(run)
 
@@ -297,6 +315,121 @@ class IOPubTests(unittest.TestCase):
 
     def test_shutdown_releases_an_execution_already_waiting_for_idle(self):
         self.assert_idle_wait_is_released(self.bridge.shutdown_kernel)
+
+    def test_failed_restart_cannot_turn_its_idle_wakeup_into_success(self):
+        def fail_restart(now):
+            raise RuntimeError("controlled restart failure")
+
+        self.bridge.km.restart_kernel = fail_restart
+        self.assert_idle_wait_is_released(self.bridge.restart)
+        self.assertFalse(self.bridge.restarting)
+        self.assertIs(self.bridge.kc, self.client, "failed restart deliberately retains the old client identity")
+
+    def test_idle_timeout_reports_incomplete_output_and_does_not_poison_the_next_run(self):
+        run = self.start_run()
+        self.wait(self.client.shell_entered)
+        old_parent = self.client.parent
+        idle = self.bridge.idle_events[old_parent]
+        waits = []
+        restarts = []
+
+        def timeout_immediately(timeout=None):
+            waits.append(timeout)
+            return False
+
+        idle.wait = timeout_immediately
+        self.bridge.km.restart_kernel = lambda now: restarts.append(now)
+        self.bridge.handle_iopub(message(old_parent, text="PARTIAL OUTPUT", name="stdout"))
+        self.client.shell_release.set()
+        self.join(run)
+        self.assertEqual(waits, [10], "production timeout remains bounded at ten seconds")
+        self.assertEqual(restarts, [], "an output timeout must not discard the user's kernel state")
+        self.assertFalse(self.client.closed.is_set())
+        self.assertEqual(self.bridge.pending, {})
+        self.assertEqual(self.bridge.idle_events, {})
+        replies = [event for event in self.events if event["type"] == "execute_reply"]
+        self.assertEqual(len(replies), 1)
+        self.assertFalse(replies[0]["ok"])
+        self.assertEqual(replies[0]["status"], "error")
+        self.assertTrue(replies[0]["output_incomplete"])
+        self.assertIn("output may be incomplete", replies[0]["error"])
+        errors = [event for event in self.events if event["type"] == "error"]
+        self.assertEqual(errors[-1]["ename"], "IOPubTimeout")
+        self.assertIn("output may be incomplete", errors[-1]["evalue"])
+        self.assertEqual(errors[-1]["cell_id"], "current-cell")
+        self.assertEqual(errors[-1]["exec_id"], "current-exec")
+        self.assertLess(self.events.index(errors[-1]), self.events.index(replies[0]),
+                        "the visible error must precede its failed terminal reply")
+
+        # Continue on the same client/kernel, deliberately reusing the cell
+        # and exec identifiers but issuing a new Jupyter parent message ID.
+        self.client.parent = "next-request"
+        self.client.shell_entered.clear()
+        self.client.shell_release.clear()
+        self.events.clear()
+        next_run = self.start_run()
+        self.wait(self.client.shell_entered)
+        for kind, content in [
+            ("stream", {"text": "LATE OLD OUTPUT", "name": "stdout"}),
+            ("status", {"execution_state": "idle"}),
+        ]:
+            self.bridge.handle_iopub(message(old_parent, kind, **content))
+        self.assertEqual(self.events, [], "late output/idle from the timeout must not affect the new run")
+        self.assertFalse(self.bridge.idle_events[self.client.parent].is_set())
+        self.bridge.handle_iopub(message(self.client.parent, text="CURRENT OUTPUT", name="stdout"))
+        self.finish_run(next_run)
+        self.assertTrue(self.events[-1]["ok"])
+        self.assertEqual([event.get("text", event["type"]) for event in self.events],
+                         ["CURRENT OUTPUT", "status", "execute_reply"])
+
+    def test_kernel_death_cannot_wake_an_idle_waiter_into_success(self):
+        run = self.start_run()
+        self.wait(self.client.shell_entered)
+        idle = self.bridge.idle_events[self.client.parent]
+        entered_idle = threading.Event()
+        original_wait = idle.wait
+        original_stop = self.bridge.stop.set
+        original_exit = bridge_module.os._exit
+        pump = None
+
+        def wait_for_idle(timeout=None):
+            entered_idle.set()
+            return original_wait(timeout)
+
+        def staged_stop():
+            # If death wakes idle before publishing cancellation under the
+            # routing lock, let that waiter take the next scheduling turn.
+            if not self.bridge.pending_lock.locked():
+                run.join(0.2)
+            original_stop()
+
+        def exit_pump_only(_status):
+            raise SystemExit()
+
+        idle.wait = wait_for_idle
+        self.client.shell_release.set()
+        self.wait(entered_idle)
+        try:
+            self.bridge.stop.set = staged_stop
+            bridge_module.os._exit = exit_pump_only
+            self.client.is_alive = lambda: False
+            pump = self.start_thread(self.bridge.iopub_loop)
+            self.join(pump)
+            self.join(run)
+            replies = [event for event in self.events if event["type"] == "execute_reply"]
+            self.assertEqual(len(replies), 1)
+            self.assertFalse(replies[0]["ok"])
+            self.assertTrue(replies[0]["output_incomplete"])
+            self.assertEqual(self.bridge.pending, {})
+            self.assertEqual(self.bridge.idle_events, {})
+        finally:
+            original_stop()
+            idle.set()
+            self.join(run)
+            if pump is not None:
+                self.join(pump)
+            self.bridge.stop.set = original_stop
+            bridge_module.os._exit = original_exit
 
     def test_shutdown_prevents_new_execution_registration(self):
         self.bridge.shutdown_kernel()
