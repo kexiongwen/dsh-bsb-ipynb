@@ -90,6 +90,7 @@ async function setup(t) {
   let startGate = null
   let runGate = null
   let runSignal
+  let started = false
   const entry = {
     async run(cellId, code, onEvent, options) {
       calls.push({ operation: 'run', cellId, code })
@@ -102,9 +103,11 @@ async function setup(t) {
     },
   }
   const kernels = {
+    peek() { return started ? entry : null },
     async getOrStart() {
       calls.push({ operation: 'start' })
       if (startGate) await startGate.wait()
+      started = true
       return entry
     },
     async interrupt() { calls.push({ operation: 'interrupt' }) },
