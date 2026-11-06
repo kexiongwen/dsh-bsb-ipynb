@@ -16,7 +16,7 @@
 ## 前置条件
 
 - DSH Web GUI **0.2.2-rc.1** 或更新版本。
-- **dsh-better-sidebar >= 0.28.0**（推荐当前 0.28.2）。
+- **dsh-better-sidebar 0.30.x**（当前验证 0.30.1）。DSH 0.2.2 系列请使用 0.30.x；0.28.x 面向 DSH 0.2.1，不属于当前推荐组合。
 - 一个带 `jupyter_client` 与 `ipykernel` 的 Python：
 
   ```bash
