@@ -43,16 +43,19 @@
 | --- | --- |
 | DSH | Web GUI **0.2.2-rc.1** 或更新 |
 | dsh-better-sidebar | **0.30.x**（当前验证 0.30.1；0.28.x 面向 DSH 0.2.1，不推荐） |
-| Python | 安装 `jupyter_client` + `ipykernel`，可用 `python3 -c "import jupyter_client, ipykernel"` 自检 |
+| Python | 安装 `jupyter_client` + `ipykernel`，可用 `python3 -c "import jupyter_client, ipykernel"`（macOS/Linux）或 `python -c "import jupyter_client, ipykernel"`（Windows）自检 |
 
 ```bash
 # 如缺少依赖
-python3 -m pip install jupyter_client ipykernel
+python3 -m pip install jupyter_client ipykernel   # macOS / Linux
+python -m pip install jupyter_client ipykernel    # Windows（或：py -3 -m pip ...）
 ```
 
 1. 在 DSH 插件管理中将本仓库目录作为本地 bundle 安装；
-2. 刷新页面（桌面端 `Cmd+R`）；
+2. 刷新页面（macOS 为 `Cmd+R`，Windows 为 `Ctrl+R` 或 `F5`）；
 3. 在右侧文件树打开任意 `.ipynb`；首次体验可用 [examples/demo.ipynb](examples/demo.ipynb)。
+
+> **Windows**：解释器发现会检查 `PATH` 上的 `python.exe`/`python3.exe`（跳过 `WindowsApps` 下的 Microsoft Store 应用执行别名）、conda 环境（`<env>\python.exe`）与 DSH 内置 Python。若解释器在其他位置，请把 `DSH_IPYNB_PYTHON` 设为该 `python.exe` 的**绝对路径**；只读或被其它程序占用的 notebook 保存会返回 `write-blocked`（409），直到文件可写。
 
 ## 🖱️ 使用
 
@@ -131,6 +134,7 @@ dsh-bsb-ipynb/
 - 执行结果由客户端回写并在保存时落盘；服务端不会在后台追加输出。
 - 暂无「新建 notebook」向导：可在文件树中新建空 `.ipynb`，或直接打开已有文件。
 - 工作区边界基于会话 cwd 校验；会话活动根为 linked git worktree 时可能返回 403（暂不支持）。
+- **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409）；`text/html` 输出中的图片不会经过相对路径解析。
 - 输出特别大时会拖慢浏览器渲染，建议及时清空输出或分段执行。
 
 ## 📊 内部限制与环境变量
@@ -148,17 +152,17 @@ dsh-bsb-ipynb/
 
 ## 🧪 开发与测试
 
-无需构建步骤。DSH 会缓存已注册的 bundle，修改 `client.js` 或宿主侧代码后，需重载 `dsh-bsb-ipynb` 插件（或重启 DSH）才会生效。
+无需构建步骤。DSH 会缓存已注册的 bundle，修改 `client.js` 或宿主侧代码后，需重载 `dsh-bsb-ipynb` 插件（或重启 DSH）才会生效；修改客户端后还需硬刷新页面（`Ctrl/Cmd+Shift+R`）。
 
 ```bash
-node --check index.js lib/*.js client.js
-python3 -m py_compile python/bridge.py
-npm test          # 当前 292 个测试
+for file in index.js lib/*.js client.js; do node --check "$file"; done
+python -m py_compile python/bridge.py
+npm test          # 当前 306 个测试
 ```
 
-真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感的文件系统（如 macOS APFS）上运行，其他平台自动跳过。
+真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。
 
-代码审核与已知问题记录见 [CODE_REVIEW.md](CODE_REVIEW.md)。
+macOS 侧审核见 [CODE_REVIEW.md](CODE_REVIEW.md)，Windows 侧审核见 [CODE_REVIEW_WINDOWS.md](CODE_REVIEW_WINDOWS.md)。
 
 ## 🤝 贡献
 

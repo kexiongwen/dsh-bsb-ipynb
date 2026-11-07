@@ -594,7 +594,10 @@ window.__ModuleLoader__.load({
     ])
 
     function highlightPython(code) {
-      const source = String(code ?? '')
+      // Notebook sources can arrive with CRLF (hand-written files, Windows
+      // tooling); normalize first so a token span never keeps the carriage
+      // return and renders an extra blank line.
+      const source = String(code ?? '').replace(/\r\n?/g, '\n')
       const pattern = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|#[^\n]*|\b\d+\.?\d*(?:[eE][+-]?\d+)?j?\b|\b[A-Za-z_][A-Za-z0-9_]*\b)/g
       let html = ''
       let last = 0

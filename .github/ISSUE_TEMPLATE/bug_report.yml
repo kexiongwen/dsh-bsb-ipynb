@@ -37,9 +37,15 @@ body:
     attributes:
       label: Versions
       description: DSH, dsh-better-sidebar, OS, Node.js and Python/Jupyter versions.
-      placeholder: "DSH 0.2.2-rc.1, better-sidebar 0.30.1, macOS, Node 24, Python 3.14"
+      placeholder: "DSH 0.2.2-rc.1, better-sidebar 0.30.1, Windows 11 24H2 / macOS 15, Node 24, Python 3.12"
     validations:
       required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (optional)
+      description: DSH Desktop or a browser? Browser/version, display scaling, and the input method (e.g. Microsoft Pinyin + Edge 156) when the bug involves editing or shortcuts.
+      placeholder: "DSH Desktop, Windows 11, 150% scaling, Microsoft Pinyin + Edge 156"
   - type: textarea
     id: details
     attributes:

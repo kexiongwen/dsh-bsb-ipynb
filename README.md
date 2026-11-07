@@ -43,16 +43,19 @@
 | --- | --- |
 | DSH | Web GUI **0.2.2-rc.1** or newer |
 | dsh-better-sidebar | **0.30.x** (verified with 0.30.1; 0.28.x targets DSH 0.2.1 and is not recommended) |
-| Python | `jupyter_client` + `ipykernel`; verify with `python3 -c "import jupyter_client, ipykernel"` |
+| Python | `jupyter_client` + `ipykernel`; verify with `python3 -c "import jupyter_client, ipykernel"` (macOS/Linux) or `python -c "import jupyter_client, ipykernel"` (Windows) |
 
 ```bash
 # if the dependencies are missing
-python3 -m pip install jupyter_client ipykernel
+python3 -m pip install jupyter_client ipykernel   # macOS / Linux
+python -m pip install jupyter_client ipykernel    # Windows (or: py -3 -m pip ...)
 ```
 
 1. Open DSH's plugin manager and install this repository folder as a local bundle.
-2. Refresh the page (`Cmd+R` on desktop).
+2. Refresh the page (`Cmd+R` on macOS; `Ctrl+R` or `F5` on Windows).
 3. Open any `.ipynb` from the right-hand file tree; [examples/demo.ipynb](examples/demo.ipynb) is a good first run.
+
+> **Windows**: interpreter discovery looks for `python.exe`/`python3.exe` on `PATH` (Microsoft Store app-execution aliases under `WindowsApps` are skipped), conda environments (`<env>\python.exe`) and DSH's bundled Python. Set `DSH_IPYNB_PYTHON` to an **absolute** `python.exe` path when the interpreter lives elsewhere; read-only or locked notebooks reject saves with `write-blocked` (409) until the file is writable again.
 
 ## 🖱️ Usage
 
@@ -131,6 +134,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 - Results are written back by the client and persisted on save; the server never appends output in the background.
 - No "new notebook" wizard yet: create an empty `.ipynb` in the file tree or open an existing file.
 - Workspace containment uses the session cwd; when the active root is a linked git worktree, requests may return 403 (not supported yet).
+- **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409); images inside `text/html` output are not re-resolved.
 - Very large outputs make browser rendering slow; clear outputs or run in smaller chunks.
 
 ## 📊 Internal Limits and Environment Variables
@@ -148,17 +152,17 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 
 ## 🧪 Development & Testing
 
-There is no build step. DSH caches registered bundles, so after changing `client.js` or host-side code, reload the `dsh-bsb-ipynb` plugin (or restart DSH) to apply it.
+There is no build step. DSH caches registered bundles, so after changing `client.js` or host-side code, reload the `dsh-bsb-ipynb` plugin (or restart DSH) to apply it; after client changes also hard-refresh the page (`Ctrl/Cmd+Shift+R`).
 
 ```bash
-node --check index.js lib/*.js client.js
-python3 -m py_compile python/bridge.py
-npm test          # 292 tests at the time of writing
+for file in index.js lib/*.js client.js; do node --check "$file"; done
+python -m py_compile python/bridge.py
+npm test          # 306 tests at the time of writing
 ```
 
-Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, for example) and skip elsewhere.
+Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe.
 
-See [CODE_REVIEW.md](CODE_REVIEW.md) for the review and known-issue log.
+See [CODE_REVIEW.md](CODE_REVIEW.md) for the macOS review and [CODE_REVIEW_WINDOWS.md](CODE_REVIEW_WINDOWS.md) for the Windows review.
 
 ## 🤝 Contributing
 

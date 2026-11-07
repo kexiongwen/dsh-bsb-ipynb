@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { discoverInterpreters, resetInterpreterCache, resolveInterpreter } from '../lib/env.js'
 import { KernelManager } from '../lib/kernel.js'
-import { findPython } from './python-helper.mjs'
+import { findPython, tempDir } from './python-helper.mjs'
 
 const execFileAsync = promisify(execFile)
 const basePython = findPython('jupyter_client, ipykernel')
@@ -87,6 +87,50 @@ test('discovery preserves two venvs that share one base Python', {
 test('resolveInterpreter rejects malformed python arguments before probing', async () => {
   await assert.rejects(resolveInterpreter(123), (error) => error.code === 'bad-request' && error.status === 400)
   await assert.rejects(resolveInterpreter('   '), (error) => error.code === 'bad-request' && error.status === 400)
+  await assert.rejects(resolveInterpreter('python'), (error) =>
+    error.code === 'bad-request' && error.status === 400 && /absolute/.test(error.message))
+})
+
+test('discovery keeps a relative DSH_IPYNB_PYTHON visible with a clear reason', async () => {
+  const previous = process.env.DSH_IPYNB_PYTHON
+  try {
+    process.env.DSH_IPYNB_PYTHON = 'python'
+    resetInterpreterCache()
+    const discovered = await discoverInterpreters({ fresh: true })
+    const entry = discovered.interpreters.find((candidate) => candidate.source === 'DSH_IPYNB_PYTHON')
+    assert.ok(entry, 'a misconfigured DSH_IPYNB_PYTHON stays visible')
+    assert.equal(entry.ok, false)
+    assert.match(entry.detail, /absolute path/)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_IPYNB_PYTHON
+    else process.env.DSH_IPYNB_PYTHON = previous
+    resetInterpreterCache()
+  }
+})
+
+test('an empty platform discovery reports an actionable kernel-unavailable error', async (t) => {
+  const home = await tempDir(t, 'dsh-empty-home-')
+  const names = ['PATH', 'HOME', 'USERPROFILE', 'DSH_IPYNB_PYTHON', 'DSH_PRIMARY_RUNTIME', 'DSH_HOME']
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]))
+  try {
+    process.env.PATH = ''
+    process.env.HOME = home
+    if (process.platform === 'win32') process.env.USERPROFILE = home
+    delete process.env.DSH_IPYNB_PYTHON
+    delete process.env.DSH_PRIMARY_RUNTIME
+    delete process.env.DSH_HOME
+    resetInterpreterCache()
+    await assert.rejects(resolveInterpreter(), (error) =>
+      error.code === 'kernel-unavailable' &&
+      /No Python interpreter candidates/.test(error.message) &&
+      /DSH_IPYNB_PYTHON/.test(error.message))
+  } finally {
+    for (const name of names) {
+      if (saved[name] === undefined) delete process.env[name]
+      else process.env[name] = saved[name]
+    }
+    resetInterpreterCache()
+  }
 })
 
 const moduleName = 'dsh_ipynb_selected_env_probe'

@@ -1299,6 +1299,14 @@ test('cell shortcuts ignore IME composition and accept CapsLock Ctrl+S', async (
   assert.equal(isImeKeyEvent({}), false)
 })
 
+test('python highlighting normalizes CRLF source', async () => {
+  const { exports } = await loadClient()
+  const { highlightPython } = exports.__test
+  const html = highlightPython('# note\r\nprint(1)\r\n')
+  assert.doesNotMatch(html, /\r/, 'carriage returns must not survive in token spans')
+  assert.match(html, /tok-comment/)
+})
+
 test('blocked saves back off instead of retrying every autosave tick', async () => {
   const { exports } = await loadClient()
   const { blockedAutosaveDelay } = exports.__test

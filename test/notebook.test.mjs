@@ -701,3 +701,23 @@ test('a read-only notebook reports a retryable write-blocked error', {
   })
   assert.deepEqual(await readdir(dir), ['demo.ipynb'], 'no temp file is left behind')
 })
+
+test('notebooks saved with a byte-order mark are decoded instead of rejected', () => {
+  const source = serializeNotebook(emptyNotebook())
+  const utf16 = Buffer.from(source, 'utf16le')
+  const swapped = Buffer.from(utf16)
+  swapped.swap16()
+  const fixtures = {
+    'utf-8 bom': Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(source, 'utf8')]),
+    'utf-16le bom': Buffer.concat([Buffer.from([0xff, 0xfe]), utf16]),
+    'utf-16be bom': Buffer.concat([Buffer.from([0xfe, 0xff]), swapped]),
+  }
+  for (const [name, buffer] of Object.entries(fixtures)) {
+    const parsed = parseNotebookBytes(buffer)
+    assert.equal(parsed.status, 'ok', name)
+    assert.equal(parsed.notebook.cells.length, 1, name)
+    assert.equal(parsed.version, sha256(buffer), `${name} keeps the raw-byte version`)
+  }
+  const broken = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{not json', 'utf8')])
+  assert.equal(parseNotebookBytes(broken).status, 'invalid')
+})

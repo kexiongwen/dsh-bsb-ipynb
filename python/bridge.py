@@ -61,6 +61,11 @@ import threading
 import time
 import traceback
 
+# Windows note: the host terminates a bridge with TerminateProcess, so SIGTERM
+# and SIGKILL cannot be intercepted there and the handlers below are only a
+# POSIX guarantee. Windows cleanup relies on the explicit "shutdown" command,
+# the host removing the host-chosen connection file after exit, and the
+# kill-on-close job object that owns the whole process tree.
 try:
     # Keep stdio byte-exact UTF-8 regardless of the Windows console codepage.
     sys.stdin.reconfigure(encoding="utf-8", errors="replace")

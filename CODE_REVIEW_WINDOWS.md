@@ -177,7 +177,7 @@
 | **P0** | **W-A1**（+ W-A2、W-A10 一起） | 平台化解释器发现。这是 Windows 用户唯一「开箱即不可用」的问题；修好后路由/内核测试在 Windows 上会由 skip/503 转绿。**✅ 已修复（见 §9）**。 |
 | **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 已完成**（CI 改为 ubuntu/windows/macos 三平台 required 矩阵，含发现断言与防假 skip）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
 | **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-D2（文档） | 资源泄漏/失败终止/安全加固/文档。**W-A3/W-A4/W-A5/W-A6 已完成（见 §11）**；W-B1（fd/dirfd 级加固）、W-B4、W-D2 未做。 |
-| **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。 |
+| **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。**已完成（§12）**：W-A7/W-A9/W-A10、W-C4、W-D3/W-D4/W-D5、N-01/N-04/N-05；其余待清理。 |
 
 ## 6. CI 建议与落地（三平台矩阵）
 
@@ -265,3 +265,19 @@
 | **M-5** restart 阻塞控制面 | ✅ 已修复 | `command_loop` 拆出可测试的 `handle_command()`；`restart` 改由后台线程执行，慢重启期间 status/interrupt/shutdown 仍可读取；shutdown 与 restart 竞态时不会发布新 client。 |
 
 **验证（Windows 实机）**：新增 3 个 node 测试（bridge 连接文件生命周期、Windows job object 在正常 shutdown 与硬杀下回收 cell 子进程、宿主硬杀后连接文件清理）+ 4 个 Python fixture 测试（失败重启拆桥、后台 restart 不阻塞、重启期间 status/shutdown 响应、IOPub 连续失败退避）；Python fixture **25/25 OK**；全量 `npm test` = **302 tests / 258 pass / 0 fail / 44 skip / 44.5s**；真实内核在 Windows 上通过全部 bridge/kernel 用例（含 restart 与硬杀）。README/README_ZH 的 Reliability 章节已补充「进程清理」与「重启自愈」。
+
+## 12. 第三批修复（2026-11-07，低风险清理）
+
+| 项 | 状态 | 改动 |
+| --- | --- | --- |
+| **W-D2** 文档 Windows 化 | ✅ 已修复 | README / README_ZH：Quick Start 平台化命令（`python`/`py -3`、`Ctrl+R`/`F5`）、Windows 解释器发现与 `DSH_IPYNB_PYTHON` 绝对路径提示、Known Limitations 新增 Windows 条目（interrupt 重启内核、`write-blocked`、HTML 输出图片）、开发命令改为逐文件 `node --check` + `python -m py_compile`、测试数更新、三平台 CI 与 symlink 能力说明、硬刷新说明、链接本报告；CONTRIBUTING 同步平台化命令、Windows 开发者模式说明、UI 词典位置与硬刷新。 |
+| **W-D3** 行尾 | ✅ 已修复 | 新增 `.gitattributes`：`* text=auto eol=lf`、`*.ipynb text eol=lf`、图片二进制等，消除 CRLF 警告与 diff 噪音。 |
+| **W-D4 / W-D5 / N-05** | ✅ 已修复 | `bug_report.yml` 版本占位符改多平台并新增环境/输入法字段；README 补硬刷新步骤；CONTRIBUTING 注明 UI 词典在 `client.js` 的 `STRINGS`（`locale/*.json` 仅市场元数据）。 |
+| **W-A9 / W-A10** 解释器诊断 | ✅ 已修复 | `lib/env.js`：`DSH_IPYNB_PYTHON` 非绝对路径时作为可见的 `ok:false` 条目返回（`must be an absolute path`），不再静默落到 spawn ENOENT；显式 `python` 参数非绝对路径返回 400；503 文案区分「0 个候选」（含 Windows 设置提示）与「候选存在但都不可用（列出前 3 个 detail）」。 |
+| **W-B8** BOM | ✅ 已修复 | `lib/notebook.js` 新增 `decodeNotebookText()`：识别 UTF-8 / UTF-16LE / UTF-16BE BOM 后再 `JSON.parse`，Windows PowerShell 5 产物不再被误判 invalid；sha256 版本仍按原始字节计算。 |
+| **W-C4** CRLF 高亮 | ✅ 已修复 | `client.js` 的 `highlightPython` 入口归一 `\r\n`→`\n`，CRLF 源码的注释不再多渲染空行。 |
+| **W-A7** 信号语义注释 | ✅ 已修复 | `python/bridge.py` 与 `lib/kernel.js` 注明 Windows 上 SIGTERM/SIGKILL 均为 TerminateProcess、优雅清理依赖 shutdown 协议与 job object（纯注释，无行为变化）。 |
+
+**验证**：全量 `npm test` = **306 tests / 262 pass / 0 fail / 44 skip / 44.6s**（新增 4 个测试：BOM 解码、CRLF 高亮、`DSH_IPYNB_PYTHON` 相对路径可见性、空发现 503 文案；`resolveInterpreter` 的绝对路径断言加在既有 malformed 用例内）；`node --check`、`py_compile`、`git diff --check` 通过。
+
+**仍未做**：W-A8（`X_OK` 语义注释）、W-B1（TOCTOU）、W-B4（读取 EBUSY 映射）、W-B5/W-B6/W-B7、W-C2/W-C3/W-C5/W-C6/W-C7、L-1/L-5/L-7/L-16/L-21、T-* 测试补强等。

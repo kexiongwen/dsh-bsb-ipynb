@@ -1,0 +1,10 @@
+# Normalize line endings so a Windows working tree (core.autocrlf) cannot
+# pollute diffs or byte-level fixtures.
+* text=auto eol=lf
+*.ipynb text eol=lf
+*.svg text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
