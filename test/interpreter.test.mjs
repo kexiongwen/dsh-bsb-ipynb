@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { execFile, spawnSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -109,13 +110,20 @@ function readInspection(stdout) {
   return JSON.parse(line.slice(outputPrefix.length))
 }
 
+function normalizeInvocationPath(value) {
+  const resolved = path.resolve(value)
+  return path.join(realpathSync(path.dirname(resolved)), path.basename(resolved))
+}
+
 function assertSelectedEnvironment(actual, environment, phase) {
-  // Do not compare only realpath(executable): a venv's Python commonly points
-  // to the same base binary, which would let the original bug pass this test.
-  assert.equal(path.resolve(actual.executable), path.resolve(environment.python), `${phase}: kernel executable must retain the selected invocation path`)
-  assert.equal(path.resolve(actual.prefix), path.resolve(environment.root), `${phase}: kernel prefix must be the selected venv`)
+  // Do not compare realpath(executable) directly: a venv's Python commonly
+  // points to the same base binary, which would let the original bug pass.
+  // Normalize only the directory so macOS /var -> /private/var aliases compare
+  // equal while the selected venv's bin path is still required.
+  assert.equal(normalizeInvocationPath(actual.executable), normalizeInvocationPath(environment.python), `${phase}: kernel executable must retain the selected invocation path`)
+  assert.equal(realpathSync(actual.prefix), realpathSync(environment.root), `${phase}: kernel prefix must be the selected venv`)
   assert.equal(actual.module_value, environment.name, `${phase}: environment-only package must be importable`)
-  assert.equal(path.resolve(actual.module_file), path.resolve(environment.moduleFile), `${phase}: package must come from the selected venv`)
+  assert.equal(realpathSync(actual.module_file), realpathSync(environment.moduleFile), `${phase}: package must come from the selected venv`)
   assert.equal(actual.spec_environment_marker, null, `${phase}: unrelated kernelspec environment must not be inherited`)
 }
 
