@@ -62,7 +62,8 @@ window.__ModuleLoader__.load({
         kernelUnavailable: 'No Python interpreter with jupyter_client and ipykernel was found.',
         installHint: 'Install them with: python -m pip install jupyter_client ipykernel',
         restartConfirm: 'Restart the kernel to switch interpreter?',
-        shortcuts: 'Ctrl/Cmd+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Ctrl/Cmd+S save',
+        shortcuts: 'Ctrl+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Ctrl+S save',
+        shortcutsMac: 'Cmd+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Cmd+S save',
         emptyFile: 'Empty file — a new notebook will be created on save.',
         outputImage: 'Notebook output image',
         viewerTitle: 'Jupyter Notebook',
@@ -119,7 +120,8 @@ window.__ModuleLoader__.load({
         kernelUnavailable: '未找到安装了 jupyter_client 和 ipykernel 的 Python 解释器。',
         installHint: '可使用以下命令安装：python -m pip install jupyter_client ipykernel',
         restartConfirm: '切换解释器需要重启内核，是否继续？',
-        shortcuts: 'Ctrl/Cmd+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Ctrl/Cmd+S 保存',
+        shortcuts: 'Ctrl+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Ctrl+S 保存',
+        shortcutsMac: 'Cmd+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Cmd+S 保存',
         emptyFile: '空文件 — 保存时将创建新的 notebook。',
         outputImage: 'notebook 输出图片',
         viewerTitle: 'Jupyter 笔记本',
@@ -137,6 +139,15 @@ window.__ModuleLoader__.load({
     // Host-backed translate once the optional DSH locale service is bound (see
     // bindHostLocale); the browser language is only the standalone fallback.
     let t = browserT
+
+    function isMacPlatform(nav = (typeof navigator !== 'undefined' ? navigator : null)) {
+      const platform = nav && (nav.userAgentData?.platform || nav.platform || nav.userAgent) || ''
+      return /mac/i.test(platform)
+    }
+
+    function shortcutText() {
+      return t(isMacPlatform() ? 'shortcutsMac' : 'shortcuts')
+    }
 
     const ESCAPE = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
     const UNESCAPE = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" }
@@ -932,6 +943,33 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function metadataRecoveryAction(notebook) {
+      // Clearing outputs cannot repair notebook/cell metadata (including when
+      // both locations are over the limit), so those cases must reload instead.
+      try {
+        assertMetadataWithinLimits(notebook.metadata, 'Notebook metadata')
+        for (const cell of notebook.cells) assertMetadataWithinLimits(cell.metadata, 'Cell metadata')
+      } catch (error) {
+        if (error && error.code === 'metadata-too-complex') return 'reload'
+        throw error
+      }
+      let outputMetadataTooComplex = false
+      for (const cell of notebook.cells) {
+        if (!Array.isArray(cell.outputs)) continue
+        for (const output of cell.outputs) {
+          try {
+            assertMetadataWithinLimits(output?.metadata, 'Output metadata')
+          } catch (error) {
+            if (!error || error.code !== 'metadata-too-complex') throw error
+            // clearAllOutputs only touches code cells; anything else must reload.
+            if (cell.cell_type !== 'code') return 'reload'
+            outputMetadataTooComplex = true
+          }
+        }
+      }
+      return outputMetadataTooComplex ? 'clear-outputs' : 'reload'
+    }
+
     // Older Safari (<16.4) cannot parse lookbehind; keep the same semantics
     // (each line keeps its trailing newline) with a manual scan.
     function splitSourceLines(source) {
@@ -991,12 +1029,30 @@ window.__ModuleLoader__.load({
       return { ok: bytes <= limit, bytes }
     }
 
+    function interpolateText(text, params) {
+      return String(text).replace(/\{([^{}]+)\}/g, (match, key) => (
+        params && Object.hasOwn(params, key) ? String(params[key]) : match
+      ))
+    }
+
     function capacityText(bytes) {
-      return t('capacityTooLarge').replace('{size}', (bytes / 1048576).toFixed(1))
+      return interpolateText(t('capacityTooLarge'), { size: (bytes / 1048576).toFixed(1) })
     }
 
     function capacityNoOutputsText(bytes) {
-      return t('capacityNoOutputs').replace('{size}', (bytes / 1048576).toFixed(1))
+      return interpolateText(t('capacityNoOutputs'), { size: (bytes / 1048576).toFixed(1) })
+    }
+
+    // Banner state keeps translatable copy as keys and params. `text` is only
+    // for untranslatable server details (or a standalone dynamic message), and
+    // `textKey` covers a second translated phrase such as the install hint.
+    function bannerText(banner) {
+      if (!banner) return ''
+      if (!banner.key) return String(banner.text ?? '')
+      let text = interpolateText(t(banner.key), banner.params)
+      const suffix = banner.textKey ? t(banner.textKey) : banner.text
+      if (suffix) text += (banner.separator ?? ': ') + String(suffix)
+      return text
     }
 
     function cellTypeLabel(type) {
@@ -1514,7 +1570,7 @@ window.__ModuleLoader__.load({
           className: 'dsh-bsb-ipynb-banner dsh-bsb-ipynb-banner-' + kind,
           role: kind === 'error' ? 'alert' : 'status',
         },
-        h('span', { className: 'dsh-bsb-ipynb-banner-text' }, banner.text),
+        h('span', { className: 'dsh-bsb-ipynb-banner-text' }, bannerText(banner)),
         banner.action === 'reload'
           ? h(IconButton, { title: t('reload'), onClick: onReload }, t('reload'))
           : banner.action === 'clear-outputs'
@@ -1637,7 +1693,7 @@ window.__ModuleLoader__.load({
           setConflict(null)
           setAutosaveBlocked(false)
           failedSnapshotRef.current = null
-          setBanner(data.emptyFile ? { kind: 'info', reason: 'empty-file', text: t('emptyFile') } : null)
+          setBanner(data.emptyFile ? { kind: 'info', reason: 'empty-file', key: 'emptyFile' } : null)
           return
         }
         notebookRef.current = null
@@ -1687,7 +1743,7 @@ window.__ModuleLoader__.load({
         dirtyRef.current = false
         setDirty(false)
         setAutosaveBlocked(true)
-        setBanner({ kind: 'info', reason: 'empty-file', text: t('emptyHint') })
+        setBanner({ kind: 'info', reason: 'empty-file', key: 'emptyHint' })
       }, [invalidateDocumentWork])
 
       const save = useCallback(async () => {
@@ -1698,7 +1754,7 @@ window.__ModuleLoader__.load({
           // A 409 blocks saving until the user reloads; surface that instead of
           // silently ignoring the click or Ctrl+S.
           setSaveState('failed')
-          setBanner({ kind: 'error', reason: 'write-conflict', text: t('conflict'), action: 'reload' })
+          setBanner({ kind: 'error', reason: 'write-conflict', key: 'conflict', action: 'reload' })
           return
         }
         const snapshot = notebookRef.current
@@ -1709,17 +1765,23 @@ window.__ModuleLoader__.load({
           setSaveState('failed')
           setCapacityBlocked(true)
           if (capacity.reason === 'metadata-too-complex') {
-            setBanner({ kind: 'error', reason: capacity.reason, text: t('metadataTooComplex') })
+            setBanner({
+              kind: 'error',
+              reason: capacity.reason,
+              key: 'metadataTooComplex',
+              action: metadataRecoveryAction(snapshot),
+            })
           } else {
             // Only offer the clear-outputs action when it can actually help:
             // a notebook sized by source/attachments has no outputs to clear.
             const hasOutputs = snapshot.cells.some((cell) => (
               cell.cell_type === 'code' && Array.isArray(cell.outputs) && cell.outputs.length > 0
             ))
+            const params = { size: (capacity.bytes / 1048576).toFixed(1) }
             if (hasOutputs) {
-              setBanner({ kind: 'error', reason: 'capacity', text: capacityText(capacity.bytes), action: 'clear-outputs' })
+              setBanner({ kind: 'error', reason: 'capacity', key: 'capacityTooLarge', params, action: 'clear-outputs' })
             } else {
-              setBanner({ kind: 'error', reason: 'capacity', text: capacityNoOutputsText(capacity.bytes) })
+              setBanner({ kind: 'error', reason: 'capacity', key: 'capacityNoOutputs', params })
             }
           }
           return
@@ -1772,19 +1834,19 @@ window.__ModuleLoader__.load({
           setSaveState('failed')
           if (error && error.code === 'write-conflict') {
             setConflict((error.details && error.details.version) || 'conflict')
-            setBanner({ kind: 'error', reason: 'write-conflict', text: t('conflict'), action: 'reload' })
+            setBanner({ kind: 'error', reason: 'write-conflict', key: 'conflict', action: 'reload' })
           } else if (error && error.code === 'write-blocked') {
             const readOnly = Boolean(error.details && error.details.reason === 'readonly')
             setBanner({
               kind: 'error',
               reason: 'write-blocked',
-              text: t(readOnly ? 'saveBlockedReadonly' : 'saveBlockedLocked'),
+              key: readOnly ? 'saveBlockedReadonly' : 'saveBlockedLocked',
             })
             // Retry with backoff instead of hitting the same filesystem error
             // on every autosave tick.
             setAutosaveDelay((current) => blockedAutosaveDelay(current))
           } else {
-            setBanner({ kind: 'error', reason: 'save-failed', text: t('saveFailed') + (error && error.message ? ': ' + error.message : '') })
+            setBanner({ kind: 'error', reason: 'save-failed', key: 'saveFailed', text: error && error.message })
           }
         } finally {
           if (isCurrentSave()) savingRef.current = null
@@ -1885,7 +1947,7 @@ window.__ModuleLoader__.load({
           newTruncation = true
         }
         if (newTruncation) {
-          setBanner((current) => (current && current.kind === 'error' ? current : { kind: 'info', reason: 'output-limit', text: t('outputTruncated') }))
+          setBanner((current) => (current && current.kind === 'error' ? current : { kind: 'info', reason: 'output-limit', key: 'outputTruncated' }))
         } else if (!hasTruncation) {
           setBanner((current) => current?.reason === 'output-limit' ? null : current)
         }
@@ -1938,7 +2000,7 @@ window.__ModuleLoader__.load({
           if (executeReplyFailed(event)) run.failed = true
           if (kernelRestartedReply(event)) {
             run.failed = true
-            setBanner({ kind: 'error', text: t('kernelRestarted') })
+            setBanner({ kind: 'error', key: 'kernelRestarted' })
           }
           if (typeof event.execution_count === 'number') {
             updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
@@ -1955,13 +2017,13 @@ window.__ModuleLoader__.load({
         if (event.type === 'kernel_died') {
           run.died = true
           run.failed = true
-          setBanner({ kind: 'error', text: event.message || t('kernelDied') })
+          setBanner({ kind: 'error', ...(event.message ? { text: event.message } : { key: 'kernelDied' }) })
           setKernel((previous) => ({ ...previous, running: false, ready: false, busy: false, executionState: 'none' }))
           return
         }
         if (event.type === 'fatal') {
           run.failed = true
-          setBanner({ kind: 'error', text: event.message || t('loadError') })
+          setBanner({ kind: 'error', ...(event.message ? { text: event.message } : { key: 'loadError' }) })
         }
       }, [updateRunOutputs, updateRunCell, markDirty])
 
@@ -2013,7 +2075,7 @@ window.__ModuleLoader__.load({
           // a saved result, nor restore a snapshot over a reloaded document.
           if (shouldRestoreOutputsAfterRun(run.replySeen)) {
             restorePreRunOutputs()
-            if (!run.failed) setBanner({ kind: 'error', text: t('streamIncomplete') })
+            if (!run.failed) setBanner({ kind: 'error', key: 'streamIncomplete' })
             run.failed = true
           }
           return !run.failed
@@ -2025,9 +2087,9 @@ window.__ModuleLoader__.load({
           }
           const code = error && error.code
           if (code === 'kernel-unavailable' || code === 'interpreter-unknown') {
-            setBanner({ kind: 'error', text: t('kernelUnavailable') + ' ' + t('installHint') })
+            setBanner({ kind: 'error', key: 'kernelUnavailable', textKey: 'installHint', separator: ' ' })
           } else {
-            setBanner({ kind: 'error', text: (error && error.message) || t('kernelDied') })
+            setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
           }
           setKernel((previous) => ({ ...previous, busy: false, executionState: 'idle' }))
           if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
@@ -2069,7 +2131,7 @@ window.__ModuleLoader__.load({
         try {
           await postJson(ctx, 'interrupt', { sessionId: scope && scope.sessionId, path })
         } catch (error) {
-          if (error && error.code === 'kernel-unavailable') setBanner({ kind: 'info', text: t('kernel') + ': ' + t('off') })
+          if (error && error.code === 'kernel-unavailable') setBanner({ kind: 'info', key: 'kernel', textKey: 'off' })
         }
       }, [ctx, path, scope])
 
@@ -2080,10 +2142,10 @@ window.__ModuleLoader__.load({
             path,
             python: resolveRestartPython(nextPython, pythonRef.current),
           })
-          setBanner({ kind: 'info', text: t('kernel') + ': ' + (value.python || pythonRef.current || '') })
+          setBanner({ kind: 'info', key: 'kernel', text: value.python || pythonRef.current || '' })
           await refreshKernel()
         } catch (error) {
-          setBanner({ kind: 'error', text: (error && error.message) || t('kernelDied') })
+          setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
         }
       }, [ctx, path, scope, refreshKernel])
 
@@ -2313,7 +2375,7 @@ window.__ModuleLoader__.load({
           h(IconButton, { title: t('addMarkdown'), onClick: () => insertCell(notebook.cells.length ? notebook.cells[notebook.cells.length - 1].id : null, 'markdown') }, t('addMarkdown')),
           emptyFile ? h('span', { className: 'dsh-bsb-ipynb-hint' }, t('emptyFile')) : null,
         ),
-        h('div', { className: 'dsh-bsb-ipynb-shortcuts' }, t('shortcuts')),
+        h('div', { className: 'dsh-bsb-ipynb-shortcuts' }, shortcutText()),
       )
     }
 
@@ -2602,6 +2664,9 @@ body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-save-state.is-error 
       STRINGS,
       LOCALE_NS,
       translate: (key) => t(key),
+      isMacPlatform,
+      shortcutText,
+      bannerText,
       escapeHtml,
       mimeText,
       imageSource,

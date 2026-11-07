@@ -8,17 +8,18 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。多轮修复后测试集扩到 325 tests；三平台 CI（ubuntu/windows/macos，均为 required）当前全绿（0 fail）。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **336 tests / 292 pass / 44 skip / 0 fail**。
+> **增量复核**：独立审查新增的未修复问题编号为 **M-13～M-16、L-25**；此前已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
-> **行号说明**：`file:line` 为快照时的源码行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。
+> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。M-13～M-16、L-25 使用当前工作区行号。
 
 **问题总览（仅未修复）**
 
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
-| Medium | 9 | M-2、M-4、M-6、M-7、M-8、M-9、M-10、M-11、M-12 |
-| Low | 14 | L-5、L-9、L-10、L-12、L-13、L-15、L-16、L-18、L-19、L-20、L-21、L-22、L-23、L-24 |
+| Medium | 13 | M-2、M-4、M-6、M-7、M-8、M-9、M-10、M-11、M-12、M-13、M-14、M-15、M-16 |
+| Low | 10 | L-5、L-9、L-12、L-13、L-16、L-20、L-21、L-22、L-23、L-25 |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
 | 测试缺口 | 5 | T-1、T-3、T-5、T-6、T-8 |
 
@@ -26,7 +27,7 @@
 
 ---
 
-## 1. Medium（9 项，未修复）
+## 1. Medium（13 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题与影响 | 证据 | 建议 |
 | --- | --- | --- | --- | --- | --- |
@@ -39,27 +40,27 @@
 | **M-10**（P2） | 全平台 | `lib/kernel.js:363-375`（坏帧处理）、`304-311`（终态）、`441-499`（busy/run） | 非 JSON 帧只更新 lastError，合法 JSON 但缺 type 直接 return；两者都不 failRun/kill。若损坏的是唯一 execute_reply，currentRun 无执行 watchdog 将一直 pending，后续执行持续 kernel-busy。Windows 上同样会出现 kernel-busy 挂起。 | 【已验证】活动 run 收到 `NOT-JSON` 后为 `settled=false、busy=true、ready=true、kills=[]`，只有人为补正常 reply 才释放；`test/kernel-lifecycle.test.mjs` 只测重启期间保留旧错误。 | stdout 严格协议错误应 failRun 并杀死/重启 bridge；校验事件 shape 及执行事件 cell_id/exec_id；覆盖 starting/idle/running 的坏 JSON、非对象、缺 type/缺 ID。 |
 | **M-11**（P2） | 全平台 | `lib/kernel.js:564-616`（shutdown/kill）、`738-743`（manager 删除）、`757-766`（dispose） | shutdown 2s 时才由 kill 发 SIGTERM，kill 再隔 2s 才 SIGKILL（总计约 4s），外层 grace 却在 2.5s 结束；随后 manager 无条件删条目，disposeAll 更提前 clear。若 SIGTERM 清理卡住，管理器已显示无内核并允许替代启动，旧 bridge 仍活。Windows 上 SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义（代码已注明），清理只能依赖显式 shutdown 协议。 | 【已验证】受控不退出 child：约 **2502ms** 返回时 `managerKnowsEntry=false、processAlive=true、kills=['SIGTERM']`。 | 等待 exit 覆盖完整 SIGKILL 升级；未确认退出前保留 stopping entry 并报告失败，不能当作已回收；测试忽略 SIGTERM、2.5s 不遗忘/不重复启动、SIGKILL+exit 后才删除。 |
 | **M-12**（P2） | 全平台 | `client.js:1669-1676,1726-1736`（GET/轮询）、`1795-1833`（流式终态）、`1963-1970`（shutdown） | 初始或轮询 `/status` 在内核死亡/shutdown 前发出、之后到达时，refreshKernel 无 document generation、kernel epoch 或请求序号检查，直接 setKernel；旧 `{running:true,busy:true}` 可覆盖 death/reply 的终态。visible=false 停止后续轮询时错误状态可持续。影响 UI/按钮状态，不是服务器内核真的复活。 | 【已验证】生命周期 harness：先提交 kernel_died 和失败 reply（running:false），再交付旧 running/busy 响应，最终工具栏变回 running:true、busy:true。现有迟到 NDJSON 测试不覆盖 GET。 | 增加 kernel epoch/request id；run 开始、status/reply/death、restart/shutdown、adopt 时推进 epoch，只接受当前代次的最新响应，必要时 abort 旧 GET；补 death/shutdown/reload 后迟到响应用例。 |
+| **M-13**（P1） | 全平台 | `client.js:1650-1664`（invalidate 仅清 savingRef）、`1717-1729`（reload）、`1799-1807`（save 无 signal，旧响应仅被忽略）；`lib/notebook.js:503-531`（read 不与 save 共队列） | Reload 与在途 save 无同步：D0/v1 上发出保存 A 后 Reload，若 host read 先返回 D0/v1 并 adopt，已发出的 A 仍可随后合法提交为 v3；客户端因 generation 失效忽略 v3，界面显示 D0、磁盘却为 A，下一次保存仍用 v1 并收到 409。用户确认“丢弃”的草稿可能晚到落盘，UI/磁盘版本分叉。 | 【已验证】客户端时序复现 `lateServerVersion=v3、nextBaseVersion=v1`；服务端 read/save 调用顺序核对确认可达，未做真实浏览器端到端复现。 | Reload 必须等待/协调在途保存，在保存 settle 后重新 read/adopt 并采用真实最新版本；仅 abort fetch 或忽略响应不能阻止服务器已提交的写入。 |
+| **M-14**（P2） | 全平台 | `lib/routes.js:436-461`（restartRoute） | `/restart` 在 await 前缓存旧 entry，之后未验证当前 entry 身份。两个并发切换 A→B、A→C 可都 shutdown A，随后第一个 start B，第二个却把当前 B restart 而非启动 C；两个请求均 200，C 响应还返回 C，但最终 current=B。相同窗口也可能让旧 entry 的 busy 检查漏过 replacement 的忙态。 | 【已验证】受控路由并发调用序列为 `shutdown:A, shutdown:A, start:B, restart:B`；B、C 请求均 200，C 响应 value.python=C，最终 current=B。 | 按 target 串行化完整 restart/switch 生命周期，或在管理器内提供原子操作；await 后重新核验 entry 身份、busy 与实际 python，响应必须反映真实启动结果。 |
+| **M-15**（P1） | 全平台 | `lib/notebook.js:565-580`（assertNotebookVersion），调用点 `658`、`676` | 版本校验注释声称有界读取，实际是 `stat` 后无界 `fsp.readFile`：文件在二者之间增长可绕过 32MiB 上限并被完整缓冲；一次保存的两次版本校验均受影响。外部写者可扩大到 GB 级造成宿主内存峰值/OOM，增长内容最终还可能只被归为 409 而非 413。此项重开 L-5 中曾认为已经消除的风险。 | 【已验证】确定性增长故障注入在第一次版本读取前把文件增至 40MiB，实际返回/缓冲 **41,943,040 bytes**（cap 33,554,432），最终为 `409 write-conflict`。 | 版本读取复用统一的 `open + fstat + 有界循环`，最多读取 cap+1 字节；补充 stat→read 之间增长的回归测试，并确保两次校验都使用同一安全实现。 |
+| **M-16**（P2） | 全平台 | `lib/kernel.js:346-378`（handleStdout） | stdout 在拆出换行前就对整个 chunk 累加并检查 64MiB：上一帧恰好 64MiB，下一 chunk 同时携带其换行符与下一帧时，会在解析完整行前误判超限。合法输出被丢弃、执行失败并重启内核，属于边界条件下的可用性与内核状态丢失。 | 【已验证】构造 `exactLineBytes=67,108,864` 的合法事件，下一 chunk 为换行+小事件，观测 `streamEvents=0、replyOk=false、restartCommands=1`。 | 先消费当前 chunk 中的完整行，再仅对剩余不完整行执行上限检查；补恰好 64MiB、与下一帧同 chunk、UTF-8 多字节及真正超长帧的回归。 |
 
 ---
 
-## 2. Low（14 项，未修复）
+## 2. Low（10 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题 | 建议 |
 | --- | --- | --- | --- | --- |
-| L-5 | 全平台 | `lib/notebook.js:364-382,410-444`（当前在 `assertNotebookVersion` 与 `writeNotebook`） | 每次保存仍执行 **2 次全量 `readFile` + 2 次 sha256**（32MiB notebook 每次读 64MiB）。两次读取现已加 32MiB 上限，不会再把 GB 级文件整体缓冲（原风险已消除），剩余为 2× I/O 与哈希成本。 | 复用首次读取的 Buffer 比较；或改 `open`+`fstat` 身份校验以省掉一次读取。 |
+| L-5 | 全平台 | `lib/notebook.js:565-580,602-693`（`assertNotebookVersion` 与 `writeNotebook`） | 每次保存仍执行 **2 次全量 `readFile` + 2 次 sha256**（32MiB notebook 每次读 64MiB），产生额外 I/O 与哈希成本。stat→readFile 增长窗口导致的无界读取风险见 **M-15**，不能再声称这两次读取已有完整 32MiB 上限保护。 | 复用首次读取的 Buffer 比较；或改 `open`+`fstat` 身份校验以省掉一次读取，同时满足 M-15 的有界读取要求。 |
 | L-9 | 全平台 | `lib/gate.js:64-85` | 工作区外路径的存在性/可访问性 oracle：存在→403、不存在→404、EACCES→404+reason，同用户 API 可据此探测任意路径。Windows 路径形态（大小写、8.3、ADS、尾点、设备名、UNC）均不能绕过包含检查，但 oracle 本身仍成立。 | 统一为不可区分错误，或接受并文档化。 |
-| L-10 | 全平台 | `lib/notebook.js:495`（`saveQueues`） | `saveQueues` 只按 canonical 路径字符串串行化：同一 inode 的**硬链接别名**并发保存**两个都成功**，违反 README 声明的「同一 notebook 并发保存只有第一个成功」。Windows 实测同样成立；大小写/8.3/junction 别名会被 realpath 归一化，能正确串行（第二个 409）。 | 按 dev/ino 串行化；或文档声明该边界。 |
 | L-12 | 全平台 | `client.js:183-220`（`cleanNode`，递归点 195-201）、`222-233`（`sanitizeHtml`） | HTML 清洗器仍为「unwrap 后递归重启父遍历」实现：O(n²)；规模再大时整段 HTML 输出降级为转义文本。try/catch 只防止异常逃逸，未降低复杂度；真实白名单分支无行为测试（T-1）。【已验证】最小 DOM 替身中 500/1000/2000/4000 个未知兄弟标签约 **17.8/55.5/165.0/653.4ms**，符合二次增长（非浏览器耗时）。 | 改显式栈/游标，从替换位置继续，并设节点/深度预算；用最小 DOM 或 jsdom 补白名单及操作计数回归。 |
 | L-13 | POSIX（Windows 不成立） | `lib/env.js:159-206,274-286,42-45` | 探测超时只发 SIGTERM、不升级 SIGKILL：忽略 SIGTERM 的候选（wrapper shell、`SIG_IGN` 的 sitecustomize）使 `execFile` 永不 settle → `discoverInterpreters()` 永久 pending、`inflight` 永不清空、`resetInterpreterCache()` 无效 → `/interpreters`、`/execute`、`/restart` 永久挂起。Windows 上 kill=TerminateProcess，不成立。 | 自行 spawn，超时后 SIGTERM→短宽限→SIGKILL，并等待 close 后 settle；整轮 discovery 加总超时/watchdog。reset 可中止当前 probe，但不能只 `Promise.race` 返回而遗留子进程。 |
-| L-15 | 全平台 | `client.js` 多处 `setBanner(...)`（快照 `1395-1409,1422-1432,2428-2444`） | 语言热切换不覆盖已存入 state 的 banner 文案：冲突/保存失败/容量/内核重启等 banner 在事件发生时翻译后保存，切换语言后不重译（渲染期 `t()` 的静态文案会更新）。 | banner 存 `{key, params, kind, action}`，渲染时再 `t(key)`；可保留 text fallback，先迁移 conflict，再覆盖 capacity/kernel。 |
 | L-16 | 全平台（Windows 更明显） | `client.js:1151-1157`（当前 `OutputView` 的 `text/html` 分支） | HTML 输出中的图片处理残留：`<img src="attachment:x">`/相对路径经清洗保留但不经 `resolveImage` → 必然裂图（只有 Markdown 路径会解析）。Windows 上盘符/UNC 图片还受 sanitizeUrl 路径处理影响。 | HTML 输出也走 `resolveImage` 改写 `img[src]`；README 声明远程图片行为。 |
-| L-18 | 全平台 | `client.js:1069,1594-1611` | `metadata-too-complex` 阻塞**没有可用的恢复入口**：preflight 失败后 `capacityBlocked=true`、自动保存暂停，banner 只有文字、无 action，文案让用户「减少嵌套/条目」但 UI 没有编辑 metadata 的入口。该状态可由内核输出 metadata 触发（`1024` 将 IOPub `event.metadata` 原样并入 output.metadata），之后所有编辑都无法落盘；唯一出路是逐 cell 的隐藏「清空输出」按钮或 reload 丢弃草稿。 | 按来源给 action：output metadata 超限给「清空全部输出」，否则给「重新加载」；或在合并 IOPub metadata 时丢弃超限项（服务端保存同样会 400）。 |
-| L-19 | 全平台 | `client.js:745-751,1596,1740-1743` | 容量阻塞只在「成功 preflight / 清空输出 / 重跑 / reload」时解除；用户通过编辑把 notebook 缩回 32MiB 内（删 cell/删源码）后 **autosave 不会恢复**（编辑不重跑 preflight），必须手动保存；README 未说明该恢复路径，现有测试把「编辑不重启 autosave」固化为预期。 | 结构性编辑（删 cell/切类型/清输出/插入）时清 `capacityBlocked` 并允许一次 preflight 重试；或 README 明确「缩小后需手动保存一次」。 |
 | L-20 | 全平台 | `client.js:901-914` | 保存预检成本：每次保存（含 1.5s autosave 触发的每次）同步执行 `normalizeNotebook` + pretty `JSON.stringify` + `TextEncoder.encode` 整本 notebook，随后请求再 compact stringify 一次。Node 实测 31MiB 单流 45ms、20MB/50 万行源码 148ms；浏览器通常再慢 2–4×；每次瞬时分配约 2–3× notebook。 | 按 revision/结构指纹缓存上次测量值，仅改动可能影响大小时重算；或 README 注明大文件保存开销。 |
 | L-21 | 全平台 | `client.js:1218-1237` | 快捷键只在编辑 textarea 的 `onKeyDown` 生效（无全局监听，`window.addEventListener` 全文为 0）；阅读态按 Ctrl/Cmd+Enter、Ctrl/Cmd+S 无效（README 已注明快捷键仅在编辑态生效）。浏览器版在非编辑态按 Ctrl+S 会触发「保存网页」。 | 加全局监听，编辑态复用现有逻辑；可接入 DSH shortcuts。 |
 | **L-22** | Windows 形态 | `lib/gate.js:91-150`（`walkTarget`）、`214-233`（`KernelPaths`） | 通过 junction 访问 notebook，先删除其目标目录（junction 悬空后 Node 视为 ENOENT）再调用控制端点：控制路径退化为「请求拼写路径」，与内核 canonical 键不一致 → 活内核不可达（`/status` running:false、interrupt 503）。属于**安全失败方向**，不会控制错内核。 | 可不改；若要修，需要显式处理悬空 reparse point 并保留授权时观察到的 identity。 |
 | **L-23** | Windows 形态 | `lib/gate.js:194-233`（`samePathIdentity`、alias key） | NTFS 大小写不敏感：文件删除后，若某大小写拼写从未在文件存在时被观察过，经该拼写调用控制端点无法匹配按 canonical 路径登记的活内核（`/status` running:false、interrupt 503）。 | 安全方向安全；可对 win32 的未存在段做 `toLowerCase()` 作为 alias key，或文档说明拼写需一致。 |
-| **L-24** | 全平台（Windows 更明显） | `client.js:64,121`（`shortcuts` 文案）及底部常驻快捷键提示 | 快捷键提示硬编码 `Ctrl/Cmd`，无平台检测（全文无 `navigator.platform/userAgent`）→ Windows 用户始终看到 "Cmd"；DSH 0.2.2-rc.1 自带 `@deepseek-ai/dsh-client-shortcuts`（平台化 keycap、可改键、冲突检测）可接入。 | 按平台选文案；目标态接入 DSH shortcuts（同时解决 L-21）。 |
+| **L-25** | 全平台 | `client.js:1915-1925`（visible=false 不轮询）、`2040-2053`（乐观 running:true）、`2082-2095`（catch 仅清 busy/设 idle） | 初始 kernel off 且页面不可见时，Run 后若 `/execute` 前置返回 `kernel-unavailable`（或网络失败），乐观写入的 `running:true` 不会撤销；最终工具栏显示 `running:true、ready:false、busy:false、executionState:'idle'` 而非 off。执行锁会释放，但没有后续轮询纠正。影响 UI/按钮状态，不代表服务器真的启动了内核。 | 【已验证】mountNotebook 复现最终 `{running:true,ready:false,busy:false,python:null,executionState:'idle'}`，同时 toolbar.running=false。 | 前置失败时恢复执行前内核快照，或用带 document/kernel generation 的 status 刷新纠正；不要对所有错误一律设 running=false，因为部分失败发生时真实内核可能仍存活。 |
 
 ---
 
@@ -79,9 +80,9 @@
 | --- | --- | --- | --- |
 | **T-1**（High，测试可信度） | `client.js` 的 `cleanNode`/`sanitizeHtml` vs `test/client.test.mjs` | DOMParser 白名单清洗器**零真实行为测试**：现有用例只覆盖无 DOMParser/抛错 fallback 和 ALLOWED_ATTRS 集合；`cleanNode` 的 DROP_TAGS、属性删除、`javascript:` 链接化、`target+rel` 覆写及 unwrap 主路径无覆盖。L-12/L-16 藏于此。 | 最小 DOM 替身（或 devDependency jsdom）驱动 `sanitizeHtml` 真实分支，断言 DROP_TAGS/属性白名单/`sanitizeUrl`/`a[target][rel]`；Windows 路径 `<img src="C:\…">`/UNC 一并覆盖，以操作计数验证大量未知标签不再反复扫描。 |
 | T-3 | `client.js` 的快捷键/工具栏/解释器切换/轮询/autosave | 客户端主交互缺测试：工具栏 interrupt/restart/shutdown、解释器切换（confirm + localStorage）、`visible` 轮询、1.5s autosave 正路径、`onToolbarState` 上报；IME/CapsLock 目前只有纯函数级测试，无真实键盘事件路径。 | 复用现有 mount harness（已 mock timer/localStorage/confirm）补齐；补 composition（`isComposing`/229）× 5 快捷键、CapsLock `KeyS`、CRLF 渲染的回归。 |
-| T-5 | `test/routes.test.mjs`、`test/e2e.test.mjs`、`test/execute-disconnect.test.mjs` 等 | HTTP 层全部用手写 `req/res` 替身，无真实 socket：NDJSON 分块、真实 `res.write` 背压/drain、真实 `close`/`writableEnded` 语义、header 大小写等只有假设。 | 加一个 `node:http` + fetch 端到端测试（`/health`、`/read` 成功/404、`/execute` 流式读取与中途 abort），并覆盖慢读/永不 drain。 |
-| T-6 | — | 剩余放大/保护/恢复类逻辑缺少回归测试：M-2 的 data 放大与整本预算、L-19 的容量阻塞自动恢复、L-20 的预检缓存。 | 随对应修复一起补测试。 |
-| T-8 | `lib/kernel.js`、`client.js`、`test/bridge_iopub.py` | 剩余失败/竞态路径缺回归：M-10 活动 run 坏协议帧、M-11 忽略 SIGTERM 的 shutdown（真实内核）、M-12 迟到 GET `/status`。 | 注入坏帧、不退出 child 和 deferred GET，断言有界终态、进程回收及旧响应被忽略。 |
+| T-5 | `test/routes.test.mjs`、`test/e2e.test.mjs`、`test/execute-disconnect.test.mjs` 等 | `/execute` 的永不 drain 已有真实 `node:http` + TCP 回归，但其余 HTTP 路径仍主要使用手写 `req/res` 替身；NDJSON 分块、真实 `close`/`writableEnded`、header 大小写及中途 abort 的覆盖仍不完整。 | 扩展真实 socket 端到端测试（`/health`、`/read` 成功/404、`/execute` 流式读取与中途 abort），保留现有慢读/永不 drain 用例。 |
+| T-6 | — | 剩余放大/保护/恢复类逻辑缺少回归测试：M-2 的 data 放大与整本预算、M-15 的 stat→read 增长窗口、L-20 的预检缓存。 | 随对应修复一起补测试。 |
+| T-8 | `lib/kernel.js`、`lib/routes.js`、`lib/notebook.js`、`client.js`、`test/bridge_iopub.py` | 剩余失败/竞态路径缺回归：M-10 活动 run 坏协议帧、M-11 忽略 SIGTERM、M-12 迟到 GET `/status`、M-13 Reload/在途 save、M-14 并发 restart、M-16 边界 chunk、L-25 execute 前置失败。 | 注入坏帧、不退出 child、deferred GET/save/read/interpreter/stdout chunk，断言有界终态、进程回收、真实解释器、文档版本一致及旧响应被忽略。 |
 
 ---
 
@@ -89,8 +90,8 @@
 
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
-| **P1** | M-2（+T-1） | 序列化放大（DoS 面），可用小输入放大数百倍；T-1 是安全关键测试可信度问题。 |
-| **P2** | M-4、M-6、M-7、M-8、M-9、M-10、M-11、M-12 | 性能、失败终止、状态竞态与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态）。 |
+| **P1** | M-2（+T-1）、M-13、M-15 | M-2 序列化放大、M-15 无界版本读取均可造成内存/CPU 资源风险；M-13 会让已丢弃草稿晚到落盘并造成版本分叉。T-1 仍是安全关键测试可信度问题。 |
+| **P2** | M-4、M-6、M-7、M-8、M-9、M-10、M-11、M-12、M-14、M-16 | 性能、失败终止、状态竞态、错误内核生命周期与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-14 需按 target 串行化，M-16 需调整拆帧与上限检查顺序。 |
 | **P3** | §2 的 Low（按组批量）、T-3/T-5/T-6/T-8、§3 Nit | 低成本、低风险，可合并处理。 |
 
 ---
@@ -99,15 +100,16 @@
 
 - **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-9/L-22/L-23 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；M-11 的修复在 Windows 上应依赖显式 shutdown 协议与进程树回收，而不是信号升级。
-- **三平台基线**：修复后的测试集为 325 tests；本地 Windows 基线 325 / 281 pass / 44 skip（skip 为无 symlink 权限与 POSIX 权限位用例），CI 三平台 required 全绿（0 fail）。
+- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **336 / 292 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
 
 ---
 
-## 7. 复现与验证索引（仅与未修复项相关的历史证据）
+## 7. 复现与验证索引（仅未修复项）
 
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
-| 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；修复后测试集 325 tests，三平台 CI 持续覆盖 |
+| 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
+| 全量测试（当前工作区） | `npm test`（Windows） | **336 tests / 292 pass / 44 skip / 0 fail**（约 45.3s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |
@@ -116,6 +118,11 @@
 | M-8 | 本地 rename 钩子注入（脚本未随仓库提供） | save fulfilled、外部编辑丢失 |
 | M-9 | 当前 Theme provider + `test/client.test.mjs` | 硬编码色未 token 化；未做视觉/对比度复验；Windows 字号 token 未消费 |
 | M-10～M-12 | 本地受控 child、不退出 child、deferred GET 注入（脚本未随仓库提供） | 活动 run 永久 busy；2502ms 返回时进程仍活且条目已遗忘；旧 status 覆盖 death |
+| M-13 | 当前客户端 mountNotebook 时序复现 + 服务端 read/save 调用顺序核对（脚本未随仓库提供） | 已丢弃草稿晚到为 v3，UI 仍显示 Reload 文档且 next baseVersion=v1；下一次保存模拟 409 conflict=v3 |
+| M-14 | 受控解释器 probe 与并发 `/restart`（脚本未随仓库提供） | `shutdown:A, shutdown:A, start:B, restart:B`；两个请求均 200，C 响应为 C，最终 current=B |
+| M-15 | 临时目录 stat→readFile 增长故障注入（脚本未随仓库提供） | 合法文件增长至 40MiB 后实际读取 41,943,040 bytes；返回 409 而非 413 |
+| M-16 | 受控 child/stdout 边界复现（脚本未随仓库提供） | 恰好 67,108,864 bytes 的合法帧被误判：`streamEvents=0、replyOk=false、restartCommands=1` |
+| L-25 | 当前客户端 mountNotebook 前置失败注入（脚本未随仓库提供） | 初始 off 经 `kernel-unavailable` 后显示 `running:true、ready:false、busy:false、executionState:'idle'`；visible=false 时无轮询纠正 |
 | L-12 | 当前源码最小 DOM 替身微基准 | 500/1000/2000/4000 标签约 17.8/55.5/165.0/653.4ms |
 | L-22 / L-23 | Windows 真实 junction/大小写实验 | 悬空 junction 控制路径退化为请求拼写；`NB.IPYNB` 删除后不匹配活内核，`nb.ipynb` 可匹配 |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |

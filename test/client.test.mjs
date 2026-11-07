@@ -734,7 +734,7 @@ test('save preflight reports serialization overflow as a capacity failure', asyn
   assert.deepEqual(notebookCapacity(notebook), { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES })
 })
 
-test('metadata capacity failure shows its own message without a clear-outputs action', async () => {
+test('metadata capacity failure stores translatable state and reloads notebook metadata problems', async () => {
   const stateCalls = []
   let stateIndex = 0
   const { exports } = await loadClient({
@@ -749,7 +749,7 @@ test('metadata capacity failure shows its own message without a clear-outputs ac
       return callback
     },
   })
-  const { NotebookView, STRINGS, METADATA_DEPTH_LIMIT } = exports.__test
+  const { NotebookView, STRINGS, METADATA_DEPTH_LIMIT, bannerText } = exports.__test
   const tree = NotebookView({
     ctx: {},
     scope: {},
@@ -765,8 +765,10 @@ test('metadata capacity failure shows its own message without a clear-outputs ac
   const banner = stateCalls.map((call) => call.value).find((value) => value && value.reason === 'metadata-too-complex')
   assert.ok(banner)
   const strings = /^zh/i.test(globalThis.navigator?.language || '') ? STRINGS.zh : STRINGS.en
-  assert.equal(banner.text, strings.metadataTooComplex)
-  assert.equal(Object.hasOwn(banner, 'action'), false)
+  assert.equal(banner.key, 'metadataTooComplex')
+  assert.equal(Object.hasOwn(banner, 'text'), false, 'static text must not be frozen into banner state')
+  assert.equal(bannerText(banner), strings.metadataTooComplex)
+  assert.equal(banner.action, 'reload', 'clearing outputs cannot repair notebook metadata')
   assert.equal(typeof STRINGS.en.metadataTooComplex, 'string')
   assert.equal(typeof STRINGS.zh.metadataTooComplex, 'string')
 })
@@ -1286,6 +1288,34 @@ test('makeImageResolver resolves images next to a Windows absolute notebook path
   assert.equal(resolve('https://example.com/a.png'), 'https://example.com/a.png')
   assert.equal(resolve('data:image/png;base64,aaaa'), 'data:image/png;base64,aaaa')
   assert.equal(resolve('attachment:missing.png'), null)
+})
+
+test('shortcut hints use platform modifiers in English and Chinese with a safe fallback', async () => {
+  const originalNavigator = globalThis.navigator
+  const ctrlEn = 'Ctrl+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Ctrl+S save'
+  const cmdEn = 'Cmd+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Cmd+S save'
+  const ctrlZh = 'Ctrl+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Ctrl+S 保存'
+  const cmdZh = 'Cmd+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Cmd+S 保存'
+  const cases = [
+    { language: 'en-US', platform: 'MacIntel', expected: cmdEn, mac: true },
+    { language: 'en-US', platform: 'Win32', expected: ctrlEn, mac: false },
+    { language: 'zh-CN', platform: 'MacIntel', expected: cmdZh, mac: true },
+    { language: 'zh-CN', platform: 'Win32', expected: ctrlZh, mac: false },
+    { language: 'en-US', platform: 'Linux x86_64', expected: ctrlEn, mac: false },
+    { missing: true, expected: ctrlEn, mac: false },
+  ]
+  try {
+    for (const entry of cases) {
+      globalThis.navigator = entry.missing
+        ? undefined
+        : { language: entry.language, languages: [entry.language], platform: entry.platform }
+      const { exports } = await loadClient()
+      assert.equal(exports.__test.shortcutText(), entry.expected)
+      assert.equal(exports.__test.isMacPlatform(), entry.mac)
+    }
+  } finally {
+    globalThis.navigator = originalNavigator
+  }
 })
 
 test('cell shortcuts ignore IME composition and accept CapsLock Ctrl+S', async () => {

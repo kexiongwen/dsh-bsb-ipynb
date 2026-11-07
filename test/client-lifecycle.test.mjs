@@ -18,6 +18,12 @@ function notebookData(output = 'OLD', version = 'v1') {
   }
 }
 
+function nestedMetadata(depth) {
+  let metadata = {}
+  for (let index = 0; index < depth; index += 1) metadata = { child: metadata }
+  return metadata
+}
+
 function deferred() {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -253,6 +259,12 @@ function mountNotebook(t, options = {}) {
     get toolbar() { return component('Toolbar').props },
     get cell() { return component('CellView').props },
     get banner() { return component('Banner').props.banner },
+    get bannerText() {
+      const banner = component('Banner')
+      const text = findElement(banner.type(banner.props), (value) => value.props?.className === 'dsh-bsb-ipynb-banner-text')
+      return text && text.props.children[0]
+    },
+    get reloadCount() { return hostReloads },
     requests: (route) => requests.filter((request) => request.route === route),
     edit(source = 'print("edited")') { api.cell.onSource('cell-1', source); flush() },
     run() { api.cell.onRun('cell-1'); flush(); return api.requests('execute').at(-1) },
@@ -442,15 +454,15 @@ test('a save completion preserves a kernel death reported while it was in flight
   stream.emit({ type: 'kernel_died', message: 'kernel crashed' })
   await app.settle()
   assert.equal(app.banner?.kind, 'error')
-  assert.equal(app.banner.text, 'kernel crashed')
+  assert.equal(app.bannerText, 'kernel crashed')
 
   save.resolve(response({ ok: true, value: { version: 'v2' } }))
   await app.settle()
   assert.equal(app.toolbar.saveState, 'saved')
-  assert.equal(app.banner?.text, 'kernel crashed', 'the older save must not erase the newer kernel error')
+  assert.equal(app.bannerText, 'kernel crashed', 'the older save must not erase the newer kernel error')
   stream.end()
   await app.settle()
-  assert.equal(app.banner?.text, 'kernel crashed')
+  assert.equal(app.bannerText, 'kernel crashed')
 })
 
 test('write-blocked saves retry unchanged snapshots with backoff and stop after success', async (t) => {
@@ -857,8 +869,8 @@ test('clearing a cell output empties it and marks the notebook dirty', async (t)
   assert.equal(app.toolbar.dirty, true)
 })
 
-test('an oversized notebook is blocked before upload and can be saved after clearing outputs', async (t) => {
-  const app = mountNotebook(t)
+test('an oversized notebook retranslates its dynamic banner and can be saved after clearing outputs', async (t) => {
+  const app = mountNotebook(t, { locale: true })
   await app.settle()
   // Load a document whose pretty nbformat form exceeds the server's 32 MiB cap.
   app.reload(notebookData('x'.repeat(33 * MiB), 'v2'))
@@ -868,7 +880,18 @@ test('an oversized notebook is blocked before upload and can be saved after clea
   await app.settle()
   assert.equal(app.requests('save').length, 0, 'an oversized notebook must not be uploaded')
   assert.equal(app.banner?.kind, 'error')
-  assert.match(app.banner.text, /32 MiB/)
+  assert.equal(app.banner.key, 'capacityTooLarge')
+  assert.equal(Object.hasOwn(app.banner, 'text'), false, 'the translated capacity message is not frozen into state')
+  const size = app.banner.params.size
+  const english = app.bannerText
+  assert.match(english, /32 MiB/)
+  assert.match(english, new RegExp(size))
+  app.setLocale('zh')
+  assert.equal(app.banner.params.size, size, 'the measured size survives a locale switch')
+  assert.match(app.bannerText, /notebook 内容约/)
+  assert.match(app.bannerText, new RegExp(size.replace('.', '\\.')))
+  app.setLocale('en')
+  assert.equal(app.bannerText, english, 'switching back reproduces the original interpolated English text')
   assert.equal(app.saveButton().disabled, false, 'manual save stays available for the retry')
   assert.equal(app.timersFor(1500).length, 0, 'a capacity block must not leave an autosave retry armed')
   app.edit('print("edited again")')
@@ -907,13 +930,78 @@ test('an oversized notebook without outputs does not offer a no-op clear action'
   assert.equal(app.requests('save').length, 0, 'the oversized source-only notebook must not be uploaded')
   assert.equal(app.banner?.kind, 'error')
   assert.equal(app.banner.action, undefined, 'there is nothing to clear, so no clear action is offered')
-  assert.match(app.banner.text, /32 MiB/)
-  assert.match(app.banner.text, /no outputs to clear/i)
+  assert.match(app.bannerText, /32 MiB/)
+  assert.match(app.bannerText, /no outputs to clear/i)
   const banner = app.component('Banner')
   const clearAll = findElement(banner.type(banner.props), (value) => value.props?.title === 'Clear all outputs')
   assert.equal(clearAll, null, 'no clear-all button is rendered when there are no outputs')
   assert.equal(app.saveButton().disabled, false, 'manual save stays available for the retry')
 })
+
+test('output metadata preflight offers clear outputs and recovers the save', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const data = notebookData('OLD', 'v2')
+  data.notebook.cells[0].outputs = [{
+    output_type: 'display_data',
+    data: { 'text/plain': 'result' },
+    metadata: nestedMetadata(101),
+  }]
+  app.reload(data)
+  await app.settle()
+  app.edit('print("edited")')
+  app.save()
+  await app.settle()
+  assert.equal(app.requests('save').length, 0, 'over-complex metadata is blocked before upload')
+  assert.equal(app.banner?.reason, 'metadata-too-complex')
+  assert.equal(app.banner.key, 'metadataTooComplex')
+  assert.equal(app.banner.action, 'clear-outputs')
+
+  const banner = app.component('Banner')
+  const clearAll = findElement(banner.type(banner.props), (value) => value.props?.title === 'Clear all outputs')
+  assert.ok(clearAll, 'output metadata problems reuse the confirmed clear-all action')
+  clearAll.props.onClick()
+  await app.settle()
+  assert.equal(app.cell.cell.outputs.length, 0)
+  assert.equal(app.banner, null)
+  assert.equal(app.toolbar.dirty, true)
+
+  const retry = app.save()
+  assert.ok(retry, 'clearing the offending outputs releases the preflight block')
+  assert.equal(retry.body.notebook.cells[0].outputs.length, 0)
+  retry.resolve(response({ ok: true, value: { version: 'v3', size: 64 } }))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, false)
+  assert.equal(app.toolbar.saveState, 'saved')
+})
+
+for (const location of ['notebook', 'cell']) {
+  test(`${location} metadata preflight offers reload instead of an ineffective clear action`, async (t) => {
+    const app = mountNotebook(t)
+    await app.settle()
+    const data = notebookData('OLD', 'v2')
+    if (location === 'notebook') data.notebook.metadata = nestedMetadata(101)
+    else data.notebook.cells[0].metadata = nestedMetadata(101)
+    app.reload(data)
+    await app.settle()
+    app.edit('print("edited")')
+    app.save()
+    await app.settle()
+    assert.equal(app.requests('save').length, 0)
+    assert.equal(app.banner?.reason, 'metadata-too-complex')
+    assert.equal(app.banner.action, 'reload')
+
+    const banner = app.component('Banner')
+    const rendered = banner.type(banner.props)
+    const reload = findElement(rendered, (value) => value.props?.title === 'Reload')
+    const clearAll = findElement(rendered, (value) => value.props?.title === 'Clear all outputs')
+    assert.ok(reload, 'the banner provides the host reload action')
+    assert.equal(clearAll, null, 'clearing outputs cannot repair notebook or cell metadata')
+    const reloadCount = app.reloadCount
+    reload.props.onClick()
+    assert.equal(app.reloadCount, reloadCount + 1, 'the action delegates to the existing host reload flow')
+  })
+}
 
 test('rendered outputs, toolbar state and banners expose accessible semantics', async (t) => {
   const app = mountNotebook(t)

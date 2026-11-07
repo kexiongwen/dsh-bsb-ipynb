@@ -97,8 +97,9 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 
 ## 🛡️ Reliability
 
-- **Serialized saves** — concurrent saves of the same notebook run in order; only the first succeeds and the rest return `write-conflict` (409).
+- **Serialized saves** — within the process, concurrent saves to the same canonical notebook path run in order; only the first succeeds and the rest return `write-conflict` (409). Hard-link aliases of the same inode are treated as different paths and are not serialized with each other.
 - **Blocked saves** — a read-only notebook, or one held open by another program (common on Windows), returns `write-blocked` (409) with a fixable message instead of an internal error; autosave backs off up to 30 s and the response never embeds local paths or temp-file names.
+- **Capacity-blocked saves** — if client-side preflight blocks a notebook for exceeding 32 MiB, deleting cells or shortening source to bring it back under the limit does not resume autosave; click **Save** once manually. Existing recovery actions such as clearing outputs or reloading are unaffected.
 - **Safe writes** — write a temp file in the same directory, check the version again, then rename it into place; this narrows the external-write race window (extreme interleavings remain a known race). If a crash leaves a `.dsh-bsb-ipynb-*.tmp` behind, the next save sweeps stale ones older than an hour.
 - **No stalled streams** — restart/shutdown, kernel death or `os._exit()` always ends the NDJSON stream with a terminal failure event.
 - **Complete output** — after the kernel replies, the bridge waits for the matching IOPub idle; after 10 s it reports a failure and warns that output may be incomplete.
