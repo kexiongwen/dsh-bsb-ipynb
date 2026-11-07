@@ -16,8 +16,24 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: test (${{ matrix.os }})
+    # One matrix across the three supported platforms:
+    # - ubuntu-latest: case-sensitive ext4, tests skip the symlink/case
+    #   canonicalisation regressions because they need a case-insensitive FS.
+    # - windows-latest: NTFS is case-insensitive and the runner can create
+    #   symlinks, so all path-identity regressions run; bash (Git Bash) keeps
+    #   the same shell commands as the other platforms.
+    # - macos-latest: APFS is case-insensitive and symlinks are allowed, which
+    #   is the macOS baseline the original review was measured on.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,58 +61,17 @@ jobs:
           for file in index.js lib/*.js client.js; do node --check "$file"; done
           python -m py_compile python/bridge.py
 
-      # Real-kernel tests run because the Python dependencies are installed.
-      # Symlink-only regressions probe the filesystem capability and skip when
-      # it is unavailable (Linux normally skips them).
-      - name: Run tests
-        run: npm test
-
-      - name: Check package contents
-        run: npm pack --dry-run
-
-  test-windows:
-    # Advisory while the Windows test infrastructure is validated on the runner
-    # (symlink privileges, POSIX-assumption cleanups). Remove
-    # `continue-on-error` once a Windows run has been green for a while.
-    runs-on: windows-latest
-    timeout-minutes: 25
-    continue-on-error: true
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install kernel dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install jupyter_client ipykernel nbformat
-          # Both variables matter: test/python-helper.mjs reads
-          # DSH_IPYNB_TEST_PYTHON, while lib/env.js (the plugin side, which the
-          # route and real-kernel tests exercise) reads DSH_IPYNB_PYTHON.
-          echo "DSH_IPYNB_TEST_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-          echo "DSH_IPYNB_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-
-      - name: Static checks
-        run: |
-          for file in index.js lib/*.js client.js; do node --check "$file"; done
-          python -m py_compile python/bridge.py
-
+      # No DSH_IPYNB_PYTHON override here: discovery has to find the
+      # setup-python interpreter through the platform's own PATH layout. This
+      # guards against the Windows regression where discovery silently returned
+      # an empty list and the route/kernel tests skipped instead of failing.
       - name: Verify interpreter discovery is not silently empty
         run: |
           node --input-type=module -e "const { discoverInterpreters } = await import('./lib/env.js'); const result = await discoverInterpreters({ fresh: true }); if (!result.default) { console.error(JSON.stringify(result, null, 2)); process.exit(1) } console.log('default:', result.default, '| entries:', result.interpreters.length)"
 
+      # Real-kernel tests run because the Python dependencies are installed.
+      # Symlink-only regressions probe the filesystem capability and skip when
+      # it is unavailable; Windows/macOS runners provide it.
       - name: Run tests
         run: npm test
 

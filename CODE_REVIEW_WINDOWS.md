@@ -175,22 +175,15 @@
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
 | **P0** | **W-A1**（+ W-A2、W-A10 一起） | 平台化解释器发现。这是 Windows 用户唯一「开箱即不可用」的问题；修好后路由/内核测试在 Windows 上会由 skip/503 转绿。**✅ 已修复（见 §9）**。 |
-| **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 部分完成**（Windows CI 已加，advisory；防假 skip 断言已置于 CI 中）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
+| **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 已完成**（CI 改为 ubuntu/windows/macos 三平台 required 矩阵，含发现断言与防假 skip）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
 | **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-C8（测试 locale）、W-D2（文档） | 资源泄漏/失败终止/安全加固/测试可信度；部分与 Mac 修复同批完成。 |
 | **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。 |
 
-## 6. Windows CI 建议（摘要；完整 YAML 见 `docs/windows-review/04-tests-ci.md` §7）
+## 6. CI 建议与落地（三平台矩阵）
 
-1. 保留现有 `ubuntu-latest` job。
-2. **新增 `windows-latest` job**（`timeout-minutes: 20`，建议 `defaults.run.shell: bash` 以复用现有 glob 命令）：
-   - `setup-node@v4`（Node 22）+ `setup-python@v5`（3.12）；
-   - `python -m pip install jupyter_client ipykernel nbformat`；
-   - **同时导出** `DSH_IPYNB_TEST_PYTHON`（测试 helper）与 `DSH_IPYNB_PYTHON`（插件发现）——只设前者时插件侧 route/内核测试仍 skip/503；
-   - 静态检查逐文件循环（不要用 `node --check a b c`）、用 `python -m py_compile`；
-   - `npm test`；加一条断言：`discoverInterpreters().default` 非空（防 W-D1 假 skip 回归）；设 skip 预算（预期修复后 Windows ≈ 249 pass / 0 fail / 43 合理 skip：42 symlink + 1 POSIX 权限位）。
-3. **新增 `macos-latest` job**：唯一能跑满 `control-symlink.test.mjs` 35 个大小写/symlink 回归的免费 runner（对应 Mac 292/292 基线）。
-4. symlink 用例策略：先「能力探测后 `t.skip` 并给 reason」（`fs.symlink` 失败即跳过，不按平台/FS 猜测）；可选 best-effort 开 Windows 开发者模式，不作为绿色前提。
-5. 测试侧平台化清单（详见 `04-tests-ci.md` §5.8）：venv `Scripts\python.exe`、`routes.test.mjs:219` 改用临时目录、`chmod 0o000` 用例改 `process.platform==='win32'` skip 或 mock EACCES、client harness pin `navigator.language`。
+**已落地**（`.github/workflows/test.yml`）：单个 `test` job 使用 `matrix.os: [ubuntu-latest, windows-latest, macos-latest]`，全部为 **required**（无 `continue-on-error`），`defaults.run.shell: bash` 统一命令；每个平台都执行：setup Node 22 + Python 3.12、安装 jupyter 依赖、导出 `DSH_IPYNB_TEST_PYTHON`、逐文件 `node --check` + `python -m py_compile`、**解释器发现非空断言**（不设 `DSH_IPYNB_PYTHON`，真正验证各平台 PATH 布局）、`npm test`、`npm pack --dry-run`。平台差异由用例自身的能力探测处理：Linux 跳过 symlink/大小写回归；Windows（GitHub runner 有 symlink 权限）与 macOS 全量运行；2 个 POSIX 权限位用例在 Windows 跳过。
+
+原建议要点（保留供参考）：① Windows job 必须用 bash 或逐文件检查规避 `node --check` 假绿；② 导出 `DSH_IPYNB_PYTHON` 可防止发现回归被静默 skip——当前改用「发现断言」达到同一目的且能真实验证 PATH 发现；③ symlink 用例能力探测 skip，不按平台猜测；④ 测试平台化清单见 `04-tests-ci.md` §5.8。
 
 ## 7. 复现与验证索引
 
@@ -225,7 +218,7 @@
 | 文件 | 改动 |
 | --- | --- |
 | `lib/env.js` | PATH 候选按平台生成：Windows 追加 `python.exe` / PATHEXT 中 `.exe`/`.com` 形式，跳过 `WindowsApps` 应用执行别名，PATH 去重并去掉引号；conda 候选改为 `<env>\python.exe`、`<env>\Scripts\python.exe`（POSIX 保留 `bin/python3`）；DSH bundled Python 改为 `<dependencies>\python\python.exe`（POSIX 保留 `bin/python3`）；PATH label 修正为解释器所在目录名。 |
-| `.github/workflows/test.yml` | 新增 `windows-latest` 作业（`continue-on-error: true` 起步，advisory）：setup Node 22 + Python 3.12、安装 jupyter 依赖、**同时导出** `DSH_IPYNB_TEST_PYTHON` 与 `DSH_IPYNB_PYTHON`、逐文件 `node --check`、发现结果非空断言、`npm test`、`npm pack --dry-run`。同时修复既有 ubuntu 作业的 `node --check` 多文件假绿（改为逐文件循环）。 |
+| `.github/workflows/test.yml` | CI 重构为三平台矩阵：`test` job 使用 `matrix.os: [ubuntu-latest, windows-latest, macos-latest]`，required（无 `continue-on-error`），`shell: bash`；每平台 setup Node 22 + Python 3.12、安装 jupyter 依赖、逐文件 `node --check`、解释器发现非空断言、`npm test`、`npm pack --dry-run`。同时修复原 ubuntu 作业的 `node --check` 多文件假绿。 |
 | `test/python-helper.mjs` | 新增 `canCreateSymlinks()`：在临时目录真实创建一次 symlink 探测能力。 |
 | `test/control-symlink.test.mjs`、`test/gate.test.mjs` | 无法创建 symlink 时（Windows 未开开发者模式/非管理员，或其它受限环境）对需要 symlink 的用例 `skip` 并给出原因，而不是在 setup 中 EPERM 失败。gate 中仅 7 个 symlink 用例跳过，词法路径用例照常运行。 |
 | `test/client.test.mjs` | 在加载 client.js 前固定 `navigator.language='en-US'`，消除测试对宿主区域（如 zh-CN Windows）的依赖。 |
@@ -241,7 +234,7 @@
 
 **后续（本次未完成，建议按 §5 优先级推进）**
 
-- Windows CI 作业目前为 advisory（`continue-on-error: true`）：GitHub `windows-latest` 的 symlink 权限与 Windows 专属语义尚未在 runner 上实测，建议观察首次运行后再决定是否转 required；macOS 作业（唯一能跑满 42 个 symlink/大小写用例的 runner）仍未添加。
+- CI 已转为 ubuntu / windows / macos **三平台 required 矩阵**（Windows 首次运行 297 pass / 0 fail / 2 skip 后移除 `continue-on-error` 并补 macOS job）；三平台首次结果见后续 CI 运行记录。
 - §5 的 P2/P3 项仍未改动：W-A3（连接文件泄漏）、W-A4（用户子进程孤儿）、W-B1（M-6 TOCTOU）、W-A5/W-A6（M-3/M-5）等；其中 P1 的 W-B2/W-B3/W-C1 与 §3.3 的 W-C5 已在 §10 的第一批修复中完成。
 - README / README_ZH 的 Windows Quick Start 与 Known Limitations 尚未更新（`python3` 命令、`Cmd+R` 等）；本次只更新了错误码表与保存可靠性说明。
 
@@ -258,4 +251,4 @@
 
 **验证（Windows 实机）**：全量 `npm test` = **299 tests / 255 pass / 0 fail / 44 skip**（新增 7 个测试：`sanitizeUrl` Windows 路径、`makeImageResolver` Windows/POSIX/相对路径、IME + CapsLock Ctrl+S、autosave 退避纯函数、保存错误分类、Windows 只读保存的 notebook + route 集成用例）；`node --check` 全部通过；`git diff --check` 无空白错误。
 
-**未做（留待后续）**：§5 的 P2/P3（W-A3 连接文件泄漏、W-A4 子进程孤儿、W-A5/W-A6、W-B1 TOCTOU、W-PS-03 读取 EBUSY 映射等）、L-16 HTML 输出图片、W-D2 的 Windows Quick Start/Known Limitations、W-D3 `.gitattributes`；Windows CI 仍为 advisory。
+**未做（留待后续）**：§5 的 P2/P3（W-A3 连接文件泄漏、W-A4 子进程孤儿、W-A5/W-A6、W-B1 TOCTOU、W-PS-03 读取 EBUSY 映射等）、L-16 HTML 输出图片、W-D2 的 Windows Quick Start/Known Limitations、W-D3 `.gitattributes`；CI 已为三平台 required 矩阵（见 §6）。
