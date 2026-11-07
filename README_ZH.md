@@ -100,6 +100,8 @@ dsh-bsb-ipynb/
 - **输出完整性** — 内核回复后仍等待对应 IOPub idle；超过 10 秒则报失败并提示输出可能不完整。
 - **资源上限** — 客户端每单元格 32 MiB，服务端 NDJSON 待发队列 64 MiB、单行内核输出 64 MiB；超限会取消执行并中断内核。
 - **内核回收** — 空闲 30 分钟后回收（`DSH_IPYNB_KERNEL_IDLE_MS` 可调）；ready 超时 30 秒；关闭时等待 2 秒、发送 SIGTERM，再等 2 秒发送 SIGKILL。
+- **进程清理** — 内核连接文件在所有退出路径上都会被删除（路径由宿主指定，硬杀 bridge 后也不会残留）；Windows 上使用 kill-on-close job object，内核与 cell 内启动的子进程会一起被回收。
+- **重启自愈** — 内核重启失败时发送一次 `kernel_died` 并拆掉 bridge，不再忙等；重启在后台执行，慢重启期间 status/interrupt/shutdown 仍可响应。
 
 ## 🌐 HTTP API
 

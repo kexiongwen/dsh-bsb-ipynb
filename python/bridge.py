@@ -82,10 +82,91 @@ def log(level, message):
     emit({"type": "log", "level": level, "message": str(message)})
 
 
+# Windows: hold a kill-on-close Job Object for the bridge's lifetime. Any hard
+# termination of the bridge (TerminateProcess, host crash) then reaps the
+# ipykernel and every process the user's cells spawned, instead of leaving
+# orphans behind.
+_WINDOWS_JOB_HANDLE = None
+
+
+def adopt_windows_job():
+    """Put this process in a kill-on-close Job Object (Windows only)."""
+    global _WINDOWS_JOB_HANDLE
+    if os.name != "nt" or _WINDOWS_JOB_HANDLE is not None:
+        return
+    try:
+        import ctypes
+
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimit),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+        info = ExtendedLimit()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(info), ctypes.sizeof(info),
+        ):
+            kernel32.CloseHandle(job)
+            return
+        if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+            kernel32.CloseHandle(job)
+            return
+        _WINDOWS_JOB_HANDLE = job
+    except Exception as error:
+        log("warn", "could not adopt Windows job object: %s" % (error,))
+
+
 class Bridge:
-    def __init__(self, cwd=None, kernel_name=None):
+    def __init__(self, cwd=None, kernel_name=None, connection_file=None):
         self.cwd = cwd or None
         self.kernel_name = kernel_name or None
+        # Host-chosen connection file. Supplying it lets the host delete the
+        # file even when this bridge is killed with TerminateProcess.
+        self.connection_file = connection_file or None
         self.km = None          # KernelManager
         self.kc = None          # BlockingKernelClient
         self.pending = {}       # shell msg_id -> (cell_id, exec_id)
@@ -145,33 +226,31 @@ class Bridge:
 
         # Restart reuses this manager and its controlled spec. No kernelspec is
         # installed on disk, and an optional kernel name is only a label.
-        km = KernelManager(
-            kernel_name=self.kernel_name or "python3",
-            kernel_spec_manager=SelectedPythonSpecManager(),
-        )
+        manager_kwargs = {
+            "kernel_name": self.kernel_name or "python3",
+            "kernel_spec_manager": SelectedPythonSpecManager(),
+        }
+        if self.connection_file:
+            manager_kwargs["connection_file"] = self.connection_file
+        km = KernelManager(**manager_kwargs)
+        # Publish the references before anything starts so every failure path
+        # (and a SIGTERM during bootstrap) can deterministically clean up.
+        self.km = km
         try:
             # Redirect the kernel's own stdio away from the bridge's pipes so
             # kernel chatter can never pollute the JSON-lines protocol.
             km.start_kernel(cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as error:
-            emit({
-                "type": "log",
-                "level": "error",
-                "message": "kernel start failed: %s" % (error,),
-            })
-            raise
-        kc = km.client()
-        kc.start_channels()
-        try:
+            kc = km.client()
+            self.kc = kc
+            kc.start_channels()
             # Keep this below the host's 30s ready timeout: self-report a
             # kernel_died instead of being SIGTERM'd mid-bootstrap (which
             # would orphan the kernel process).
             kc.wait_for_ready(timeout=25)
         except Exception as error:
-            km.shutdown_kernel(now=True)
+            log("error", "kernel start failed: %s" % (error,))
+            self.shutdown_kernel()
             raise
-        self.km = km
-        self.kc = kc
         self.emit_ready()
         log("info", "kernel ready")
 
@@ -196,6 +275,21 @@ class Bridge:
                 self.km.shutdown_kernel(now=True)
         except Exception:
             pass
+        # Remove the connection file even when jupyter_client never recorded
+        # writing it (failed startup, killed kernel), then release the refs so a
+        # failed restart cannot leave the IOPub pump on a dead client.
+        if self.connection_file:
+            try:
+                os.remove(self.connection_file)
+            except OSError:
+                pass
+        try:
+            if self.km is not None:
+                self.km.cleanup_connection_file()
+        except Exception:
+            pass
+        self.kc = None
+        self.km = None
 
     def terminate(self, _signum=None, _frame=None):
         """Clean up the kernel deterministically, then leave without unwinding.
@@ -417,6 +511,7 @@ class Bridge:
 
     def iopub_loop(self):
         """Pump kernel iopub messages and forward them as events."""
+        failures = 0
         while not self.stop.is_set():
             kc = self.kc
             if kc is None:
@@ -442,11 +537,26 @@ class Bridge:
                 os._exit(0)
             try:
                 msg = kc.get_iopub_msg(timeout=0.25)
+                failures = 0
             except queue.Empty:
+                failures = 0
                 continue
-            except Exception:
+            except Exception as error:
                 if self.stop.is_set():
                     break
+                # A dead client must not turn into a busy loop: back off
+                # between attempts and eventually report a bounded failure.
+                failures += 1
+                if failures == 1 or failures % 10 == 0:
+                    log("warn", "iopub read failed (%d): %s" % (failures, error))
+                if failures >= 10:
+                    emit({"type": "kernel_died", "message": "kernel iopub channel failed repeatedly"})
+                    with self.pending_lock:
+                        self.stop.set()
+                        self.clear_pending_locked()
+                    self.shutdown_kernel()
+                    os._exit(0)
+                time.sleep(min(0.02 * failures, 0.2))
                 continue
             try:
                 self.handle_iopub(msg)
@@ -614,9 +724,25 @@ class Bridge:
                     self.restart_inflight = None
             holder["done"].set()
 
+    def restart_failed(self, message):
+        """Tear down deterministically after a restart that cannot complete.
+
+        Leaving the old (stopped) client in ``self.kc`` while a fresh kernel is
+        alive makes the IOPub pump fail on every iteration; clearing the refs
+        and shutting the kernel down gives the host one deterministic
+        ``kernel_died`` instead of a busy loop and a silent 30s ready timeout.
+        """
+        was_stopping = self.stop.is_set()
+        self.shutdown_kernel()
+        if not was_stopping:
+            emit({"type": "kernel_died", "message": message})
+
     def restart_once(self, op_id=None):
         # Same batch semantics: a restart cancels cells queued behind the
         # running one (they would otherwise execute after the fresh kernel).
+        if self.stop.is_set() or self.km is None or self.kc is None:
+            log("warn", "no kernel to restart")
+            return False
         self.drain_queue("restarted")
         with self.pending_lock:
             self.restarting = True
@@ -630,7 +756,9 @@ class Bridge:
                 self.km.restart_kernel(now=True)
             except Exception as error:
                 log("error", "restart failed: %s" % (error,))
+                self.restart_failed("kernel restart failed: %s" % (error,))
                 return False
+            kc = None
             try:
                 # jupyter_client channel threads cannot be restarted on the same
                 # client ("threads can only be started once"), so create a fresh
@@ -639,20 +767,74 @@ class Bridge:
                 kc = self.km.client()
                 kc.start_channels()
                 kc.wait_for_ready(timeout=25)
-                with self.pending_lock:
-                    self.kc = kc
-                self.interrupt_requested_at = None
-                self.emit_ready(op_id)
-                log("info", "kernel restarted")
-                return True
             except Exception as error:
                 log("error", "restart channels failed: %s" % (error,))
+                try:
+                    if kc is not None:
+                        kc.stop_channels()
+                except Exception:
+                    pass
+                self.restart_failed("kernel restart failed: %s" % (error,))
                 return False
+            if self.stop.is_set():
+                # A shutdown raced the restart: never publish a client after
+                # the deterministic cleanup already ran.
+                try:
+                    kc.stop_channels()
+                except Exception:
+                    pass
+                return False
+            with self.pending_lock:
+                self.kc = kc
+            self.interrupt_requested_at = None
+            self.emit_ready(op_id)
+            log("info", "kernel restarted")
+            return True
         finally:
             with self.pending_lock:
                 self.restarting = False
 
     # ------------------------------------------------------------- main
+
+    def restart_in_background(self, op_id=None):
+        """Run one restart away from the command-loop thread (may block ~25 s)."""
+        try:
+            self.restart(op_id)
+        except Exception as error:
+            log("error", "background restart failed: %s" % (error,))
+
+    def handle_command(self, command):
+        """Handle one parsed command; return False when the bridge should exit."""
+        op = command.get("op")
+        try:
+            if op == "status":
+                alive = self.km is not None and self.kc is not None and self.kc.is_alive()
+                emit({"type": "status_reply", "alive": bool(alive)})
+            elif op == "execute":
+                self.execute(
+                    command.get("cell_id") or "",
+                    command.get("exec_id"),
+                    command.get("code") or "",
+                )
+            elif op == "interrupt":
+                self.interrupt()
+            elif op == "restart":
+                # A restart can block for up to wait_for_ready(25); running it
+                # inside this loop would stop status/interrupt/shutdown from
+                # being read during that window.
+                threading.Thread(
+                    target=self.restart_in_background,
+                    args=(command.get("id"),),
+                    daemon=True,
+                ).start()
+            elif op == "shutdown":
+                self.shutdown_kernel()
+                return False
+            else:
+                log("warn", "unknown op: %r" % (op,))
+        except Exception as error:
+            log("error", "op %s failed: %s" % (op, error))
+        return True
 
     def command_loop(self):
         for raw in sys.stdin:
@@ -667,30 +849,11 @@ class Bridge:
             if not isinstance(command, dict):
                 log("error", "invalid command: expected JSON object")
                 continue
-            op = command.get("op")
-            try:
-                if op == "status":
-                    alive = self.km is not None and self.kc is not None and self.kc.is_alive()
-                    emit({"type": "status_reply", "alive": bool(alive)})
-                elif op == "execute":
-                    self.execute(
-                        command.get("cell_id") or "",
-                        command.get("exec_id"),
-                        command.get("code") or "",
-                    )
-                elif op == "interrupt":
-                    self.interrupt()
-                elif op == "restart":
-                    self.restart(command.get("id"))
-                elif op == "shutdown":
-                    self.shutdown_kernel()
-                    return
-                else:
-                    log("warn", "unknown op: %r" % (op,))
-            except Exception as error:
-                log("error", "op %s failed: %s" % (op, error))
+            if not self.handle_command(command):
+                return
 
     def run(self):
+        adopt_windows_job()
         self.install_signal_handlers()
         cwd = (
             self.cwd
@@ -724,8 +887,16 @@ def main():
         "--kernel-name", default=None,
         help="kernel label (always launches this Python interpreter)",
     )
+    parser.add_argument(
+        "--connection-file", default=None,
+        help="connection file path chosen by the host so it survives a hard kill",
+    )
     args = parser.parse_args()
-    bridge = Bridge(cwd=args.cwd, kernel_name=args.kernel_name)
+    bridge = Bridge(
+        cwd=args.cwd,
+        kernel_name=args.kernel_name,
+        connection_file=args.connection_file,
+    )
     code = bridge.run()
     sys.exit(code)
 

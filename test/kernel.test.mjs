@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { KernelManager, exceedsMaxLineBytes } from '../lib/kernel.js'
@@ -100,6 +101,24 @@ test('shutdown and os._exit settle the running cell', { skip }, async (t) => {
     assert.equal(exited.ok, false)
     assert.ok(events.some((event) => event.type === 'kernel_died'))
     await waitFor(() => manager.status(secondTarget).running === false)
+  } finally {
+    await manager.disposeAll()
+  }
+})
+
+test('a hard-killed bridge leaves no connection file behind', { skip }, async (t) => {
+  const manager = new KernelManager({}, bridgePath)
+  const target = await makeTarget(t, 'connection-file.ipynb')
+  try {
+    const entry = await manager.getOrStart(target, python)
+    const connectionFile = entry.connectionFile
+    assert.ok(connectionFile, 'the host chooses the connection file path')
+    assert.equal(existsSync(connectionFile), true)
+    // TerminateProcess on Windows (SIGTERM elsewhere) prevents the bridge from
+    // cleaning up; the host exit handler must remove the file.
+    entry.proc.kill('SIGTERM')
+    await waitFor(() => manager.status(target).running === false)
+    await waitFor(() => !existsSync(connectionFile), 3000)
   } finally {
     await manager.disposeAll()
   }

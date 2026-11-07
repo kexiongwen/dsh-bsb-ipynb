@@ -100,6 +100,8 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 - **Complete output** — after the kernel replies, the bridge waits for the matching IOPub idle; after 10 s it reports a failure and warns that output may be incomplete.
 - **Resource limits** — 32 MiB of client-side output per cell, a 64 MiB server-side NDJSON queue and a 64 MiB cap per kernel output line; exceeding a limit cancels the run and interrupts the kernel.
 - **Kernel cleanup** — idle kernels are swept after 30 minutes (`DSH_IPYNB_KERNEL_IDLE_MS`); ready timeout is 30 s; shutdown waits 2 s, sends SIGTERM, then SIGKILL 2 s later.
+- **Process cleanup** — the kernel connection file is removed on every exit path (the host owns its path, so a hard-killed bridge leaves nothing behind); on Windows a kill-on-close job object reaps the kernel and any subprocess a cell spawned.
+- **Restart resilience** — a failed kernel restart reports `kernel_died` and tears the bridge down instead of busy-looping; restarts run off the control loop, so status/interrupt/shutdown stay responsive during a slow restart.
 
 ## 🌐 HTTP API
 

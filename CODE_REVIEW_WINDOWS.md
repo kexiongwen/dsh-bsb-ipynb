@@ -176,7 +176,7 @@
 | --- | --- | --- |
 | **P0** | **W-A1**（+ W-A2、W-A10 一起） | 平台化解释器发现。这是 Windows 用户唯一「开箱即不可用」的问题；修好后路由/内核测试在 Windows 上会由 skip/503 转绿。**✅ 已修复（见 §9）**。 |
 | **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 已完成**（CI 改为 ubuntu/windows/macos 三平台 required 矩阵，含发现断言与防假 skip）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
-| **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-C8（测试 locale）、W-D2（文档） | 资源泄漏/失败终止/安全加固/测试可信度；部分与 Mac 修复同批完成。 |
+| **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-D2（文档） | 资源泄漏/失败终止/安全加固/文档。**W-A3/W-A4/W-A5/W-A6 已完成（见 §11）**；W-B1（fd/dirfd 级加固）、W-B4、W-D2 未做。 |
 | **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。 |
 
 ## 6. CI 建议与落地（三平台矩阵）
@@ -251,4 +251,17 @@
 
 **验证（Windows 实机）**：全量 `npm test` = **299 tests / 255 pass / 0 fail / 44 skip**（新增 7 个测试：`sanitizeUrl` Windows 路径、`makeImageResolver` Windows/POSIX/相对路径、IME + CapsLock Ctrl+S、autosave 退避纯函数、保存错误分类、Windows 只读保存的 notebook + route 集成用例）；`node --check` 全部通过；`git diff --check` 无空白错误。
 
-**未做（留待后续）**：§5 的 P2/P3（W-A3 连接文件泄漏、W-A4 子进程孤儿、W-A5/W-A6、W-B1 TOCTOU、W-PS-03 读取 EBUSY 映射等）、L-16 HTML 输出图片、W-D2 的 Windows Quick Start/Known Limitations、W-D3 `.gitattributes`；CI 已为三平台 required 矩阵（见 §6）。
+**未做（留待后续）**：§5 的 W-B1（M-6 TOCTOU 加固，需要 fd/dirfd 级设计）、W-B4（读取 EBUSY 映射）、W-B8 等 Low/Nit、L-16 HTML 输出图片、W-D2 的 Windows Quick Start/Known Limitations、W-D3 `.gitattributes`；W-A3/W-A4/W-A5/W-A6 已在 §11 完成；CI 已为三平台 required 矩阵（见 §6）。
+
+## 11. 第二批修复（2026-11-07，后续）
+
+按 §5 的 P2 完成可靠性批次（W-A3、W-A4、M-3、M-5）：
+
+| 项 | 状态 | 改动 |
+| --- | --- | --- |
+| **W-A3** 连接文件泄漏 | ✅ 已修复 | `lib/kernel.js` 为每个 bridge 生成宿主侧连接文件路径并以 `--connection-file` 传入；`python/bridge.py` 用该路径构造 `KernelManager`，在正常 shutdown / 启动失败 / restart 失败路径显式清理；bridge 在 exit（含 Windows TerminateProcess、启动失败）时由宿主兜底 `unlink`。 |
+| **W-A4** 用户 cell 子进程孤儿 | ✅ 已修复（Windows） | `python/bridge.py` 启动时创建 **kill-on-close Job Object** 并把自身加入（ctypes，`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）；bridge 正常退出或被硬杀时，整个进程树（ipykernel + cell 内 `subprocess.Popen` 起的进程）被回收。非 Windows 为 no-op；赋值失败只告警，不影响启动。 |
+| **M-3** 重启失败无自愈/忙等 | ✅ 已修复 | 重启任一步失败（`restart_kernel`、新 client `start_channels`/`wait_for_ready`）统一走 `restart_failed()`：停新 client、关闭 manager、清 `kc`/`pending`、发一次不带 exec_id 的 `kernel_died`；`iopub_loop` 连续读失败加退避（20ms→200ms 封顶），连续 10 次失败则发 `kernel_died` 退出，不再出现 ~2 万次/秒忙等。 |
+| **M-5** restart 阻塞控制面 | ✅ 已修复 | `command_loop` 拆出可测试的 `handle_command()`；`restart` 改由后台线程执行，慢重启期间 status/interrupt/shutdown 仍可读取；shutdown 与 restart 竞态时不会发布新 client。 |
+
+**验证（Windows 实机）**：新增 3 个 node 测试（bridge 连接文件生命周期、Windows job object 在正常 shutdown 与硬杀下回收 cell 子进程、宿主硬杀后连接文件清理）+ 4 个 Python fixture 测试（失败重启拆桥、后台 restart 不阻塞、重启期间 status/shutdown 响应、IOPub 连续失败退避）；Python fixture **25/25 OK**；全量 `npm test` = **302 tests / 258 pass / 0 fail / 44 skip / 44.5s**；真实内核在 Windows 上通过全部 bridge/kernel 用例（含 restart 与硬杀）。README/README_ZH 的 Reliability 章节已补充「进程清理」与「重启自愈」。

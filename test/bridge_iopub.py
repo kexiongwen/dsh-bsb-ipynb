@@ -333,14 +333,21 @@ class IOPubTests(unittest.TestCase):
     def test_shutdown_releases_an_execution_already_waiting_for_idle(self):
         self.assert_idle_wait_is_released(self.bridge.shutdown_kernel)
 
-    def test_failed_restart_cannot_turn_its_idle_wakeup_into_success(self):
+    def test_failed_restart_tears_down_the_bridge_instead_of_busy_looping(self):
         def fail_restart(now):
             raise RuntimeError("controlled restart failure")
 
+        shutdowns = []
         self.bridge.km.restart_kernel = fail_restart
+        self.bridge.km.shutdown_kernel = lambda now: shutdowns.append(now)
         self.assert_idle_wait_is_released(self.bridge.restart)
         self.assertFalse(self.bridge.restarting)
-        self.assertIs(self.bridge.kc, self.client, "failed restart deliberately retains the old client identity")
+        self.assertIsNone(self.bridge.kc, "a failed restart must release the dead client")
+        self.assertIsNone(self.bridge.km, "a failed restart must shut the kernel down")
+        self.assertEqual(shutdowns, [True])
+        died = [event for event in self.events if event["type"] == "kernel_died"]
+        self.assertEqual(len(died), 1, "the host must get one deterministic kernel_died")
+        self.assertIn("restart failed", died[0]["message"])
 
     def test_idle_timeout_reports_incomplete_output_and_does_not_poison_the_next_run(self):
         run = self.start_run()
@@ -613,6 +620,89 @@ class IOPubTests(unittest.TestCase):
             self.assert_superseded_run_finishes(mark_restarting)
         finally:
             self.bridge.restarting = False
+
+    def test_restart_command_runs_off_the_command_loop(self):
+        entered = threading.Event()
+        release = threading.Event()
+        done = threading.Event()
+        self.releases.append(release)
+        calls = []
+
+        def restart(op_id=None):
+            calls.append(op_id)
+            entered.set()
+            release.wait(3)
+            done.set()
+            return True
+
+        self.bridge.restart = restart
+        started = time.monotonic()
+        self.assertTrue(self.bridge.handle_command({"op": "restart", "id": 42}))
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.5, "a slow restart must not block the command loop")
+        self.wait(entered)
+        release.set()
+        self.wait(done)
+        self.assertEqual(calls, [42])
+
+    def test_status_and_shutdown_stay_responsive_during_a_restart(self):
+        entered = threading.Event()
+        release = threading.Event()
+        self.releases.append(release)
+
+        def restart(op_id=None):
+            entered.set()
+            release.wait(3)
+            return True
+
+        shutdown_calls = []
+        self.bridge.restart = restart
+        self.bridge.shutdown_kernel = lambda: shutdown_calls.append(True)
+        self.assertTrue(self.bridge.handle_command({"op": "restart", "id": 1}))
+        self.wait(entered)
+        started = time.monotonic()
+        self.assertTrue(self.bridge.handle_command({"op": "status"}))
+        self.assertFalse(self.bridge.handle_command({"op": "shutdown"}), "shutdown must end the command loop")
+        self.assertLess(time.monotonic() - started, 0.5,
+                        "status/shutdown must stay responsive while a restart is in flight")
+        self.assertEqual(shutdown_calls, [True])
+        status = [event for event in self.events if event["type"] == "status_reply"]
+        self.assertTrue(status, "status must be answered during a restart")
+        self.assertIn("alive", status[-1])
+        release.set()
+
+    def test_iopub_loop_backs_off_instead_of_spinning_on_a_failing_client(self):
+        attempts = []
+        exits = []
+
+        class FailingClient(ControlledClient):
+            def is_alive(self):
+                return True
+
+            def get_iopub_msg(self, timeout=1):
+                attempts.append(time.monotonic())
+                raise RuntimeError("controlled channel failure")
+
+        client = FailingClient()
+        self.bridge.kc = client
+        self.bridge.km = ControlledManager(client)
+        original_exit = bridge_module.os._exit
+        bridge_module.os._exit = lambda status: exits.append(status)
+        pump = self.start_thread(self.bridge.iopub_loop)
+        try:
+            deadline = time.monotonic() + 5
+            while not exits and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(exits, "a permanently failing IOPub channel must end the bridge")
+            self.join(pump)
+            self.assertGreater(len(attempts), 0)
+            self.assertLess(len(attempts), 30, "the IOPub pump must back off, not busy loop")
+            died = [event for event in self.events if event["type"] == "kernel_died"]
+            self.assertEqual(len(died), 1)
+            self.assertIn("iopub", died[0]["message"])
+        finally:
+            bridge_module.os._exit = original_exit
+            self.bridge.stop.set()
 
     def test_terminate_signal_runs_the_deterministic_kernel_shutdown(self):
         calls = []

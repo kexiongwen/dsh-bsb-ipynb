@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { execFile, spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { findPython, tempDir } from './python-helper.mjs'
@@ -23,8 +25,10 @@ async function runFixture(executable, ...args) {
   }
 }
 
-function startBridge(cwd) {
-  const proc = spawn(python, ['-u', bridge, '--cwd', cwd], {
+function startBridge(cwd, connectionFile) {
+  const args = ['-u', bridge, '--cwd', cwd]
+  if (connectionFile) args.push('--connection-file', connectionFile)
+  const proc = spawn(python, args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
@@ -90,6 +94,34 @@ async function shutdown(proc) {
       resolve()
     })
   })
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code !== 'ESRCH'
+  }
+}
+
+async function waitForExit(proc, timeoutMs = 5_000) {
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
+
+async function waitForDead(pid, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return false
 }
 
 test('bridge executes code, preserves variables and reports errors', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
@@ -319,4 +351,67 @@ test('a real kernel drops 1000 background messages from a completed cell without
   assert.equal(value.retained, 0)
   assert.equal(value.forwarded, 0)
   assert.equal(value.currentOutput, 'CURRENT RESULT\n')
+})
+
+test('bridge removes the host-chosen connection file on shutdown', {
+  skip: !python && 'Requires jupyter_client/ipykernel',
+}, async (t) => {
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-connection-')
+  const connectionFile = path.join(cwd, 'kernel-connection.json')
+  const context = startBridge(cwd, connectionFile)
+  try {
+    await context.waitFor((event) => event.type === 'ready')
+    assert.equal(existsSync(connectionFile), true, 'the kernel writes the host-chosen connection file')
+    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
+    await waitForExit(context.proc)
+    assert.equal(existsSync(connectionFile), false, 'graceful shutdown removes the connection file')
+  } finally {
+    await shutdown(context.proc)
+  }
+})
+
+test('Windows job object reaps user subprocesses on shutdown and hard kill', {
+  skip: (process.platform !== 'win32' && 'Windows-only: the kill-on-close job object is a Windows primitive') ||
+    (!python && 'Requires jupyter_client/ipykernel'),
+}, async (t) => {
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-job-')
+  const spawnUserChild = async (context) => {
+    context.proc.stdin.write(JSON.stringify({
+      op: 'execute',
+      cell_id: 'spawn-child',
+      code: [
+        'import subprocess, sys',
+        'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])',
+        'print("CHILD_PID", child.pid, flush=True)',
+      ].join('\n'),
+    }) + '\n')
+    const stream = await context.waitFor(
+      (event) => event.type === 'stream' && typeof event.text === 'string' && event.text.includes('CHILD_PID'),
+    )
+    return Number(/CHILD_PID (\d+)/.exec(stream.text)[1])
+  }
+  const reap = async (hardKill) => {
+    const context = startBridge(cwd)
+    let child = null
+    try {
+      await context.waitFor((event) => event.type === 'ready')
+      child = await spawnUserChild(context)
+      assert.equal(isAlive(child), true, 'the cell subprocess runs before shutdown')
+      if (hardKill) context.proc.kill('SIGTERM')
+      else context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
+      await waitForExit(context.proc)
+      assert.equal(
+        await waitForDead(child),
+        true,
+        hardKill ? 'a hard kill must reap user subprocesses' : 'shutdown must reap user subprocesses',
+      )
+    } finally {
+      if (child && isAlive(child)) {
+        try { process.kill(child, 'SIGKILL') } catch { /* already gone */ }
+      }
+      await shutdown(context.proc)
+    }
+  }
+  await reap(false)
+  await reap(true)
 })
