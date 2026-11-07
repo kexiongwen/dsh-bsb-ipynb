@@ -621,6 +621,23 @@ class IOPubTests(unittest.TestCase):
         finally:
             self.bridge.restarting = False
 
+    def test_restarting_flag_is_cleared_before_ready_is_emitted(self):
+        observed = []
+        original_emit = bridge_module.emit
+
+        def capture(event):
+            if event.get("type") == "ready":
+                observed.append(self.bridge.restarting)
+            original_emit(event)
+
+        bridge_module.emit = capture
+        try:
+            self.assertTrue(self.bridge.restart(3))
+        finally:
+            bridge_module.emit = original_emit
+        self.assertEqual(observed, [False],
+                         "the host may submit its next execution as soon as ready arrives")
+
     def test_restart_command_runs_off_the_command_loop(self):
         entered = threading.Event()
         release = threading.Event()

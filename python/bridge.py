@@ -786,6 +786,10 @@ class Bridge:
                 return False
             with self.pending_lock:
                 self.kc = kc
+                # Clear the flag before announcing readiness: the host submits
+                # the next execution as soon as it sees 'ready', and run_one()
+                # rejects submissions while a restart is marked in flight.
+                self.restarting = False
             self.interrupt_requested_at = None
             self.emit_ready(op_id)
             log("info", "kernel restarted")
