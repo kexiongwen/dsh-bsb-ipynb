@@ -11,6 +11,7 @@
 - 执行：每个 notebook 一个持久 Python 内核（按文件路径共享），变量跨 cell 保留；Run all、中断、重启、关闭。
 - 保存：写回 nbformat 4.5，保存前做基础字段规范化（例如移除 `display_data.execution_count`、过滤非法 MIME 数据和附件结构、修正非法执行计数），未进行完整 schema 校验；用 sha256 版本号做乐观并发控制，初始校验及 rename 前二次校验发现的外部修改返回 409 冲突而不覆盖（二次校验到原子 rename 之间仍属已知竞态），磁盘文件超过 32 MiB 返回 413；保存前按落盘格式预检整本大小，超限时提示清空输出而不是上传后被拒；编辑后 1.5 秒自动保存。
 - 解释器：自动发现 `DSH_IPYNB_PYTHON`、conda 环境、PATH 上的 `python3`/`python`、DSH 内置 Python；只有带 `jupyter_client` + `ipykernel` 的环境会被选中。
+- 主题与语言：界面颜色取自当前 DSH 主题的 `--dsw-alias-*` token（随明/暗与自定义皮肤切换）；界面文案注册为 `dsh-bsb-ipynb` 语言命名空间（中/英双语），跟随 DSH 的 Host-backed 语言偏好并即时切换，没有 locale 服务的组合回退到浏览器语言。
 - 安全：所有文件访问都限制在会话工作区内（realpath + `path.relative` 检查）；HTTP 路由复用 DSH 的 admission fence（`ctx.connection.requestRejection`）；内核输出 HTML 经 DOMParser 白名单清洗后才渲染，不执行 `<script>`。
 
 ## 前置条件

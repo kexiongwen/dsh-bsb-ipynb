@@ -72,14 +72,39 @@ function findElement(tree, predicate) {
 // State updates (including functional updaters) are queued until render. Effects
 // run after each commit, honor dependencies, and clean up on replacement and
 // unmount. Timers remain controllable so autosave cannot race the assertions.
-function mountNotebook(t) {
+function mountNotebook(t, options = {}) {
   const slots = []
   const timers = new Map()
   const requests = []
   let cursor = 0, nextTimer = 0, needsRender = true, mounted = true
-  let pendingEffects = [], pendingState = [], tree, moduleOptions, hostReloads = 0
+  let pendingEffects = [], pendingState = [], tree, moduleOptions, moduleExports, hostReloads = 0
+  // Optional Host locale face: when requested, apply() binds the plugin's
+  // namespace dictionaries and the viewer subscribes through
+  // useSyncExternalStore, so a locale switch re-renders the same mounted tree.
+  const localeState = { active: 'en', revision: 1 }
+  const localeListeners = new Set()
+  const localeFace = options.locale
+    ? {
+        register() {
+          return () => {}
+        },
+        bind() {
+          return (key) => moduleExports.__test.STRINGS[localeState.active][key] ?? moduleExports.__test.STRINGS.en[key] ?? key
+        },
+        subscribe(listener) {
+          localeListeners.add(listener)
+          return () => localeListeners.delete(listener)
+        },
+        getSnapshot() {
+          return { active: localeState.active, revision: localeState.revision, locales: [] }
+        },
+      }
+    : undefined
   let props = {
-    ctx: { betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route } },
+    ctx: {
+      betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route },
+      ...(localeFace ? { get: (name) => (name === 'locale' ? localeFace : undefined) } : {}),
+    },
     scope: { sessionId: 'session-1' }, path: '/workspace/demo.ipynb', visible: false,
     customData: notebookData(), onReload() { hostReloads += 1 },
   }
@@ -122,6 +147,23 @@ function mountNotebook(t) {
         slots[index].cleanup = effect()
       })
     },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      const index = cursor++
+      const previous = slots[index]
+      if (previous && previous.subscribe === subscribe) {
+        previous.getSnapshot = getSnapshot
+      } else {
+        previous?.unsubscribe?.()
+        slots[index] = {
+          subscribe,
+          getSnapshot,
+          unsubscribe: subscribe(() => {
+            needsRender = true
+          }),
+        }
+      }
+      return slots[index].getSnapshot()
+    },
   }
   const fetch = (url, init = {}) => {
     const route = new URL(url).pathname.split('/').pop()
@@ -146,7 +188,15 @@ function mountNotebook(t) {
     clearInterval(id) { timers.delete(id) },
   })
   vm.runInContext(clientSource, context, { filename: 'client.js' })
-  const { NotebookView } = moduleOptions.factory(() => react).__test
+  moduleExports = moduleOptions.factory(() => react)
+  const { NotebookView } = moduleExports.__test
+  if (localeFace) {
+    moduleExports.apply({
+      effect: (effect) => effect(),
+      inject: (names, callback) => callback({ locale: localeFace, effect: (effect) => effect() }),
+      betterSidebar: { registerFileViewer: () => () => {}, hostRouteUrl: (route) => 'http://host/' + route },
+    })
+  }
   function flush() {
     let commits = 0
     while (needsRender) {
@@ -213,10 +263,22 @@ function mountNotebook(t) {
       const toolbar = component('Toolbar')
       return findElement(toolbar.type(toolbar.props), (value) => value.props?.title === 'Save').props
     },
+    setLocale(active) {
+      localeState.active = active
+      localeState.revision += 1
+      for (const listener of [...localeListeners]) listener()
+      flush()
+    },
+    get localeListenerCount() {
+      return localeListeners.size
+    },
   }
   t.after(() => {
     mounted = false
-    for (const slot of slots) slot?.cleanup?.()
+    for (const slot of slots) {
+      slot?.cleanup?.()
+      slot?.unsubscribe?.()
+    }
     timers.clear()
     // Release the unmounted fixture's component and transport state before
     // another real-cap case allocates its large output payloads.
@@ -840,4 +902,23 @@ test('a malformed attachment reference degrades instead of crashing the render',
     value.props.dangerouslySetInnerHTML.__html.includes('dsh-bsb-ipynb-missing-image')
   ))
   assert.ok(markdown, 'the malformed attachment renders as a missing image instead of throwing')
+})
+
+test('the mounted viewer follows Host locale switches without a reload', async (t) => {
+  const app = mountNotebook(t, { locale: true })
+  await app.settle()
+  assert.ok(app.localeListenerCount > 0, 'the viewer subscribes to the Host locale face')
+  const saveTitle = () => {
+    const toolbar = app.component('Toolbar')
+    const button = findElement(
+      toolbar.type(toolbar.props),
+      (value) => value.props?.title === 'Save' || value.props?.title === '保存',
+    )
+    return button && button.props.title
+  }
+  assert.equal(saveTitle(), 'Save')
+  app.setLocale('zh')
+  assert.equal(saveTitle(), '保存')
+  app.setLocale('en')
+  assert.equal(saveTitle(), 'Save')
 })

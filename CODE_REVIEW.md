@@ -284,7 +284,7 @@
 
 **已随修复处理**（`09f5819`/`3896bf9`）：health 版本改为与 package.json 精确比对、e2e python 断言改为等值、interrupt/shutdown 测试改名并覆盖真实语义；`kernel_died` 后状态、`attachment:%ZZ` 容错、raw cell 渲染路径已有测试；版本号收敛到 `package.json` 单源（`client.js` 的重复常量已删除）；locale 死 key 已删除且新增 en/zh key parity 测试；README 补齐 `/read` 字段、`DSH_IPYNB_KERNEL_IDLE_MS`、64MiB 请求体上限、测试跳过条件（含 macOS-only 与硬编码默认解释器）、`client.js` 定位（已统一为手写单文件 bundle）、外部修改 CAS 边界；`package.json` 增加 `engines.node>=20`；NOTICE 附上游 MIT 许可全文。
 
-**仍存在**：`kernel_died` 后工具栏状态的端到端浏览器验证、markdown 含 `&`/`_` 的渲染测试（对应 M-9）、客户端上限→保存 413 的 HTTP 端到端、viewer 卸载 abort 测试；客户端语言仍只跟随 `navigator.language`（未接 DSH locale service）；`better-sidebar` 最低版本仍无法在仓库内机器校验。
+**仍存在**：`kernel_died` 后工具栏状态的端到端浏览器验证、markdown 含 `&`/`_` 的渲染测试（对应 M-9）、客户端上限→保存 413 的 HTTP 端到端、viewer 卸载 abort 测试；`better-sidebar` 最低版本仍无法在仓库内机器校验。客户端语言与主题已跟随新版契约（`dsh-bsb-ipynb` locale 命名空间 + `--dsw-alias-*` token；浏览器语言只作无 locale 服务时的回退），待浏览器实测确认。
 
 ### 4.3 文档一致性核对结论（摘要）
 

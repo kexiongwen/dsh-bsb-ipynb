@@ -38,6 +38,7 @@ async function loadClient(reactOverrides = {}) {
     useMemo() {},
     useRef() {},
     useCallback() {},
+    useSyncExternalStore() {},
     ...reactOverrides,
   }
   await import(pathToFileURL(clientPath).href + '?test=' + Date.now() + '-' + (++loadCount))
@@ -79,6 +80,142 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
   assert.equal(styles.length, 1)
   assert.equal(styles[0].id, 'dsh-bsb-ipynb-styles')
   assert.match(styles[0].textContent, /\.dsh-bsb-ipynb-root/)
+  for (const token of ['--dsw-alias-border-l1', '--dsw-alias-label-secondary', '--dsw-alias-brand-primary', '--dsw-alias-bg-layer-1']) {
+    assert.ok(styles[0].textContent.includes(token), `styles must consume current theme token ${token}`)
+  }
+  assert.doesNotMatch(
+    styles[0].textContent,
+    /--dsw-(border-default|text-muted|accent-default|surface-default)/,
+    'legacy --dsw-* tokens are outside the current theme contract',
+  )
+})
+
+test('registers the en/zh dictionaries and follows the host locale preference', async () => {
+  const { exports } = await loadClient()
+  const { STRINGS, LOCALE_NS, translate } = exports.__test
+  const registrations = []
+  const cleanups = []
+  let active = 'en'
+  const locale = {
+    register(ns, language, dict) {
+      registrations.push({ ns, language, dict })
+      return () => {}
+    },
+    bind(ns) {
+      assert.equal(ns, LOCALE_NS)
+      return (key) => STRINGS[active][key] ?? STRINGS.en[key] ?? key
+    },
+    subscribe() {
+      return () => {}
+    },
+    getSnapshot() {
+      return { active, revision: 1, locales: [] }
+    },
+  }
+  const ctx = {
+    inject(names, callback) {
+      assert.deepEqual(names, ['locale'])
+      callback({
+        locale,
+        effect(effect) {
+          const cleanup = effect()
+          if (cleanup) cleanups.push(cleanup)
+          return cleanup
+        },
+      })
+    },
+    effect(effect) {
+      return effect()
+    },
+    betterSidebar: {
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer: () => () => {},
+    },
+  }
+  exports.apply(ctx)
+  assert.equal(registrations.length, 2)
+  assert.equal(registrations[0].ns, LOCALE_NS)
+  assert.deepEqual(registrations.map((entry) => entry.language).sort(), ['en', 'zh'])
+  assert.deepEqual(Object.keys(registrations[0].dict).sort(), Object.keys(STRINGS.en).sort())
+  assert.equal(translate('run'), 'Run', 'host preference starts in English')
+  active = 'zh'
+  assert.equal(translate('run'), '运行', 'translate follows the active host locale')
+  for (const cleanup of cleanups) cleanup()
+  assert.equal(translate('run'), 'Run', 'disposal restores the browser-language fallback')
+})
+
+test('NotebookView subscribes to the locale registry for live language switches', async () => {
+  const captured = {}
+  const { exports } = await loadClient({
+    useState(initial) {
+      return [initial, () => {}]
+    },
+    useRef(value) {
+      return { current: value }
+    },
+    useMemo(factory) {
+      return factory()
+    },
+    useCallback(callback) {
+      return callback
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      captured.subscribe = subscribe
+      captured.getSnapshot = getSnapshot
+      return getSnapshot()
+    },
+  })
+  const listeners = new Set()
+  let revision = 1
+  const locale = {
+    register() {
+      return () => {}
+    },
+    bind() {
+      return (key) => key
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    getSnapshot() {
+      return { active: 'en', revision, locales: [] }
+    },
+  }
+  const ctx = {
+    get(name) {
+      return name === 'locale' ? locale : undefined
+    },
+    inject(names, callback) {
+      callback({ locale, effect: (effect) => effect() })
+    },
+    effect(effect) {
+      return effect()
+    },
+    betterSidebar: {
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer: () => () => {},
+    },
+  }
+  exports.apply(ctx)
+  exports.__test.NotebookView({
+    ctx,
+    store: {},
+    scope: { sessionId: 'session-1' },
+    path: '/workspace/demo.ipynb',
+    title: 'demo.ipynb',
+    viewerId: 'dsh-bsb-ipynb:notebook',
+    customData: { status: 'loading' },
+  })
+  assert.equal(typeof captured.subscribe, 'function')
+  assert.equal(typeof captured.getSnapshot, 'function')
+  assert.equal(captured.getSnapshot(), 1)
+  const unsubscribe = captured.subscribe(() => {})
+  assert.equal(listeners.size, 1, 'the viewer subscribes to the host locale face')
+  unsubscribe()
+  assert.equal(listeners.size, 0)
+  revision = 2
+  assert.equal(captured.getSnapshot(), 2, 'revision changes reach useSyncExternalStore')
 })
 
 test('load posts the session and path to the host route', async () => {

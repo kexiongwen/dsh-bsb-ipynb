@@ -3,7 +3,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useCallback, useEffect, useMemo, useRef, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } = React
 
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
@@ -113,9 +113,13 @@ window.__ModuleLoader__.load({
       },
     }
 
-    const locale = (typeof navigator !== 'undefined' && navigator.language) || 'en'
-    const dict = /^zh/i.test(locale) ? STRINGS.zh : STRINGS.en
-    const t = (key) => dict[key] ?? STRINGS.en[key] ?? key
+    const LOCALE_NS = 'dsh-bsb-ipynb'
+    const browserLocale = (typeof navigator !== 'undefined' && navigator.language) || 'en'
+    const browserDict = /^zh/i.test(browserLocale) ? STRINGS.zh : STRINGS.en
+    const browserT = (key) => browserDict[key] ?? STRINGS.en[key] ?? key
+    // Host-backed translate once the optional DSH locale service is bound (see
+    // bindHostLocale); the browser language is only the standalone fallback.
+    let t = browserT
 
     const ESCAPE = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
 
@@ -1318,6 +1322,20 @@ window.__ModuleLoader__.load({
 
     function NotebookView(props) {
       const { ctx, scope, path, customData, onToolbarState, onReload, visible } = props
+      // Re-render when the host locale preference (or a late dictionary
+      // registration) changes, so the bound translate yields the new strings.
+      // The locale service is optional: without it the browser fallback stands
+      // and the subscription is a no-op.
+      const localeFace = localeFaceOf(ctx)
+      const subscribeLocale = useCallback(
+        (notify) => (localeFace ? localeFace.subscribe(notify) : () => {}),
+        [localeFace],
+      )
+      const readLocaleRevision = useCallback(
+        () => (localeFace ? localeFace.getSnapshot().revision : 0),
+        [localeFace],
+      )
+      useSyncExternalStore(subscribeLocale, readLocaleRevision, readLocaleRevision)
       const initial = customData && typeof customData === 'object' ? customData : { status: 'loading' }
       const [loadStatus, setLoadStatus] = useState(initial.status || 'loading')
       const [loadError, setLoadError] = useState(initial.error || null)
@@ -2075,12 +2093,12 @@ window.__ModuleLoader__.load({
 
     const STYLES = `
 .dsh-bsb-ipynb-root {
-  --dsh-bsb-ipynb-border: var(--dsw-border-default, rgba(127, 127, 127, 0.28));
+  --dsh-bsb-ipynb-border: var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.28));
   --dsh-bsb-ipynb-soft: rgba(127, 127, 127, 0.09);
   --dsh-bsb-ipynb-soft-strong: rgba(127, 127, 127, 0.16);
-  --dsh-bsb-ipynb-muted: var(--dsw-text-muted, rgba(127, 127, 127, 0.95));
-  --dsh-bsb-ipynb-accent: var(--dsw-accent-default, #4c8dff);
-  --dsh-bsb-ipynb-surface: var(--dsw-surface-default, Canvas);
+  --dsh-bsb-ipynb-muted: var(--dsw-alias-label-secondary, rgba(127, 127, 127, 0.95));
+  --dsh-bsb-ipynb-accent: var(--dsw-alias-brand-primary, #4c8dff);
+  --dsh-bsb-ipynb-surface: var(--dsw-alias-bg-layer-1, Canvas);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -2297,7 +2315,39 @@ window.__ModuleLoader__.load({
 }
 `
 
+    /** The optional DSH locale face; a composition without it keeps the browser fallback. */
+    function localeFaceOf(ctx) {
+      if (!ctx) return undefined
+      if (typeof ctx.get === 'function') return ctx.get('locale')
+      return ctx.locale
+    }
+
+    // Follow the Host-backed language preference when the runtime provides the
+    // optional `locale` service: register this plugin's dictionaries under its
+    // own namespace and swap the module-level translate to the bound one. The
+    // child fiber re-runs if the service restarts, and the browser language
+    // stays the fallback when the service is absent (standalone compositions,
+    // tests) or not yet active.
+    function bindHostLocale(ctx) {
+      if (typeof ctx.inject !== 'function') return
+      ctx.inject(['locale'], (localeCtx) => {
+        localeCtx.effect(() => {
+          const hostLocale = localeCtx.locale
+          const offEn = hostLocale.register(LOCALE_NS, 'en', STRINGS.en)
+          const offZh = hostLocale.register(LOCALE_NS, 'zh', STRINGS.zh)
+          const previous = t
+          t = hostLocale.bind(LOCALE_NS)
+          return () => {
+            t = previous
+            offEn()
+            offZh()
+          }
+        })
+      })
+    }
+
     function apply(ctx) {
+      bindHostLocale(ctx)
       ctx.effect(() => {
         if (typeof document === 'undefined') return undefined
         const existing = document.getElementById(STYLE_ID)
@@ -2326,6 +2376,8 @@ window.__ModuleLoader__.load({
 
     const __test = {
       STRINGS,
+      LOCALE_NS,
+      translate: (key) => t(key),
       escapeHtml,
       mimeText,
       imageSource,
