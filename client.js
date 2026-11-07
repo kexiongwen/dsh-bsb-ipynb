@@ -61,6 +61,12 @@ window.__ModuleLoader__.load({
         restartConfirm: 'Restart the kernel to switch interpreter?',
         shortcuts: 'Ctrl/Cmd+Enter run, Shift+Enter run and advance, Alt+Enter add cell below, Ctrl/Cmd+S save',
         emptyFile: 'Empty file — a new notebook will be created on save.',
+        outputImage: 'Notebook output image',
+        viewerTitle: 'Jupyter Notebook',
+        invalidResponse: 'Invalid server response',
+        streamUnsupported: 'Streaming is not supported by this browser.',
+        capacityNoOutputs: 'Notebook is {size} MiB; the save limit is 32 MiB. There are no outputs to clear — remove cells or shorten the content.',
+        cellType: 'Cell type',
       },
       zh: {
         runAll: '全部运行',
@@ -110,6 +116,12 @@ window.__ModuleLoader__.load({
         restartConfirm: '切换解释器需要重启内核，是否继续？',
         shortcuts: 'Ctrl/Cmd+Enter 运行，Shift+Enter 运行并跳到下一个，Alt+Enter 在下方插入，Ctrl/Cmd+S 保存',
         emptyFile: '空文件 — 保存时将创建新的 notebook。',
+        outputImage: 'notebook 输出图片',
+        viewerTitle: 'Jupyter 笔记本',
+        invalidResponse: '服务器响应无效',
+        streamUnsupported: '当前浏览器不支持流式执行。',
+        capacityNoOutputs: 'notebook 约 {size} MiB，超过 32 MiB 上限；当前没有可清空的输出，请删除单元格或精简内容。',
+        cellType: '单元格类型',
       },
     }
 
@@ -139,6 +151,10 @@ window.__ModuleLoader__.load({
         return options && options.image && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/i.test(url) ? url : null
       }
       if (/^(https?:|mailto:|tel:)/i.test(url)) return url
+      // Protocol-relative URLs inherit the page scheme. Keep them for ordinary
+      // links, but refuse them for image sources: opening an untrusted notebook
+      // must not fire cross-origin image requests to an arbitrary host.
+      if (url.startsWith('//')) return options && options.image ? null : url
       if (url.startsWith('#') || url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) return url
       if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) return url
       return null
@@ -200,9 +216,15 @@ window.__ModuleLoader__.load({
 
     function sanitizeHtml(html) {
       if (typeof DOMParser === 'undefined') return escapeHtml(html)
-      const document = new DOMParser().parseFromString(String(html ?? ''), 'text/html')
-      cleanNode(document.body)
-      return document.body.innerHTML
+      try {
+        const document = new DOMParser().parseFromString(String(html ?? ''), 'text/html')
+        cleanNode(document.body)
+        return document.body.innerHTML
+      } catch {
+        // Pathological markup (deeply nested or very wide tag soup) must never
+        // abort rendering: show it as escaped text instead of throwing.
+        return escapeHtml(html)
+      }
     }
 
     function isTableStart(lines, index) {
@@ -611,7 +633,7 @@ window.__ModuleLoader__.load({
         await readResponse(response)
         return
       }
-      if (!response.body) throw new Error('Streaming is not supported by this browser.')
+      if (!response.body) throw new Error(t('streamUnsupported'))
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
@@ -782,6 +804,13 @@ window.__ModuleLoader__.load({
         ancestors.add(value)
         stack.push({ value, depth: frame.depth, exit: true })
         const children = Array.isArray(value) ? value : Object.values(value)
+        // Every child counts as at least one more node; reject an over-wide
+        // object before materializing one stack frame per child.
+        if (children.length > METADATA_NODE_LIMIT - nodes) {
+          const error = new Error(`${label} exceeds the maximum node count of ${METADATA_NODE_LIMIT}`)
+          error.code = 'metadata-too-complex'
+          throw error
+        }
         for (let index = children.length - 1; index >= 0; index -= 1) {
           stack.push({ value: children[index], depth: frame.depth + 1, exit: false })
         }
@@ -830,6 +859,10 @@ window.__ModuleLoader__.load({
         bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
       } catch (error) {
         if (error && error.code === 'metadata-too-complex') return { ok: false, reason: 'metadata-too-complex', bytes: 0 }
+        // A notebook whose pretty-printed form exceeds the engine's maximum
+        // string length cannot be uploaded at all; report it as a capacity
+        // failure instead of letting the RangeError escape as a rejected save.
+        if (error instanceof RangeError) return { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES }
         throw error
       }
       return { ok: bytes <= limit, bytes }
@@ -837,6 +870,10 @@ window.__ModuleLoader__.load({
 
     function capacityText(bytes) {
       return t('capacityTooLarge').replace('{size}', (bytes / 1048576).toFixed(1))
+    }
+
+    function capacityNoOutputsText(bytes) {
+      return t('capacityNoOutputs').replace('{size}', (bytes / 1048576).toFixed(1))
     }
 
     function cellTypeLabel(type) {
@@ -1054,14 +1091,15 @@ window.__ModuleLoader__.load({
       if (output.output_type === 'stream') {
         return h('pre', {
           className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-stream dsh-bsb-ipynb-stream-' + (output.name || 'stdout'),
-          dangerouslySetInnerHTML: { __html: ansiToHtml(output.text || '') },
+          tabIndex: 0,
+          dangerouslySetInnerHTML: { __html: ansiToHtml(mimeText(output.text)) },
         })
       }
       if (output.output_type === 'error') {
         const text = Array.isArray(output.traceback) && output.traceback.length
           ? output.traceback.join('\n')
           : String(output.ename || 'Error') + ': ' + String(output.evalue || '')
-        return h('pre', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-error', dangerouslySetInnerHTML: { __html: ansiToHtml(text) } })
+        return h('pre', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-error', tabIndex: 0, dangerouslySetInnerHTML: { __html: ansiToHtml(text) } })
       }
       const data = output.data || {}
       const html = data['text/html'] != null ? mimeText(data['text/html']) : null
@@ -1073,12 +1111,12 @@ window.__ModuleLoader__.load({
       }
       if (data['image/svg+xml'] != null) {
         const src = imageSource(data['image/svg+xml'], 'image/svg+xml')
-        if (src) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src, alt: 'output' })
+        if (src) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src, alt: t('outputImage') })
       }
       const png = data['image/png'] != null ? imageSource(data['image/png'], 'image/png') : null
-      if (png) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src: png, alt: 'output' })
+      if (png) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src: png, alt: t('outputImage') })
       const jpeg = data['image/jpeg'] != null ? imageSource(data['image/jpeg'], 'image/jpeg') : null
-      if (jpeg) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src: jpeg, alt: 'output' })
+      if (jpeg) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src: jpeg, alt: t('outputImage') })
       if (data['text/markdown'] != null) {
         return h('div', {
           className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-markdown',
@@ -1091,15 +1129,15 @@ window.__ModuleLoader__.load({
         const value = typeof data['application/json'] === 'string'
           ? data['application/json']
           : JSON.stringify(data['application/json'], null, 2)
-        return h('pre', { className: 'dsh-bsb-ipynb-output' }, value)
+        return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, value)
       }
       if (data['text/latex'] != null) {
-        return h('pre', { className: 'dsh-bsb-ipynb-output' }, mimeText(data['text/latex']))
+        return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, mimeText(data['text/latex']))
       }
       if (data['text/plain'] != null) {
-        return h('pre', { className: 'dsh-bsb-ipynb-output' }, mimeText(data['text/plain']))
+        return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, mimeText(data['text/plain']))
       }
-      return h('pre', { className: 'dsh-bsb-ipynb-output' }, JSON.stringify(data, null, 2))
+      return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, JSON.stringify(data, null, 2))
     }
 
     function IconButton(props) {
@@ -1189,6 +1227,7 @@ window.__ModuleLoader__.load({
                 className: 'dsh-bsb-ipynb-cell-type',
                 value: cell.cell_type,
                 title: t('codeCell') + ' / ' + t('markdownCell'),
+                'aria-label': t('cellType'),
                 onChange: (event) => onType(cell.id, event.target.value),
               },
               h('option', { value: 'code' }, t('codeCell')),
@@ -1251,7 +1290,7 @@ window.__ModuleLoader__.load({
                   },
                 }, source),
         code && Array.isArray(cell.outputs) && cell.outputs.length
-          ? h('div', { className: 'dsh-bsb-ipynb-outputs' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output, resolveImage })))
+          ? h('div', { className: 'dsh-bsb-ipynb-outputs', role: 'log', 'aria-live': 'polite' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output, resolveImage })))
           : null,
       )
     }
@@ -1271,12 +1310,13 @@ window.__ModuleLoader__.load({
               (kernel.running ? (kernel.busy ? ' is-busy' : ' is-ready') : ''),
             title: t('kernel') + ': ' + state,
           }),
-          h('span', { className: 'dsh-bsb-ipynb-kernel-label' }, state),
+          h('span', { className: 'dsh-bsb-ipynb-kernel-label', 'aria-live': 'polite' }, state),
           h(
             'select',
             {
               className: 'dsh-bsb-ipynb-python-select',
               title: t('python'),
+              'aria-label': t('python'),
               value: python || '',
               disabled: running,
               onChange: (event) => onPython(event.target.value),
@@ -1308,9 +1348,13 @@ window.__ModuleLoader__.load({
 
     function Banner({ banner, onReload, onClearOutputs }) {
       if (!banner) return null
+      const kind = banner.kind || 'info'
       return h(
         'div',
-        { className: 'dsh-bsb-ipynb-banner dsh-bsb-ipynb-banner-' + (banner.kind || 'info') },
+        {
+          className: 'dsh-bsb-ipynb-banner dsh-bsb-ipynb-banner-' + kind,
+          role: kind === 'error' ? 'alert' : 'status',
+        },
         h('span', { className: 'dsh-bsb-ipynb-banner-text' }, banner.text),
         banner.action === 'reload'
           ? h(IconButton, { title: t('reload'), onClick: onReload }, t('reload'))
@@ -1413,7 +1457,7 @@ window.__ModuleLoader__.load({
         setCapacityBlocked(false)
         if (!data || typeof data !== 'object') {
           setLoadStatus('error')
-          setLoadMessage('Invalid server response')
+          setLoadMessage(t('invalidResponse'))
           notebookRef.current = null
           setNotebook(null)
           return
@@ -1507,7 +1551,16 @@ window.__ModuleLoader__.load({
           if (capacity.reason === 'metadata-too-complex') {
             setBanner({ kind: 'error', reason: capacity.reason, text: t('metadataTooComplex') })
           } else {
-            setBanner({ kind: 'error', reason: 'capacity', text: capacityText(capacity.bytes), action: 'clear-outputs' })
+            // Only offer the clear-outputs action when it can actually help:
+            // a notebook sized by source/attachments has no outputs to clear.
+            const hasOutputs = snapshot.cells.some((cell) => (
+              cell.cell_type === 'code' && Array.isArray(cell.outputs) && cell.outputs.length > 0
+            ))
+            if (hasOutputs) {
+              setBanner({ kind: 'error', reason: 'capacity', text: capacityText(capacity.bytes), action: 'clear-outputs' })
+            } else {
+              setBanner({ kind: 'error', reason: 'capacity', text: capacityNoOutputsText(capacity.bytes) })
+            }
           }
           return
         }
@@ -2364,7 +2417,7 @@ window.__ModuleLoader__.load({
       ctx.effect(() =>
         ctx.betterSidebar.registerFileViewer({
           id: 'dsh-bsb-ipynb:notebook',
-          title: 'Jupyter Notebook',
+          title: () => t('viewerTitle'),
           exts: ['ipynb'],
           priority: 10,
           fetchStrategy: 'custom',
@@ -2400,6 +2453,7 @@ window.__ModuleLoader__.load({
       METADATA_NODE_LIMIT,
       notebookCapacity,
       capacityText,
+      capacityNoOutputsText,
       shouldScheduleAutosave,
       resolveRestartPython,
       executeReplyFailed,
@@ -2416,6 +2470,7 @@ window.__ModuleLoader__.load({
       apply,
       NotebookView,
       CellView,
+      OutputView,
     }
 
     return { inject: ['betterSidebar'], apply, __test }

@@ -75,6 +75,8 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
   assert.deepEqual(viewer.exts, ['ipynb'])
   assert.equal(viewer.priority, 10)
   assert.equal(viewer.fetchStrategy, 'custom')
+  assert.equal(typeof viewer.title, 'function', 'the viewer title follows the active language')
+  assert.equal(viewer.title(), 'Jupyter Notebook')
   assert.equal(typeof viewer.load, 'function')
   assert.equal(typeof viewer.component, 'function')
   assert.equal(styles.length, 1)
@@ -320,6 +322,16 @@ test('markdown refuses javascript links and keeps relative images', async () => 
   assert.equal(sanitizeUrl('data:text/html;base64,aaaa', { image: true }), null)
 })
 
+test('protocol-relative images are refused while links keep working', async () => {
+  const { exports } = await loadClient()
+  const { sanitizeUrl, renderMarkdown } = exports.__test
+  assert.equal(sanitizeUrl('//evil.example/pixel.png', { image: true }), null)
+  assert.equal(sanitizeUrl('//example.com/page'), '//example.com/page')
+  const html = renderMarkdown('![pixel](//evil.example/pixel.png)')
+  assert.doesNotMatch(html, /<img/)
+  assert.match(html, /pixel/)
+})
+
 test('markdown image resolver rewrites local images and resolves attachments', async () => {
   const { exports } = await loadClient()
   const { renderMarkdownWithImages } = exports.__test
@@ -342,6 +354,29 @@ test('html sanitizer falls back to escaping when DOMParser is unavailable', asyn
   assert.match(html, /&lt;b&gt;/)
 })
 
+test('html sanitizer degrades to escaped text when DOM cleaning throws', async () => {
+  const { exports } = await loadClient()
+  const { sanitizeHtml } = exports.__test
+  const original = globalThis.DOMParser
+  try {
+    globalThis.DOMParser = class {
+      parseFromString() {
+        return {
+          body: {
+            get childNodes() {
+              throw new RangeError('Maximum call stack size exceeded')
+            },
+          },
+        }
+      }
+    }
+    assert.equal(sanitizeHtml('<b>x</b>'), '&lt;b&gt;x&lt;/b&gt;')
+  } finally {
+    if (original === undefined) delete globalThis.DOMParser
+    else globalThis.DOMParser = original
+  }
+})
+
 test('ansi output keeps colors and strips other control sequences', async () => {
   const { exports } = await loadClient()
   const { ansiToHtml } = exports.__test
@@ -349,6 +384,30 @@ test('ansi output keeps colors and strips other control sequences', async () => 
   assert.match(html, /<span style="color:#cd3131">red<\/span>/)
   assert.match(html, / plain/)
   assert.doesNotMatch(html, /\u001b/)
+})
+
+test('stream output joins array text without comma separators', async () => {
+  const { exports } = await loadClient()
+  const { OutputView } = exports.__test
+  const tree = OutputView({
+    output: { output_type: 'stream', name: 'stdout', text: ['alpha\n', 'beta\n'] },
+    resolveImage: () => null,
+  })
+  assert.equal(tree.type, 'pre')
+  const html = tree.props.dangerouslySetInnerHTML.__html
+  assert.match(html, /alpha\nbeta/)
+  assert.doesNotMatch(html, /alpha,beta|,beta/)
+})
+
+test('image outputs carry localized alt text', async () => {
+  const { exports } = await loadClient()
+  const { OutputView } = exports.__test
+  const tree = OutputView({
+    output: { output_type: 'display_data', data: { 'image/png': 'AAAA' }, metadata: {} },
+    resolveImage: () => null,
+  })
+  assert.equal(tree.type, 'img')
+  assert.equal(tree.props.alt, 'Notebook output image')
 })
 
 test('python highlighting marks keywords, strings and comments', async () => {
@@ -554,6 +613,20 @@ test('metadata cycles keep the original TypeError serialization behavior', async
     assert.throws(() => serializeNotebook(notebook), TypeError)
     assert.throws(() => notebookCapacity(notebook), TypeError)
   }
+})
+
+test('save preflight reports serialization overflow as a capacity failure', async () => {
+  const { exports } = await loadClient()
+  const { notebookCapacity, NOTEBOOK_CAP_BYTES } = exports.__test
+  const notebook = notebookWithMetadata({})
+  notebook.cells[0].outputs[0].data = {
+    'application/json': {
+      toJSON() {
+        throw new RangeError('Invalid string length')
+      },
+    },
+  }
+  assert.deepEqual(notebookCapacity(notebook), { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES })
 })
 
 test('metadata capacity failure shows its own message without a clear-outputs action', async () => {

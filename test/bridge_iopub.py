@@ -264,6 +264,14 @@ class IOPubTests(unittest.TestCase):
         self.bridge.handle_iopub(message(self.client.parent, text="AFTER RESTART"))
         self.assertEqual(len(self.events), before)
 
+    def test_pending_lock_allows_reentrant_signal_cleanup(self):
+        # SIGTERM/SIGINT handlers run on the main thread, which may already
+        # hold pending_lock inside restart/shutdown. A plain Lock would
+        # deadlock there instead of running the deterministic cleanup.
+        with self.bridge.pending_lock:
+            self.assertTrue(self.bridge.pending_lock.acquire(blocking=False))
+            self.bridge.pending_lock.release()
+
     def test_shutdown_clears_routing_and_releases_waiters(self):
         run = self.start_run()
         self.wait(self.client.shell_entered)

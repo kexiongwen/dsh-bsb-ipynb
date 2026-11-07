@@ -555,6 +555,50 @@ test('status, interrupt, restart and shutdown work after the notebook is deleted
   }
 })
 
+test('restart refuses a path that never existed when no kernel is running', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  const kernels = makeKernels()
+  kernels.peek = () => null
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    kernels,
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/restart',
+      body: { sessionId: 's1', path: 'never-created.ipynb' },
+    }),
+  )
+  assert.equal(state.status, 404)
+  assert.equal(json.error.code, 'not-found')
+  assert.equal(kernels.calls.length, 0, 'no kernel may be started for a path that never existed')
+})
+
+test('restart still starts a kernel for an existing notebook', async (t) => {
+  const discovered = await discoverInterpreters()
+  if (!discovered.default) {
+    t.skip('no Python interpreter with jupyter_client/ipykernel')
+    return
+  }
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  kernels.peek = () => null
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    kernels,
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/restart',
+      body: { sessionId: 's1', path: 'demo.ipynb' },
+    }),
+  )
+  assert.equal(state.status, 200, JSON.stringify(json))
+  assert.ok(
+    kernels.calls.some((call) => call.python),
+    'restart must start the kernel for an existing notebook',
+  )
+})
+
 test('save rejects a notebook that grew past the cap on disk', async (t) => {
   const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')

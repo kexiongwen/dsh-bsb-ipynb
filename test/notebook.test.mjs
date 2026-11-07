@@ -282,6 +282,32 @@ test('saveNotebookFile maps malformed notebooks to bad-request', async (t) => {
   assert.equal(await readFile(file, 'utf8'), original)
 })
 
+test('saveNotebookFile maps serialization overflow to a too-large API error', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const read = await readNotebookFile(file)
+  const notebook = emptyNotebook()
+  notebook.cells[0].outputs = [{
+    output_type: 'display_data',
+    data: {
+      'application/json': {
+        toJSON() {
+          throw new RangeError('Invalid string length')
+        },
+      },
+    },
+    metadata: {},
+  }]
+  await assert.rejects(saveNotebookFile(file, notebook, read.version), (error) => {
+    assert.equal(error.code, 'too-large')
+    assert.equal(error.status, 413)
+    return true
+  })
+  assert.equal(await readFile(file, 'utf8'), original)
+})
+
 test('saveNotebookFile leaves unexpected serialization errors as internal failures', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')

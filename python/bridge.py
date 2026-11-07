@@ -92,7 +92,10 @@ class Bridge:
         self.idle_events = {}   # shell msg_id -> threading.Event (iopub idle seen)
         # Sending an execute request and registering its ID share this lock
         # with IOPub lookup, so even the earliest output needs no extra cache.
-        self.pending_lock = threading.Lock()
+        # Reentrant on purpose: the SIGTERM/SIGINT handler runs on the main
+        # thread, which may already hold this lock inside restart/shutdown, and
+        # its deterministic cleanup must not deadlock against itself.
+        self.pending_lock = threading.RLock()
         self.exec_queue = queue.Queue()   # (cell_id, exec_id, code)
         self.stop = threading.Event()
         self.executor = None
