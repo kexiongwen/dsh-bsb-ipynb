@@ -177,7 +177,7 @@
 | **P0** | **W-A1**（+ W-A2、W-A10 一起） | 平台化解释器发现。这是 Windows 用户唯一「开箱即不可用」的问题；修好后路由/内核测试在 Windows 上会由 skip/503 转绿。**✅ 已修复（见 §9）**。 |
 | **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 已完成**（CI 改为 ubuntu/windows/macos 三平台 required 矩阵，含发现断言与防假 skip）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
 | **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-D2（文档） | 资源泄漏/失败终止/安全加固/文档。**已完成的项**：W-A3/W-A4/W-A5/W-A6（§11）、W-D2（§12）、W-B4（§13）；**W-B1**（fd/dirfd 级加固）尚未做。 |
-| **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。**已完成（§12）**：W-A7/W-A9/W-A10、W-C4、W-D3/W-D4/W-D5、N-01/N-04/N-05；其余待清理。 |
+| **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。**已完成**：§12 的 W-A7/W-A9/W-A10、W-C4、W-D3/W-D4/W-D5、N-01/N-04/N-05；§14 的 L-2/L-6/L-8/L-11/W-C7；其余待清理。 |
 
 ## 6. CI 建议与落地（三平台矩阵）
 
@@ -297,4 +297,16 @@
 
 **验证**：全量 `npm test` = **314 tests / 270 pass / 0 fail / 44 skip**（新增 8 个测试，另有 2 个断言并入既有用例）；三平台 CI：ubuntu 283 pass、windows 312 pass、macOS 311 pass，均 0 fail；`node --check`、`py_compile`、`git diff --check` 通过。
 
-**仍未做（后续批次）**：W-B1（M-6 TOCTOU）、W-B5/W-B6/W-B7（硬链接/junction 边界）、W-C2/W-C3/W-C5/W-C6/W-C7（客户端 polish）、L-16（HTML 输出图片）、L-21/快捷键、L-15（banner i18n）、M-1/M-2 等 macOS 审查遗留设计项。
+**仍未做（后续批次）**：W-B1（M-6 TOCTOU）、W-B5/W-B6/W-B7（硬链接/junction 边界）、W-C3/W-C6（客户端 polish）、L-16（HTML 输出图片）、L-21/快捷键、L-15（banner i18n）、M-1/M-2 等 macOS 审查遗留设计项；L-2/L-6/L-8/L-11/W-C7 已在 §14 完成。
+
+## 14. 第五批修复（2026-11-07，低风险收尾）
+
+| 项 | 状态 | 改动 |
+| --- | --- | --- |
+| **L-2** | ✅ 已修复 | `lib/gate.js` 的 `resolveNotebookTarget` 在「resolveTarget 与 walkTarget 之间发生文件变化」时最多重试 3 次，控制/执行端点不再因瞬时改名/删除直接 404；用 fs mock 的时序测试覆盖（首次观察到瞬时 symlink，重试后成功）。 |
+| **L-8** | ✅ 已修复 | `readNotebookFile` 改为 `open` + `fstat` + 有界分块读取（最多 `CAP+1` 字节），stat 之后文件增长不会再被整体缓冲；`read-blocked`/`not-found` 错误映射保留。 |
+| **L-6** | ✅ 已修复 | 成功保存后按目录（每 5 分钟一次）清理超过 1 小时的 `.dsh-bsb-ipynb-*.tmp`；新增测试验证陈旧 tmp 被删除、较新的 tmp 保留。 |
+| **L-11** | ✅ 已修复 | `/ipynb/save` 的请求体上限收紧为 `32 MiB + 4 MiB` 余量（36 MiB），其余 POST 路由仍为 64 MiB；README/README_ZH 限制表同步。 |
+| **W-C7 / L-17** | ✅ 已修复 | `ansiToHtml` 先剥离 OSC（窗口标题、OSC 8 超链接）并按行只保留最后一个 `\r` 段：进度条不再变成多行垃圾、OSC 载荷不再显示为文本；新增进度条/OSC 标题/超链接/颜色测试。 |
+
+**验证**：全量 `npm test` = **317 tests / 273 pass / 0 fail / 44 skip / 44.5s**（新增 3 个测试：瞬时文件变化重试、陈旧 tmp 清理、ANSI `\r`/OSC）；`node --check`、`py_compile`、`git diff --check` 通过。

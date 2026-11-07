@@ -1362,3 +1362,23 @@ test('client and server notebook limits stay in parity', async () => {
   assert.equal(client.METADATA_DEPTH_LIMIT, METADATA_DEPTH_LIMIT)
   assert.equal(client.METADATA_NODE_LIMIT, METADATA_NODE_LIMIT)
 })
+
+test('ansi output handles carriage returns and strips OSC sequences', async () => {
+  const { exports } = await loadClient()
+  const { ansiToHtml } = exports.__test
+  const progress = ansiToHtml('10%\r50%\r100%')
+  assert.doesNotMatch(progress, /\r/)
+  assert.match(progress, /100%$/)
+  assert.doesNotMatch(progress, /10%/, 'only the last carriage-return segment survives')
+
+  const title = ansiToHtml('\u001b]0;my title\u0007hello')
+  assert.doesNotMatch(title, /my title/)
+  assert.match(title, /hello/)
+
+  const hyperlink = ansiToHtml('\u001b]8;;https://example.com\u0007click\u001b]8;;\u0007')
+  assert.match(hyperlink, /click/)
+  assert.doesNotMatch(hyperlink, /example\.com/)
+
+  const colored = ansiToHtml('\u001b[31mred\u001b[0m')
+  assert.match(colored, /color:#cd3131/)
+})

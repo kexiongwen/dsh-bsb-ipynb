@@ -142,7 +142,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Item | Value |
 | --- | --- |
 | Notebook file size cap | 32 MiB (files above this are rejected with 413) |
-| POST request body cap | 64 MiB (all POST routes) |
+| POST request body cap | 64 MiB (36 MiB on `/ipynb/save`) |
 | Client output budget per cell | 32 MiB (UTF-8 bytes of the complete JSON) |
 | Pending NDJSON queue / single kernel output line | 64 MiB / 64 MiB |
 | Metadata nesting / node limit | 100 levels / 10,000 nodes |
@@ -157,7 +157,7 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 314 tests at the time of writing
+npm test          # 317 tests at the time of writing
 ```
 
 Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe.

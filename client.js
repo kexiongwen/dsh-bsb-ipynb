@@ -492,7 +492,17 @@ window.__ModuleLoader__.load({
     }
 
     function ansiToHtml(input) {
+      // Progress bars rewrite a line with '\r' and terminal windows/hyperlinks
+      // use OSC sequences; browsers would otherwise render both as literal
+      // text. Keep the final carriage-return segment of each line.
       const source = String(input ?? '')
+        .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+        .split('\n')
+        .map((line) => {
+          const carriage = line.lastIndexOf('\r')
+          return carriage === -1 ? line : line.slice(carriage + 1)
+        })
+        .join('\n')
       const state = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, reverse: false }
       let open = false
       let html = ''

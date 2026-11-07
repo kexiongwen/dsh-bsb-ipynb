@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
-import { chmod, readFile, writeFile, readdir, stat, truncate } from 'node:fs/promises'
+import { chmod, readFile, writeFile, readdir, stat, truncate, utimes } from 'node:fs/promises'
 import path from 'node:path'
 import {
   METADATA_DEPTH_LIMIT,
@@ -766,4 +766,21 @@ test('read reports over-limit metadata as invalid instead of returning a noteboo
   const result = await readNotebookFile(file)
   assert.equal(result.status, 'invalid')
   assert.match(result.error, /depth/)
+})
+
+test('stale save temp files are swept on the next save', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const stale = path.join(dir, '.dsh-bsb-ipynb-99999-aaaaaaaaaaaa.tmp')
+  const fresh = path.join(dir, '.dsh-bsb-ipynb-12345-bbbbbbbbbbbb.tmp')
+  await writeFile(stale, 'old')
+  await writeFile(fresh, 'new')
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000)
+  await utimes(stale, old, old)
+  const read = await readNotebookFile(file)
+  await saveNotebookFile(file, emptyNotebook(), read.version)
+  const names = await readdir(dir)
+  assert.equal(names.includes(path.basename(stale)), false, 'stale temp files are removed')
+  assert.equal(names.includes(path.basename(fresh)), true, 'recent temp files are kept')
 })

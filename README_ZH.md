@@ -142,7 +142,7 @@ dsh-bsb-ipynb/
 | 项 | 值 |
 | --- | --- |
 | notebook 落盘上限 | 32 MiB（超过返回 413） |
-| POST 请求体上限 | 64 MiB（所有 POST 路由） |
+| POST 请求体上限 | 64 MiB（`/ipynb/save` 为 36 MiB） |
 | 客户端每单元格输出预算 | 32 MiB（完整 JSON 的 UTF-8 字节） |
 | NDJSON 待发队列 / 单行内核输出 | 64 MiB / 64 MiB |
 | metadata 嵌套 / 节点上限 | 100 层 / 10,000 个节点 |
@@ -157,7 +157,7 @@ dsh-bsb-ipynb/
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 当前 314 个测试
+npm test          # 当前 317 个测试
 ```
 
 真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。

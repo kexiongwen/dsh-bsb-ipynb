@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { test as nodeTest } from 'node:test'
 import { mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { canCreateSymlinks, tempDir } from './python-helper.mjs'
 import {
   assertNotebookPath,
   isInside,
+  KernelPaths,
   resolveControlTarget,
   resolveExistingFile,
   resolveTarget,
@@ -227,4 +229,27 @@ test('resolveWorkspace rejects a relative session cwd', async () => {
   await assert.rejects(resolveWorkspace(ctxFor('relative/project'), 's1'), (error) => (
     error.code === 'workspace-unknown' && error.status === 400
   ))
+})
+
+test('control resolution retries a transient file change instead of failing', async (t) => {
+  const { dir } = await workspace(t)
+  const target = path.join(dir, 'a.ipynb')
+  const realLstat = fsp.lstat
+  const realReadlink = fsp.readlink
+  let linkServed = false
+  t.mock.method(fsp, 'lstat', async (file) => {
+    if (!linkServed && path.resolve(String(file)) === path.resolve(target)) {
+      linkServed = true
+      return { isSymbolicLink: () => true, dev: 1, ino: 2, birthtimeMs: 3 }
+    }
+    return realLstat.call(fsp, file)
+  })
+  t.mock.method(fsp, 'readlink', async (file) => {
+    if (path.resolve(String(file)) === path.resolve(target)) return 'elsewhere.ipynb'
+    return realReadlink.call(fsp, file)
+  })
+  const kernelPaths = new KernelPaths(ctxFor(dir), { peek: () => null })
+  const resolved = await kernelPaths.resolve('s1', 'a.ipynb', true)
+  assert.equal(resolved.target, path.join(await realpath(dir), 'a.ipynb'))
+  assert.equal(linkServed, true, 'the first attempt observed the transient change')
 })
