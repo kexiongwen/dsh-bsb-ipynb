@@ -23,6 +23,10 @@
 
 `dsh-bsb-ipynb` is a [DSH Better Sidebar](https://github.com/dong-victor/dsh-better-sidebar) plugin that turns the sidebar's file tree into a Jupyter notebook workspace. Click any `.ipynb` to read, edit, run and save it as you would in Jupyter. Kernels run in the host process through `jupyter_client` + `ipykernel`, so nothing Python-related runs in the browser and there is no build step.
 
+<p align="center">
+  <img src="docs/screenshot.png" width="100%" alt="A notebook rendered inside the DSH Better Sidebar">
+</p>
+
 ## ✨ Features
 
 - **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG, Markdown, JSON and ANSI-colored tracebacks.
