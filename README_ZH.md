@@ -24,7 +24,7 @@
 `dsh-bsb-ipynb` 是一个 [DSH Better Sidebar](https://github.com/dong-victor/dsh-better-sidebar) 插件，把侧边栏文件树变成可用的 Jupyter Notebook 工作区：点开任意 `.ipynb` 即可阅读、编辑、运行并保存，操作体验与 Jupyter 一致。内核由宿主进程通过 `jupyter_client` + `ipykernel` 启动，浏览器端不运行 Python，也无需构建。
 
 <p align="center">
-  <img src="docs/screenshot.png" width="100%" alt="在 DSH Better Sidebar 中渲染的 Jupyter Notebook">
+  <img src="docs/screenshot.png" width="100%" alt="在 DSH Better Sidebar 中打开的 Notebook：Markdown、已执行代码与内联 matplotlib 图">
 </p>
 
 ## ✨ 特性
