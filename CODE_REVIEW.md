@@ -137,4 +137,6 @@
 | 保存字节/边界 | 本地 parity/benchmark 脚本（未随仓库提供） | 正常 notebook 字节一致；32MiB ±0；1/8/30MiB 保存 4/27/110ms |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |
 
-**未核实事项**：无真实浏览器 headless（L-12 的浏览器栈/渲染耗时、M-9 的视觉对比度、HTML 输出裂图/外联未做视觉复核）；linked worktree 未在真实 DSH 会话端到端复现；better-sidebar 0.28.x + DSH 0.2.1 组合未安装验证；Windows 行为未实测；DSH 宿主是否给插件 viewer 包 error boundary 未确认（影响 L-12 的影响范围）。
+**未核实事项**：无真实浏览器 headless（L-12 的浏览器栈/渲染耗时、M-9 的视觉对比度、HTML 输出裂图/外联未做视觉复核）；linked worktree 未在真实 DSH 会话端到端复现；better-sidebar 0.28.x + DSH 0.2.1 组合未安装验证；DSH 宿主是否给插件 viewer 包 error boundary 未确认（影响 L-12 的影响范围）。
+
+> **Windows 侧复核（2026-11-07，实机）**：Windows 行为已实测，结论见 [CODE_REVIEW_WINDOWS.md](CODE_REVIEW_WINDOWS.md)。要点：L-14 在 Windows 上实测成立并升级为 High（默认解释器发现为 0 → `/execute` 503）；M-3、M-5、M-6、M-8、L-5、L-6、L-8、L-10 在 Windows 成立；L-13 在 Windows 不成立（kill=TerminateProcess）；新增 Windows 专属问题（连接文件泄漏、用户子进程孤儿、只读/锁定目标保存失败、Windows 绝对路径下 Markdown 图片裂图等），审查时完整测试基线为 292 tests / 238 pass / 51 fail / 3 skip。**后续修复**：Windows 解释器发现已平台化（`lib/env.js`），并新增 `windows-latest` CI 作业；修复后 Windows 全量为 292 tests / 248 pass / 0 fail / 44 skip（skip 均为无 symlink 权限与 POSIX 权限位用例），详见该报告 §9。
