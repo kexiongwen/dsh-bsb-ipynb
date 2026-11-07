@@ -176,7 +176,7 @@
 | --- | --- | --- |
 | **P0** | **W-A1**（+ W-A2、W-A10 一起） | 平台化解释器发现。这是 Windows 用户唯一「开箱即不可用」的问题；修好后路由/内核测试在 Windows 上会由 skip/503 转绿。**✅ 已修复（见 §9）**。 |
 | **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 已完成**（CI 改为 ubuntu/windows/macos 三平台 required 矩阵，含发现断言与防假 skip）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
-| **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-D2（文档） | 资源泄漏/失败终止/安全加固/文档。**W-A3/W-A4/W-A5/W-A6 已完成（见 §11）**；W-B1（fd/dirfd 级加固）、W-B4、W-D2 未做。 |
+| **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-D2（文档） | 资源泄漏/失败终止/安全加固/文档。**已完成的项**：W-A3/W-A4/W-A5/W-A6（§11）、W-D2（§12）、W-B4（§13）；**W-B1**（fd/dirfd 级加固）尚未做。 |
 | **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。**已完成（§12）**：W-A7/W-A9/W-A10、W-C4、W-D3/W-D4/W-D5、N-01/N-04/N-05；其余待清理。 |
 
 ## 6. CI 建议与落地（三平台矩阵）
@@ -280,4 +280,21 @@
 
 **验证**：全量 `npm test` = **306 tests / 262 pass / 0 fail / 44 skip / 44.6s**（新增 4 个测试：BOM 解码、CRLF 高亮、`DSH_IPYNB_PYTHON` 相对路径可见性、空发现 503 文案；`resolveInterpreter` 的绝对路径断言加在既有 malformed 用例内）；`node --check`、`py_compile`、`git diff --check` 通过。
 
-**仍未做**：W-A8（`X_OK` 语义注释）、W-B1（TOCTOU）、W-B4（读取 EBUSY 映射）、W-B5/W-B6/W-B7、W-C2/W-C3/W-C5/W-C6/W-C7、L-1/L-5/L-7/L-16/L-21、T-* 测试补强等。
+**后续批次**：W-A8、W-B4、L-1、L-5、L-7 与 T-2/T-4/T-7 已在 §13 完成；剩余项见 §13 末尾。
+
+## 13. 第四批修复（2026-11-07，低风险小修）
+
+| 项 | 状态 | 改动 |
+| --- | --- | --- |
+| **W-A8** | ✅ 已修复 | `lib/env.js` 的 `existsExecutable` 注明 Windows 上 `X_OK` 为 no-op、真正可执行性由 probe 确认（纯注释）。 |
+| **W-B4** | ✅ 已修复 | `lib/notebook.js` 新增 `readFailureReason()`；`readNotebookFile` 的 `readFile` 失败把 EBUSY（locked）/EPERM/EACCES（blocked）映射为新的 `read-blocked`（409），`stat` 失败也不再回传原始路径/OS 文本；`lib/json.js` 注册状态码，README/README_ZH 错误码与 Windows 已知限制同步更新。 |
+| **L-1** | ✅ 已修复 | `lib/routes.js` 的 execute 响应在 drain 等待超过 10 s 时强制结束（清空队列 + `res.end()`），不读数据的客户端不再永久占用 socket；用 mock timers 覆盖。 |
+| **L-5** | ✅ 已修复 | `assertNotebookVersion` 先 `stat` 再读：文件超过 32 MiB 直接返回 `too-large`，不再在 stat 窗口后整体缓冲超大文件；`ApiError` 直接透传。 |
+| **L-7** | ✅ 已修复 | `readNotebookFile` 规范化 `/read` 响应：重复 cell id 重新生成、`nbformat_minor` 提升到 ≥5，返回体符合 nbformat 4.5；新增重复 id 与 metadata 越限（invalid）用例。 |
+| **T-2** | ✅ 已补测试 | `OutputView` MIME 分支/优先级：stream/error/html（清洗回退）/svg/png 优先于 jpeg/markdown/json/latex/plain/未知 MIME 回退。 |
+| **T-4** | ✅ 已补测试 | execute 预流错误矩阵：`code` 非字符串、`python` 非绝对路径、绝对但不存在（interpreter-unknown）、headers 之后 kernel-busy 以 fatal NDJSON 返回。 |
+| **T-7** | ✅ 已补测试 | 客户端/服务端限制常量 parity（`NOTEBOOK_CAP_BYTES`/`METADATA_DEPTH_LIMIT`/`METADATA_NODE_LIMIT`），以及 read 路径 metadata 越限返回 `invalid` 的用例。 |
+
+**验证**：全量 `npm test` = **313 tests / 269 pass / 0 fail / 44 skip / 44.5s**（新增 7 个测试，另有 2 个断言并入既有用例）；`node --check`、`py_compile`、`git diff --check` 通过。
+
+**仍未做（后续批次）**：W-B1（M-6 TOCTOU）、W-B5/W-B6/W-B7（硬链接/junction 边界）、W-C2/W-C3/W-C5/W-C6/W-C7（客户端 polish）、L-16（HTML 输出图片）、L-21/快捷键、L-15（banner i18n）、M-1/M-2 等 macOS 审查遗留设计项。

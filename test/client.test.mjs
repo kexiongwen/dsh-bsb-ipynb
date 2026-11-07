@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT, NOTEBOOK_CAP_BYTES } from '../lib/notebook.js'
 
 // Pin the browser fallback locale: Node exposes a global navigator whose
 // language follows the host region (e.g. zh-CN on a Chinese Windows install),
@@ -1313,4 +1314,51 @@ test('blocked saves back off instead of retrying every autosave tick', async () 
   assert.equal(blockedAutosaveDelay(1500), 6000)
   assert.equal(blockedAutosaveDelay(6000), 24000)
   assert.equal(blockedAutosaveDelay(24000), 30000, 'the delay is capped at 30 s')
+})
+
+test('output rendering covers MIME priority, fallbacks and sanitization', async () => {
+  const { exports } = await loadClient()
+  const { OutputView } = exports.__test
+  const render = (output) => OutputView({ output, resolveImage: () => null })
+  assert.equal(render(null), null)
+
+  const stream = render({ output_type: 'stream', name: 'stderr', text: 'oops\n' })
+  assert.match(stream.props.className, /stream-stderr/)
+  assert.match(stream.props.dangerouslySetInnerHTML.__html, /oops/)
+
+  const error = render({ output_type: 'error', ename: 'ValueError', evalue: 'bad', traceback: ['Traceback'] })
+  assert.match(error.props.className, /is-error|dsh-bsb-ipynb-error/)
+  assert.match(error.props.dangerouslySetInnerHTML.__html, /Traceback/)
+
+  const html = render({ output_type: 'display_data', data: { 'text/html': '<script>alert(1)</script>' } })
+  assert.match(html.props.className, /html/)
+  // DOMParser is unavailable in this harness, so the sanitizer falls back to escaping.
+  assert.doesNotMatch(html.props.dangerouslySetInnerHTML.__html, /<script>/)
+
+  const svg = render({ output_type: 'display_data', data: { 'image/svg+xml': '<svg></svg>' } })
+  assert.match(svg.props.src, /^data:image\/svg\+xml;base64,/)
+  const images = render({ output_type: 'display_data', data: { 'image/png': 'pngdata', 'image/jpeg': 'jpgdata' } })
+  assert.match(images.props.src, /^data:image\/png;base64,pngdata$/, 'png wins over jpeg')
+
+  const markdown = render({ output_type: 'display_data', data: { 'text/markdown': '**bold**' } })
+  assert.match(markdown.props.className, /markdown/)
+  assert.match(markdown.props.dangerouslySetInnerHTML.__html, /<strong>bold<\/strong>/)
+
+  const json = render({ output_type: 'display_data', data: { 'application/json': { a: 1 } } })
+  assert.equal(json.props.children[0], '{\n  "a": 1\n}')
+  const latex = render({ output_type: 'display_data', data: { 'text/latex': '$x$' } })
+  assert.equal(latex.props.children[0], '$x$')
+  const plain = render({ output_type: 'display_data', data: { 'text/plain': 'plain' } })
+  assert.equal(plain.props.children[0], 'plain')
+
+  const unknown = render({ output_type: 'display_data', data: { 'application/x-custom': 1 } })
+  assert.match(unknown.props.children[0], /application\/x-custom/)
+})
+
+test('client and server notebook limits stay in parity', async () => {
+  const { exports } = await loadClient()
+  const client = exports.__test
+  assert.equal(client.NOTEBOOK_CAP_BYTES, NOTEBOOK_CAP_BYTES)
+  assert.equal(client.METADATA_DEPTH_LIMIT, METADATA_DEPTH_LIMIT)
+  assert.equal(client.METADATA_NODE_LIMIT, METADATA_NODE_LIMIT)
 })

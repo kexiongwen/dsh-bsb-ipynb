@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } fro
 import os from 'node:os'
 import path from 'node:path'
 import { registerIpynbRoutes } from '../lib/routes.js'
-import { readJsonBody } from '../lib/json.js'
+import { ApiError, readJsonBody } from '../lib/json.js'
 import { discoverInterpreters } from '../lib/env.js'
 import { NOTEBOOK_CAP_BYTES, emptyNotebook, serializeNotebook, sha256 } from '../lib/notebook.js'
 import { tempDir } from './python-helper.mjs'
@@ -399,6 +399,57 @@ test('execute validates the notebook path before opening a stream', async (t) =>
   assert.equal(json.error.code, 'path-outside-root')
 })
 
+test('execute reports pre-stream validation errors as JSON', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const ctx = makeCtx({ cwd: dir })
+
+  const badCode = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST',
+    url: '/ipynb/execute',
+    body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: 42 },
+  }))
+  assert.equal(badCode.state.status, 400)
+  assert.equal(badCode.json.error.code, 'bad-request')
+
+  const relativePython = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST',
+    url: '/ipynb/execute',
+    body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1', python: 'python' },
+  }))
+  assert.equal(relativePython.state.status, 400)
+  assert.equal(relativePython.json.error.code, 'bad-request')
+  assert.match(relativePython.json.error.message, /absolute/)
+
+  const unknownPython = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST',
+    url: '/ipynb/execute',
+    body: {
+      sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1',
+      python: path.join(os.tmpdir(), 'dsh-bsb-ipynb-no-such-python'),
+    },
+  }))
+  assert.equal(unknownPython.state.status, 400)
+  assert.equal(unknownPython.json.error.code, 'interpreter-unknown')
+})
+
+test('execute reports a busy kernel after headers as a fatal NDJSON event', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  kernels.entry.run = async () => {
+    throw new ApiError('kernel-busy', 409, 'The kernel is already executing a cell')
+  }
+  const { state, text } = await invoke(
+    makeCtx({ cwd: dir }),
+    kernels,
+    makeReq({ method: 'POST', url: '/ipynb/execute', body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1' } }),
+  )
+  assert.equal(state.status, 200)
+  const events = text.trim().split('\n').map((line) => JSON.parse(line))
+  assert.ok(events.some((event) => event.type === 'fatal' && event.code === 'kernel-busy'))
+})
+
 test('interrupt needs a running kernel; shutdown without one is a no-op', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
@@ -483,6 +534,46 @@ test('execute waits for drain instead of dropping the final reply', async (t) =>
     .map((line) => JSON.parse(line))
   assert.ok(events.some((event) => event.type === 'stream'))
   assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
+})
+
+test('execute ends the stream when a client never drains', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const ctx = makeCtx({ cwd: dir })
+  const kernels = makeKernels()
+  registerIpynbRoutes(ctx, kernels)
+  const handler = ctx.registered[0].handler
+  const drainCallbacks = []
+  let ended = false
+  const res = {
+    headersSent: false,
+    writeHead() {
+      this.headersSent = true
+      return this
+    },
+    write() {
+      return false
+    },
+    end() {
+      ended = true
+    },
+    on() {
+      return this
+    },
+    once(event, callback) {
+      if (event === 'drain') drainCallbacks.push(callback)
+      return this
+    },
+  }
+  await handler(
+    makeReq({ method: 'POST', url: '/ipynb/execute', body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1' } }),
+    res,
+  )
+  assert.ok(drainCallbacks.length > 0, 'the route waits for the drain that never comes')
+  assert.equal(ended, false)
+  t.mock.timers.tick(10_000)
+  assert.equal(ended, true, 'the bounded drain wait must end the response')
 })
 
 test('status, interrupt, restart and shutdown work after the notebook is deleted', async (t) => {

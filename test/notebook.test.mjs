@@ -12,6 +12,7 @@ import {
   normalizeNotebook,
   parseNotebookBytes,
   readNotebookFile,
+  readFailureReason,
   saveFailureReason,
   saveNotebookFile,
   serializeNotebook,
@@ -720,4 +721,49 @@ test('notebooks saved with a byte-order mark are decoded instead of rejected', (
   }
   const broken = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{not json', 'utf8')])
   assert.equal(parseNotebookBytes(broken).status, 'invalid')
+})
+
+test('read failure reasons classify locked and inaccessible files', () => {
+  assert.equal(readFailureReason({ code: 'EBUSY' }), 'locked')
+  assert.equal(readFailureReason({ code: 'EPERM' }), 'blocked')
+  assert.equal(readFailureReason({ code: 'EACCES' }), 'blocked')
+  assert.equal(readFailureReason({ code: 'ENOENT' }), null)
+  assert.equal(readFailureReason(new Error('boom')), null)
+  assert.equal(readFailureReason(null), null)
+})
+
+test('read responses replace duplicate cell ids and upgrade nbformat_minor', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'duplicate.ipynb')
+  await writeFile(file, JSON.stringify({
+    nbformat: 4,
+    nbformat_minor: 4,
+    metadata: {},
+    cells: [
+      { cell_type: 'code', id: 'dup', metadata: {}, source: '1', outputs: [] },
+      { cell_type: 'code', id: 'dup', metadata: {}, source: '2', outputs: [] },
+    ],
+  }))
+  const result = await readNotebookFile(file)
+  assert.equal(result.status, 'ok')
+  assert.equal(result.notebook.nbformat_minor, 5)
+  const ids = result.notebook.cells.map((cell) => cell.id)
+  assert.equal(ids.length, 2)
+  assert.equal(new Set(ids).size, 2, 'read responses must not repeat a cell id')
+  assert.equal(ids[0], 'dup', 'the first occurrence keeps its id')
+})
+
+test('read reports over-limit metadata as invalid instead of returning a notebook', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'deep.ipynb')
+  const metadata = {}
+  let cursor = metadata
+  for (let index = 0; index <= 100; index += 1) {
+    cursor.next = {}
+    cursor = cursor.next
+  }
+  await writeFile(file, JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata, cells: [] }))
+  const result = await readNotebookFile(file)
+  assert.equal(result.status, 'invalid')
+  assert.match(result.error, /depth/)
 })

@@ -124,7 +124,7 @@ All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false
 
 All routes except `/health` and `/interpreters` require a non-empty `sessionId` and `path` (query parameters for `/status`, JSON body for the rest). `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
 
-Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root`, `not-found`, `not-notebook`, `too-large`, `write-conflict`, `write-blocked`, `write-failed`, `kernel-busy`, `kernel-unavailable`, `interpreter-unknown`, `method-not-allowed`, `internal`.
+Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root`, `not-found`, `read-blocked`, `not-notebook`, `too-large`, `write-conflict`, `write-blocked`, `write-failed`, `kernel-busy`, `kernel-unavailable`, `interpreter-unknown`, `method-not-allowed`, `internal`.
 
 ## ⚠️ Known Limitations
 
@@ -134,7 +134,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 - Results are written back by the client and persisted on save; the server never appends output in the background.
 - No "new notebook" wizard yet: create an empty `.ipynb` in the file tree or open an existing file.
 - Workspace containment uses the session cwd; when the active root is a linked git worktree, requests may return 403 (not supported yet).
-- **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409); images inside `text/html` output are not re-resolved.
+- **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409) and locked files fail reads with `read-blocked` (409); images inside `text/html` output are not re-resolved.
 - Very large outputs make browser rendering slow; clear outputs or run in smaller chunks.
 
 ## 📊 Internal Limits and Environment Variables
@@ -157,7 +157,7 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 306 tests at the time of writing
+npm test          # 313 tests at the time of writing
 ```
 
 Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe.

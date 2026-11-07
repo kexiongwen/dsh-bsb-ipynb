@@ -124,7 +124,7 @@ dsh-bsb-ipynb/
 
 除 `/health`、`/interpreters` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
 
-错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`not-notebook`、`too-large`、`write-conflict`、`write-blocked`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
+错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`read-blocked`、`not-notebook`、`too-large`、`write-conflict`、`write-blocked`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
 
 ## ⚠️ 已知限制
 
@@ -134,7 +134,7 @@ dsh-bsb-ipynb/
 - 执行结果由客户端回写并在保存时落盘；服务端不会在后台追加输出。
 - 暂无「新建 notebook」向导：可在文件树中新建空 `.ipynb`，或直接打开已有文件。
 - 工作区边界基于会话 cwd 校验；会话活动根为 linked git worktree 时可能返回 403（暂不支持）。
-- **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409）；`text/html` 输出中的图片不会经过相对路径解析。
+- **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409），被独占锁定的文件读取返回 `read-blocked`（409）；`text/html` 输出中的图片不会经过相对路径解析。
 - 输出特别大时会拖慢浏览器渲染，建议及时清空输出或分段执行。
 
 ## 📊 内部限制与环境变量
@@ -157,7 +157,7 @@ dsh-bsb-ipynb/
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 当前 306 个测试
+npm test          # 当前 313 个测试
 ```
 
 真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。
