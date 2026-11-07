@@ -34,7 +34,7 @@
 - **Execution** — one persistent kernel per notebook, keyed by file path, keeps variables alive across cells; Run all, interrupt, restart and shut down.
 - **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits.
 - **Interpreter discovery** — checks `DSH_IPYNB_PYTHON`, conda environments, `python3`/`python` on `PATH`, then DSH's bundled Python, and selects only environments that provide `jupyter_client` + `ipykernel`. `DSH_IPYNB_PYTHON` must be an absolute path; a relative or unusable value is still listed by `/ipynb/interpreters` with a reason but is never used. The launch config is built in-process, so a same-named system kernelspec cannot redirect the selected interpreter.
-- **DSH integration** — core base colors use DSH theme tokens (syntax and state colors remain hard-coded), and dark mode follows the DSH theme; UI strings are registered under the `dsh-bsb-ipynb` locale namespace and follow DSH's Chinese/English language preference.
+- **DSH integration** — every colour follows the DSH theme: state colours, banners, links and Python syntax highlighting consume `--dsw-alias-*` and Shiki variables, and cell/editor/output type follows the DSH text and code font settings (dark mode is the host palette for the theme setting × OS scheme, with no plugin-side theme detection). UI strings are registered under the `dsh-bsb-ipynb` locale namespace and follow DSH's Chinese/English language preference.
 - **Contained access** — paths are confined to the session workspace (realpath + relative checks); HTTP routes reuse DSH's admission fence; HTML output is sanitized with a DOMParser allow-list, and `<script>` never runs.
 
 ## 🚀 Quick Start
@@ -108,6 +108,27 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 - **Process cleanup** — the kernel connection file is removed on every exit path (the host owns its path, so a hard-killed bridge leaves nothing behind); on Windows a kill-on-close job object reaps the kernel and any subprocess a cell spawned.
 - **Restart resilience** — a failed kernel restart reports `kernel_died` and tears the bridge down instead of busy-looping; restarts run off the control loop, so status/interrupt/shutdown stay responsive during a slow restart.
 
+## 🎨 Theming & Typography
+
+The notebook has no colour scheme of its own. `client.js` declares one token layer on `.dsh-bsb-ipynb-root` that maps plugin variables to the host theme, and every rule consumes that layer, so a DSH theme or dsh-web-ui skin that overrides the aliases re-skins the notebook automatically — including the kernel status dot, save/error text, banners, markdown links and Python syntax highlighting.
+
+| Notebook role | Host token |
+| --- | --- |
+| Text, muted labels, borders, panel surface | `--dsw-alias-label-primary` / `--dsw-alias-label-secondary`, `--dsw-alias-border-l1`, `--dsw-alias-bg-layer-1` |
+| Cell/card surface, hover fill | `--dsw-alias-bg-module-platform`, `--dsw-alias-interactive-bg-hover` |
+| Code block / inline code surface | `--dsw-alias-markdown-code-block`, `--dsw-alias-markdown-inline-code` |
+| Kernel status (idle / ready / busy) | `--dsw-alias-state-idle-primary`, `--dsw-alias-state-success-primary`, `--dsw-alias-state-warn-primary` |
+| Save failure, stderr, tracebacks | `--dsw-alias-state-error-primary` |
+| Running-cell border, focus ring | `--dsw-alias-state-business-primary` (focus also honours `--dsw-focus-ring-color`) |
+| Banners | `color-mix()` of `--dsw-alias-state-business-primary` / `--dsw-alias-state-error-primary` at 12% |
+| Markdown links | `--dsw-alias-link` |
+| Python syntax | `--shiki-token-*` (the Shiki palette shared with DSH markdown code blocks) |
+| Text and code type | `--dsh-content-font-size-secondary` (+ delta), `--dsh-code-font-size`, `--ds-font-family-code` |
+
+Font settings map as follows: **text size** scales the notebook body, markdown prose and the dense chrome labels; **code size** scales cell sources, the editor, execution prompts, outputs and fenced code blocks; the **code font** replaces the monospace stack; the **text font** is inherited from the host body. Defaults reproduce the previous pixel sizes (13 px root, 12 px code, 10–12 px chrome). When a host token is absent (unit tests, standalone rendering), each declaration falls back to its previous hardcoded value.
+
+Intentionally not themed: ANSI 16-colour stdout painting (content, so the same notebook paints the same colours under every skin), inline styles inside HTML output (owned by pandas/plotly/…), and the white surface behind notebook images (keeps transparent PNG/SVG plots readable on dark themes).
+
 ## 🌐 HTTP API
 
 All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false,error:{code,message,details?}}`. POST bodies must be `application/json`; `/execute` responds with `application/x-ndjson`.
@@ -161,10 +182,10 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 325 tests at the time of writing
+npm test          # 344 tests at the time of writing
 ```
 
-Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
+The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
 
 See [CODE_REVIEW.md](CODE_REVIEW.md) for the combined macOS + Windows review and known-issue log.
 

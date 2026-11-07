@@ -18,7 +18,7 @@
 
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
-| Medium | 13 | M-2、M-4、M-6、M-7、M-8、M-9、M-10、M-11、M-12、M-13、M-14、M-15、M-16 |
+| Medium | 12 | M-2、M-4、M-6、M-7、M-8、M-10、M-11、M-12、M-13、M-14、M-15、M-16 |
 | Low | 7 | L-5、L-12、L-13、L-16、L-21、L-22、L-23 |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
 | 测试缺口 | 5 | T-1、T-3、T-5、T-6、T-8 |
@@ -27,7 +27,7 @@
 
 ---
 
-## 1. Medium（13 项，未修复）
+## 1. Medium（12 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题与影响 | 证据 | 建议 |
 | --- | --- | --- | --- | --- | --- |
@@ -36,7 +36,6 @@
 | **M-6**（P2） | 全平台（Windows 形态） | `lib/gate.js:64-85,152-185,273-279`；`lib/notebook.js:308-330`（读）、`410-447`（存） | 路径授权（realpath 检查）与真正的文件 I/O 是两次独立解析，无 fd/inode 绑定：授权后把目标替换为指向工作区外的 symlink → 越界读；把父目录替换为指向外部的 symlink 且外部内容匹配 baseVersion → 越界写。二次版本校验不缓解（两次 readFile 沿 symlink 读到同一外部内容）。前提是竞争者能并发修改工作区目录项，纯 HTTP 请求本身不能制造 symlink。**Windows 形态（原 W-B1）**：预置的越界 junction 会被 403 正确拒绝，但授权后把父目录换成 junction 即可越界读/写；Windows 创建 junction **不需要管理员/开发者模式**，门槛低于 macOS symlink。 | 【已验证】按 route 相同调用顺序确定性替换：读得到外部内容、写成功写出局外文件（macOS symlink 与 Windows junction 均复现）。注意：junction 在 Node 的 `lstat/readlink` 中是否可见取决于运行环境（见 §8 未核实 1），不能把安全判断建立在「能否看到 reparse point」上。 | 读取将授权、打开、fstat 身份核验和有界读取绑定到同一 fd，并逐组件防跟随；写入绑定父目录身份并使用 dirfd/openat 等价能力，至少在 temp-write/rename 前重验 realpath/dev/ino。仅再做一次字符串 realpath 不能根治。 |
 | **M-7**（P2） | 全平台 | `lib/gate.js:16-53` | 工作区根只认 `ctx.get('workingDirectory').get(session)` / `session.header.cwd`，**不跟随 better-sidebar 的活动根**：文件树根是 `activeWorktreeRootOf(...)`（会采纳 linked git worktree，可能在会话 cwd 之外）。会话活动根为 linked worktree 时，`/ipynb/read`、`/ipynb/save`、`/ipynb/execute`、`/ipynb/status` 全部 403，核心功能不可用。Windows 下同样 403；跨盘 worktree 走 `path.relative` 返回绝对路径 → fail-closed（行为正确但仍是 403）。 | 【契约核对】better-sidebar 0.30.1：`src/index.ts:730-735`、`src/active-worktree.ts:466`；文件 viewer 收到绝对路径后本插件原样提交（`client.js:621,1586,1835`）。未在真实 worktree 会话端到端复现。 | 引入与 better-sidebar 对齐的「活动根集合」（主根 + 关联 worktree realpath，realpath 落在任一候选根内即允许）。 |
 | **M-8**（P2） | 全平台 | `lib/notebook.js:364-382,432-447`；`README.md`（保存可靠性一节） | 保存的 CAS 只在 `readFile→sha256→比较` 时检测冲突；第二次 `assertNotebookVersion` 返回后到 rename 之间仍有窗口：外部写者在窗口内写入会被静默覆盖，API 仍返回成功。README 已声明该竞态，但声明不能避免数据丢失；Windows 上同样成立。 | 【已验证】在 rename 钩子注入外部写：save fulfilled、`externalEditLost=true`，最终只有 PLUGIN_SAVE。 | 若必须提供强一致，使用覆盖读取—写入—提交的跨进程锁或支持 CAS 的提交协议，并保留冲突副本；rename 前核对 dev/ino、mtime、size 只能收窄窗口，单纯再加 hash 不能根治。 |
-| **M-9**（P2） | 全平台 | `client.js:2194-2412`（基础 token 与硬编码状态/语法色） | 只有 4 个基础色使用 `--dsw-alias-*` token，语法高亮、内核状态点、保存失败/错误、banner、stderr 仍硬编码，自定义皮肤无法完整覆盖这些颜色。Windows 侧补充：DSH 字号 token（`--dsh-content-font-size`/`--dsh-code-font-size`）未被消费，`fontSize:18` 与 125%/150% 缩放不影响 notebook。 | 【契约核对】当前 Theme provider 暴露 `--dsw-alias-state-error-primary`、`--dsw-alias-state-success-primary` 等语义 token；【已验证】硬编码色未 token 化，未做真实浏览器视觉/对比度复验。 | 状态和语法色逐步消费宿主语义 token/Shiki 变量，并补 DSH dark/light × OS 相反组合的计算样式/对比度测试。 |
 | **M-10**（P2） | 全平台 | `lib/kernel.js:363-375`（坏帧处理）、`304-311`（终态）、`441-499`（busy/run） | 非 JSON 帧只更新 lastError，合法 JSON 但缺 type 直接 return；两者都不 failRun/kill。若损坏的是唯一 execute_reply，currentRun 无执行 watchdog 将一直 pending，后续执行持续 kernel-busy。Windows 上同样会出现 kernel-busy 挂起。 | 【已验证】活动 run 收到 `NOT-JSON` 后为 `settled=false、busy=true、ready=true、kills=[]`，只有人为补正常 reply 才释放；`test/kernel-lifecycle.test.mjs` 只测重启期间保留旧错误。 | stdout 严格协议错误应 failRun 并杀死/重启 bridge；校验事件 shape 及执行事件 cell_id/exec_id；覆盖 starting/idle/running 的坏 JSON、非对象、缺 type/缺 ID。 |
 | **M-11**（P2） | 全平台 | `lib/kernel.js:564-616`（shutdown/kill）、`738-743`（manager 删除）、`757-766`（dispose） | shutdown 2s 时才由 kill 发 SIGTERM，kill 再隔 2s 才 SIGKILL（总计约 4s），外层 grace 却在 2.5s 结束；随后 manager 无条件删条目，disposeAll 更提前 clear。若 SIGTERM 清理卡住，管理器已显示无内核并允许替代启动，旧 bridge 仍活。Windows 上 SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义（代码已注明），清理只能依赖显式 shutdown 协议。 | 【已验证】受控不退出 child：约 **2502ms** 返回时 `managerKnowsEntry=false、processAlive=true、kills=['SIGTERM']`。 | 等待 exit 覆盖完整 SIGKILL 升级；未确认退出前保留 stopping entry 并报告失败，不能当作已回收；测试忽略 SIGTERM、2.5s 不遗忘/不重复启动、SIGKILL+exit 后才删除。 |
 | **M-12**（P2） | 全平台 | `client.js:1669-1676,1726-1736`（GET/轮询）、`1795-1833`（流式终态）、`1963-1970`（shutdown） | 初始或轮询 `/status` 在内核死亡/shutdown 前发出、之后到达时，refreshKernel 无 document generation、kernel epoch 或请求序号检查，直接 setKernel；旧 `{running:true,busy:true}` 可覆盖 death/reply 的终态。visible=false 停止后续轮询时错误状态可持续。影响 UI/按钮状态，不是服务器内核真的复活。 | 【已验证】生命周期 harness：先提交 kernel_died 和失败 reply（running:false），再交付旧 running/busy 响应，最终工具栏变回 running:true、busy:true。现有迟到 NDJSON 测试不覆盖 GET。 | 增加 kernel epoch/request id；run 开始、status/reply/death、restart/shutdown、adopt 时推进 epoch，只接受当前代次的最新响应，必要时 abort 旧 GET；补 death/shutdown/reload 后迟到响应用例。 |
@@ -88,7 +87,7 @@
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
 | **P1** | M-2（+T-1）、M-13、M-15 | M-2 序列化放大、M-15 无界版本读取均可造成内存/CPU 资源风险；M-13 会让已丢弃草稿晚到落盘并造成版本分叉。T-1 仍是安全关键测试可信度问题。 |
-| **P2** | M-4、M-6、M-7、M-8、M-9、M-10、M-11、M-12、M-14、M-16 | 性能、失败终止、状态竞态、错误内核生命周期与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-14 需按 target 串行化，M-16 需调整拆帧与上限检查顺序。 |
+| **P2** | M-4、M-6、M-7、M-8、M-10、M-11、M-12、M-14、M-16 | 性能、失败终止、状态竞态、错误内核生命周期与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-14 需按 target 串行化，M-16 需调整拆帧与上限检查顺序。 |
 | **P3** | §2 的 Low（按组批量）、T-3/T-5/T-6/T-8、§3 Nit | 低成本、低风险，可合并处理。 |
 
 ---
@@ -113,7 +112,6 @@
 | M-6 | 本地按路由调用顺序注入（脚本未随仓库提供）；Windows junction 注入 | macOS：symlink 替换后读泄漏/写越界；Windows：预置 junction 被 403 拒绝，授权后父目录换 junction 可越界读/写 |
 | M-7 | better-sidebar 0.30.1 源码（`src/index.ts:730-735`、`src/active-worktree.ts:466`） | 文件树根用 `activeWorktreeRootOf`；Windows 同样 403 |
 | M-8 | 本地 rename 钩子注入（脚本未随仓库提供） | save fulfilled、外部编辑丢失 |
-| M-9 | 当前 Theme provider + `test/client.test.mjs` | 硬编码色未 token 化；未做视觉/对比度复验；Windows 字号 token 未消费 |
 | M-10～M-12 | 本地受控 child、不退出 child、deferred GET 注入（脚本未随仓库提供） | 活动 run 永久 busy；2502ms 返回时进程仍活且条目已遗忘；旧 status 覆盖 death |
 | M-13 | 当前客户端 mountNotebook 时序复现 + 服务端 read/save 调用顺序核对（脚本未随仓库提供） | 已丢弃草稿晚到为 v3，UI 仍显示 Reload 文档且 next baseVersion=v1；下一次保存模拟 409 conflict=v3 |
 | M-14 | 受控解释器 probe 与并发 `/restart`（脚本未随仓库提供） | `shutdown:A, shutdown:A, start:B, restart:B`；两个请求均 200，C 响应为 C，最终 current=B |
@@ -123,4 +121,4 @@
 | L-22 / L-23 | Windows 真实 junction/大小写实验 | 悬空 junction 控制路径退化为请求拼写；`NB.IPYNB` 删除后不匹配活内核，`nb.ipynb` 可匹配 |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |
 
-**未核实事项**：① junction 的 Node 可见性存在环境差异（完整访问权限下 `lstat` 视为 symlink、`readlink` 返回目标绝对路径；Low IL 沙箱会话中不可见，`readlink→EINVAL`）——安全结论不依赖该差异，但 M-6 修复不建议依赖 `lstat/readlink` 识别 reparse point；② 无真实浏览器 headless（L-12 的浏览器栈/渲染耗时、M-9 的视觉对比度、L-16 的 HTML 输出裂图/外联、L-15/L-24 的浏览器表现未做视觉复核）；③ linked worktree 未在真实 DSH 会话端到端复现；④ UNC 作为 workspace、icacls 拒绝、AV/索引器锁导致的 `.tmp` 残留、64MiB 读峰值未逐项实测；⑤ better-sidebar 0.28.x + DSH 0.2.1 组合未安装验证；⑥ DSH 宿主是否给插件 viewer 包 error boundary 未确认（影响 L-12 的影响范围）；⑦ DSH host 日志缺失，无法确认插件 boot 后的运行期错误。
+**未核实事项**：① junction 的 Node 可见性存在环境差异（完整访问权限下 `lstat` 视为 symlink、`readlink` 返回目标绝对路径；Low IL 沙箱会话中不可见，`readlink→EINVAL`）——安全结论不依赖该差异，但 M-6 修复不建议依赖 `lstat/readlink` 识别 reparse point；② 无真实浏览器 headless（L-12 的浏览器栈/渲染耗时、L-16 的 HTML 输出裂图/外联、L-15/L-24 的浏览器表现未做视觉复核）；③ linked worktree 未在真实 DSH 会话端到端复现；④ UNC 作为 workspace、icacls 拒绝、AV/索引器锁导致的 `.tmp` 残留、64MiB 读峰值未逐项实测；⑤ better-sidebar 0.28.x + DSH 0.2.1 组合未安装验证；⑥ DSH 宿主是否给插件 viewer 包 error boundary 未确认（影响 L-12 的影响范围）；⑦ DSH host 日志缺失，无法确认插件 boot 后的运行期错误。

@@ -34,7 +34,7 @@
 - **执行**：每个 notebook 一个按文件路径共享的常驻内核，变量跨单元格保留；支持全部运行、中断、重启与关闭。
 - **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后 1.5 秒自动保存。
 - **解释器发现**：按 `DSH_IPYNB_PYTHON` → conda 环境 → PATH 上的 `python3`/`python` → DSH 内置 Python 的顺序查找，且只选择安装了 `jupyter_client` + `ipykernel` 的环境；`DSH_IPYNB_PYTHON` 必须是**绝对路径**，相对路径或不可用的值仍会出现在 `/ipynb/interpreters` 列表中并附原因，但不会被使用；启动配置在插件进程内构造，同名系统 kernelspec 不会改变所选解释器。
-- **与 DSH 集成**：核心基础色使用 DSH 主题 token（语法高亮与状态色仍为硬编码），暗色跟随 DSH 主题设置；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
+- **与 DSH 集成**：所有颜色跟随 DSH 主题——状态色、banner、链接与 Python 语法高亮消费 `--dsw-alias-*` 与 Shiki 变量，单元格/编辑器/输出字号跟随 DSH 的正文与代码字号设置（暗色即宿主按「主题设置 × 系统配色」解析出的调色板，插件侧不做主题侦测）；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
 - **访问边界**：路径限制在会话工作区内（realpath + 相对路径校验）；HTTP 路由复用 DSH 的 admission fence（请求准入校验）；HTML 输出经 DOMParser 白名单清洗，`<script>` 不会执行。
 
 ## 🚀 快速开始
@@ -108,6 +108,27 @@ dsh-bsb-ipynb/
 - **进程清理** — 内核连接文件在所有退出路径上都会被删除（路径由宿主指定，硬杀 bridge 后也不会残留）；Windows 上使用 kill-on-close job object，内核与 cell 内启动的子进程会一起被回收。
 - **重启自愈** — 内核重启失败时发送一次 `kernel_died` 并拆掉 bridge，不再忙等；重启在后台执行，慢重启期间 status/interrupt/shutdown 仍可响应。
 
+## 🎨 主题与字体
+
+notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声明一层 token 映射（插件变量 → 宿主主题），所有规则只消费这一层。因此覆盖了 DSH 别名 token 的主题或 dsh-web-ui 皮肤会自动重绘 notebook——包括内核状态点、保存失败/报错文案、banner、Markdown 链接与 Python 语法高亮。
+
+| notebook 角色 | 宿主 token |
+| --- | --- |
+| 正文、次要文案、边框、面板底色 | `--dsw-alias-label-primary` / `--dsw-alias-label-secondary`、`--dsw-alias-border-l1`、`--dsw-alias-bg-layer-1` |
+| 单元格/卡片底色、hover 填充 | `--dsw-alias-bg-module-platform`、`--dsw-alias-interactive-bg-hover` |
+| 代码块 / 行内代码底色 | `--dsw-alias-markdown-code-block`、`--dsw-alias-markdown-inline-code` |
+| 内核状态（idle / ready / busy） | `--dsw-alias-state-idle-primary`、`--dsw-alias-state-success-primary`、`--dsw-alias-state-warn-primary` |
+| 保存失败、stderr、traceback | `--dsw-alias-state-error-primary` |
+| 运行中单元格边框、焦点轮廓 | `--dsw-alias-state-business-primary`（焦点轮廓同时尊重 `--dsw-focus-ring-color`） |
+| banner | 以 12% 比例对 `--dsw-alias-state-business-primary` / `--dsw-alias-state-error-primary` 做 `color-mix()` |
+| Markdown 链接 | `--dsw-alias-link` |
+| Python 语法 | `--shiki-token-*`（与 DSH Markdown 代码块共享的 Shiki 调色板） |
+| 正文/代码字体 | `--dsh-content-font-size-secondary`（含增量）、`--dsh-code-font-size`、`--ds-font-family-code` |
+
+字号映射：**正文字号**缩放 notebook 正文、Markdown 段落与密集的工具栏小字；**代码字号**缩放单元格源码、编辑器、执行提示符、输出与围栏代码块；**代码字体**替换等宽字体栈；**正文字体**继承宿主 body。默认值与此前逐像素一致（根 13px、代码 12px、工具栏 10–12px）。若宿主 token 缺失（单测、脱离 DSH 的独立渲染），每条声明回退到修复前的硬编码值。
+
+以下内容有意不主题化：ANSI 16 色 stdout（属于内容，同一 notebook 在任何皮肤下颜色一致）、HTML 输出中的内联样式（由 pandas/plotly 等控制）、notebook 图片的白底（保证透明 PNG/SVG 图在暗色主题下可读）。
+
 ## 🌐 HTTP API
 
 所有接口挂在 `/ipynb` 下，返回 `{ok:true,value}` 或 `{ok:false,error:{code,message,details?}}`。POST 请求体必须是 `application/json`，`/execute` 返回 `application/x-ndjson`。
@@ -161,10 +182,10 @@ dsh-bsb-ipynb/
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 当前 325 个测试
+npm test          # 当前 344 个测试
 ```
 
-真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
+主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
 
 合并的 macOS + Windows 审核与已知问题记录见 [CODE_REVIEW.md](CODE_REVIEW.md)。
 
