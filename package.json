@@ -9,6 +9,24 @@
   },
   "description": "Preview and run Jupyter notebooks (.ipynb) in the DSH better-sidebar file tree.",
   "license": "MIT",
+  "author": "kexiongwen (https://github.com/kexiongwen)",
+  "homepage": "https://github.com/kexiongwen/dsh-bsb-ipynb#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kexiongwen/dsh-bsb-ipynb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kexiongwen/dsh-bsb-ipynb/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "jupyter",
+    "notebook",
+    "ipynb",
+    "better-sidebar",
+    "deepseek-harness"
+  ],
   "scripts": {
     "test": "node --test --test-timeout=180000 test/*.test.mjs"
   },
