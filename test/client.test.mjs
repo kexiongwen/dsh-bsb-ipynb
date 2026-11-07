@@ -44,7 +44,7 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
     '--dsw-alias-markdown-code-block',
     '--dsw-alias-markdown-inline-code',
     '--dsw-alias-link',
-    '--dsw-alias-state-idle-primary',
+    '--dsw-alias-label-tertiary',
     '--dsw-alias-state-success-primary',
     '--dsw-alias-state-warn-primary',
     '--dsw-alias-state-error-primary',

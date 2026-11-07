@@ -117,7 +117,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | 正文、次要文案、边框、面板底色 | `--dsw-alias-label-primary` / `--dsw-alias-label-secondary`、`--dsw-alias-border-l1`、`--dsw-alias-bg-layer-1` |
 | 单元格/卡片底色、hover 填充 | `--dsw-alias-bg-module-platform`、`--dsw-alias-interactive-bg-hover` |
 | 代码块 / 行内代码底色 | `--dsw-alias-markdown-code-block`、`--dsw-alias-markdown-inline-code` |
-| 内核状态（idle / ready / busy） | `--dsw-alias-state-idle-primary`、`--dsw-alias-state-success-primary`、`--dsw-alias-state-warn-primary` |
+| 内核状态（off / ready / busy） | `--dsw-alias-label-tertiary`（off）、`--dsw-alias-state-success-primary`、`--dsw-alias-state-warn-primary` |
 | 保存失败、stderr、traceback | `--dsw-alias-state-error-primary` |
 | 运行中单元格边框、焦点轮廓 | `--dsw-alias-state-business-primary`（焦点轮廓同时尊重 `--dsw-focus-ring-color`） |
 | banner | 以 12% 比例对 `--dsw-alias-state-business-primary` / `--dsw-alias-state-error-primary` 做 `color-mix()` |

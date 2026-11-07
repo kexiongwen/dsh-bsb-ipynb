@@ -53,7 +53,7 @@ const REQUIRED_HOST_TOKENS = [
   '--dsw-alias-markdown-code-block',
   '--dsw-alias-markdown-inline-code',
   '--dsw-alias-link',
-  '--dsw-alias-state-idle-primary',
+  '--dsw-alias-label-tertiary',
   '--dsw-alias-state-success-primary',
   '--dsw-alias-state-warn-primary',
   '--dsw-alias-state-error-primary',
@@ -123,7 +123,7 @@ test('theme colours resolve only through host tokens', () => {
 test('light and dark host palettes reach the notebook through inheritance', () => {
   for (const scheme of ['light', 'dark']) {
     const palette = fixture[scheme]
-    assert.equal(resolved(palette, '.dsh-bsb-ipynb-kernel-dot', 'background'), palette['--dsw-alias-state-idle-primary'])
+    assert.equal(resolved(palette, '.dsh-bsb-ipynb-kernel-dot', 'background'), palette['--dsw-alias-label-tertiary'])
     assert.equal(
       resolved(palette, '.dsh-bsb-ipynb-kernel-dot.is-ready', 'background'),
       palette['--dsw-alias-state-success-primary'],
@@ -182,7 +182,7 @@ test('every notebook colour follows a skin override', () => {
     const value = resolveVars(declarationOf(css, selector, property), { ...sentinels, ...LOCALS })
     assert.ok(value.includes(sentinels[token]), `${selector} { ${property} } must use ${token}, got ${value}`)
   }
-  expect('.dsh-bsb-ipynb-kernel-dot', 'background', '--dsw-alias-state-idle-primary')
+  expect('.dsh-bsb-ipynb-kernel-dot', 'background', '--dsw-alias-label-tertiary')
   expect('.dsh-bsb-ipynb-kernel-dot.is-ready', 'background', '--dsw-alias-state-success-primary')
   expect('.dsh-bsb-ipynb-kernel-dot.is-busy', 'background', '--dsw-alias-state-warn-primary')
   expect('.dsh-bsb-ipynb-save-state.is-error', 'color', '--dsw-alias-state-error-primary')
@@ -322,7 +322,7 @@ test('host palette contrast stays legible in both schemes', () => {
       assert.ok(contrastRatio(color(token), module) >= 3.0, `${scheme}: ${token} on a cell surface`)
     }
     for (const token of [
-      '--dsw-alias-state-idle-primary',
+      '--dsw-alias-label-tertiary',
       '--dsw-alias-state-success-primary',
       '--dsw-alias-state-warn-primary',
     ]) {

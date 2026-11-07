@@ -117,7 +117,7 @@ The notebook has no colour scheme of its own. `client.js` declares one token lay
 | Text, muted labels, borders, panel surface | `--dsw-alias-label-primary` / `--dsw-alias-label-secondary`, `--dsw-alias-border-l1`, `--dsw-alias-bg-layer-1` |
 | Cell/card surface, hover fill | `--dsw-alias-bg-module-platform`, `--dsw-alias-interactive-bg-hover` |
 | Code block / inline code surface | `--dsw-alias-markdown-code-block`, `--dsw-alias-markdown-inline-code` |
-| Kernel status (idle / ready / busy) | `--dsw-alias-state-idle-primary`, `--dsw-alias-state-success-primary`, `--dsw-alias-state-warn-primary` |
+| Kernel status (off / ready / busy) | `--dsw-alias-label-tertiary` (off), `--dsw-alias-state-success-primary`, `--dsw-alias-state-warn-primary` |
 | Save failure, stderr, tracebacks | `--dsw-alias-state-error-primary` |
 | Running-cell border, focus ring | `--dsw-alias-state-business-primary` (focus also honours `--dsw-focus-ring-color`) |
 | Banners | `color-mix()` of `--dsw-alias-state-business-primary` / `--dsw-alias-state-error-primary` at 12% |

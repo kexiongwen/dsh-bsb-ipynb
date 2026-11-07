@@ -2409,7 +2409,7 @@ window.__ModuleLoader__.load({
   --dsh-bsb-ipynb-link: var(--dsw-alias-link, #4c8dff);
   --dsh-bsb-ipynb-running: var(--dsw-alias-state-business-primary, #4c8dff);
   --dsh-bsb-ipynb-focus: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4c8dff));
-  --dsh-bsb-ipynb-idle: var(--dsw-alias-state-idle-primary, rgba(127, 127, 127, 0.55));
+  --dsh-bsb-ipynb-idle: var(--dsw-alias-label-tertiary, rgba(127, 127, 127, 0.55));
   --dsh-bsb-ipynb-ready: var(--dsw-alias-state-success-primary, #2ea043);
   --dsh-bsb-ipynb-busy: var(--dsw-alias-state-warn-primary, #d29922);
   --dsh-bsb-ipynb-error: var(--dsw-alias-state-error-primary, #cf222e);
