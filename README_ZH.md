@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/kexiongwen/dsh-bsb-ipynb"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-kexiongwen%2Fdsh--bsb--ipynb-181717?logo=github"></a>
+  <a href="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml"><img alt="CI" src="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <img alt="Node.js >= 20" src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white">
   <img alt="DSH >= 0.2.2-rc.1" src="https://img.shields.io/badge/DSH-%3E%3D0.2.2--rc.1-4C8DFF">
@@ -154,7 +155,7 @@ npm test          # 当前 292 个测试
 
 ## 🤝 贡献
 
-欢迎提交 issue 与 pull request。提交 PR 前请先运行 `npm test`；`client.js` 保持手写、无构建步骤，不引入打包器或新的运行时依赖。
+欢迎提交 issue 与 pull request。开发环境、测试与 PR 规范见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。`client.js` 保持手写、无构建步骤，不引入打包器或新的运行时依赖。
 
 ## 📄 许可
 

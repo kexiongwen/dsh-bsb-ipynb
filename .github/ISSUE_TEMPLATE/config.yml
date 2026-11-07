@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/kexiongwen/dsh-bsb-ipynb/security/advisories/new
+    about: Please report security issues privately, not as public issues.
+  - name: DSH Better Sidebar issues
+    url: https://github.com/dong-victor/dsh-better-sidebar/issues
+    about: Problems with the sidebar host itself belong upstream.

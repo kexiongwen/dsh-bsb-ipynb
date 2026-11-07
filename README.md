@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/kexiongwen/dsh-bsb-ipynb"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-kexiongwen%2Fdsh--bsb--ipynb-181717?logo=github"></a>
+  <a href="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml"><img alt="CI" src="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <img alt="Node.js >= 20" src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white">
   <img alt="DSH >= 0.2.2-rc.1" src="https://img.shields.io/badge/DSH-%3E%3D0.2.2--rc.1-4C8DFF">
@@ -154,7 +155,7 @@ See [CODE_REVIEW.md](CODE_REVIEW.md) for the review and known-issue log.
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. Please run `npm test` before opening a PR, and keep the client bundle hand-written and build-free (no bundler or new runtime dependencies).
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and PR guidelines, and report security issues privately as described in [SECURITY.md](SECURITY.md). Keep the client bundle hand-written and build-free (no bundler or new runtime dependencies).
 
 ## 📄 License
 
