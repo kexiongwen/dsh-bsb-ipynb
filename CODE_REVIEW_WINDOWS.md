@@ -295,6 +295,6 @@
 | **T-4** | ✅ 已补测试 | execute 预流错误矩阵：`code` 非字符串、`python` 非绝对路径、绝对但不存在（interpreter-unknown）、headers 之后 kernel-busy 以 fatal NDJSON 返回。 |
 | **T-7** | ✅ 已补测试 | 客户端/服务端限制常量 parity（`NOTEBOOK_CAP_BYTES`/`METADATA_DEPTH_LIMIT`/`METADATA_NODE_LIMIT`），以及 read 路径 metadata 越限返回 `invalid` 的用例。 |
 
-**验证**：全量 `npm test` = **313 tests / 269 pass / 0 fail / 44 skip / 44.5s**（新增 7 个测试，另有 2 个断言并入既有用例）；`node --check`、`py_compile`、`git diff --check` 通过。
+**验证**：全量 `npm test` = **314 tests / 270 pass / 0 fail / 44 skip**（新增 8 个测试，另有 2 个断言并入既有用例）；三平台 CI：ubuntu 283 pass、windows 312 pass、macOS 311 pass，均 0 fail；`node --check`、`py_compile`、`git diff --check` 通过。
 
 **仍未做（后续批次）**：W-B1（M-6 TOCTOU）、W-B5/W-B6/W-B7（硬链接/junction 边界）、W-C2/W-C3/W-C5/W-C6/W-C7（客户端 polish）、L-16（HTML 输出图片）、L-21/快捷键、L-15（banner i18n）、M-1/M-2 等 macOS 审查遗留设计项。
