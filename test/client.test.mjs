@@ -90,6 +90,16 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
     /--dsw-(border-default|text-muted|accent-default|surface-default)/,
     'legacy --dsw-* tokens are outside the current theme contract',
   )
+  assert.match(
+    styles[0].textContent,
+    /body\[data-ds-dark-theme\] \.dsh-bsb-ipynb-root \.dsh-bsb-ipynb-tok-string/,
+    'dark syntax colors must follow the explicit host theme',
+  )
+  assert.doesNotMatch(
+    styles[0].textContent,
+    /@media \(prefers-color-scheme: dark\)/,
+    'the OS color scheme must not override an explicit host theme',
+  )
 })
 
 test('registers the en/zh dictionaries and follows the host locale preference', async () => {
@@ -308,6 +318,26 @@ test('markdown renders common constructs and escapes raw HTML', async () => {
   assert.match(html, /&lt;script&gt;/)
   assert.match(html, /class="dsh-bsb-ipynb-md-code"/)
   assert.match(html, /&lt;x&gt;/)
+})
+
+test('markdown escapes code, URLs and image attributes exactly once', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown, renderMarkdownWithImages } = exports.__test
+  assert.equal(
+    renderMarkdown('`a&b <x>`'),
+    '<p><code>a&amp;b &lt;x&gt;</code></p>',
+  )
+  const links = renderMarkdown('[query](https://example.test/?a=1&b=2)\n\nhttps://example.test/?a=1&b=2')
+  assert.equal(links.includes('a=1&amp;b=2'), true)
+  assert.equal(links.includes('&amp;amp;'), false)
+  assert.equal(
+    renderMarkdown('![a&b](img/a&b.png)'),
+    '<p><img src="img/a&amp;b.png" alt="a&amp;b" loading="lazy"></p>',
+  )
+  assert.equal(
+    renderMarkdownWithImages('![a&b](img/a&b.png)', (source) => '/sidebar/file?src=' + encodeURIComponent(source)),
+    '<p><img src="/sidebar/file?src=img%2Fa%26b.png" alt="a&amp;b" loading="lazy"></p>',
+  )
 })
 
 test('markdown refuses javascript links and keeps relative images', async () => {

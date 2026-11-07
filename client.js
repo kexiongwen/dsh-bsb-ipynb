@@ -134,9 +134,14 @@ window.__ModuleLoader__.load({
     let t = browserT
 
     const ESCAPE = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+    const UNESCAPE = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" }
 
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>"']/g, (char) => ESCAPE[char])
+    }
+
+    function decodeEscapedHtml(value) {
+      return String(value ?? '').replace(/&(amp|lt|gt|quot|#39);/g, (entity) => UNESCAPE[entity])
     }
 
     function sanitizeUrl(value, options) {
@@ -250,15 +255,17 @@ window.__ModuleLoader__.load({
         codes.push(code)
         return '\u0000CODE' + (codes.length - 1) + '\u0000'
       })
+      // Captured text and attribute values are already escaped. Re-escaping
+      // them here would turn entities such as &amp; into visible text.
       text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, src) => {
         const url = sanitizeUrl(src, { image: true })
         if (!url) return alt
-        return '<img src="' + escapeHtml(url) + '" alt="' + escapeHtml(alt) + '" loading="lazy">'
+        return '<img src="' + url + '" alt="' + alt + '" loading="lazy">'
       })
       text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
         const url = sanitizeUrl(href)
         if (!url) return label
-        return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noreferrer noopener">' + label + '</a>'
+        return '<a href="' + url + '" target="_blank" rel="noreferrer noopener">' + label + '</a>'
       })
       text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>')
@@ -266,9 +273,9 @@ window.__ModuleLoader__.load({
       text = text.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
       text = text.replace(/(^|[^_])_([^_\s][^_]*)_/g, '$1<em>$2</em>')
       text = text.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (match, prefix, url) => {
-        return prefix + '<a href="' + escapeHtml(url) + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(url) + '</a>'
+        return prefix + '<a href="' + url + '" target="_blank" rel="noreferrer noopener">' + url + '</a>'
       })
-      text = text.replace(/\u0000CODE(\d+)\u0000/g, (match, index) => '<code>' + escapeHtml(codes[Number(index)]) + '</code>')
+      text = text.replace(/\u0000CODE(\d+)\u0000/g, (match, index) => '<code>' + codes[Number(index)] + '</code>')
       return text
     }
 
@@ -397,7 +404,9 @@ window.__ModuleLoader__.load({
       let html = renderMarkdown(source)
       if (typeof resolveImage !== 'function') return html
       return html.replace(/<img src="([^"]*)" alt="([^"]*)" loading="lazy">/g, (match, src, alt) => {
-        const resolved = resolveImage(src)
+        // The resolver needs the original URL; only its final URL is escaped
+        // when it is inserted back into an HTML attribute.
+        const resolved = resolveImage(decodeEscapedHtml(src))
         if (!resolved) return '<span class="dsh-bsb-ipynb-missing-image">' + alt + '</span>'
         return '<img src="' + escapeHtml(resolved) + '" alt="' + alt + '" loading="lazy">'
       })
@@ -2355,17 +2364,15 @@ window.__ModuleLoader__.load({
 .dsh-bsb-ipynb-tok-number { color: #0550ae; }
 .dsh-bsb-ipynb-tok-builtin { color: #8250df; }
 .dsh-bsb-ipynb-tok-class { color: #953800; }
-@media (prefers-color-scheme: dark) {
-  .dsh-bsb-ipynb-tok-keyword { color: #ff7b72; }
-  .dsh-bsb-ipynb-tok-string { color: #a5d6ff; }
-  .dsh-bsb-ipynb-tok-comment { color: #8b949e; }
-  .dsh-bsb-ipynb-tok-number { color: #79c0ff; }
-  .dsh-bsb-ipynb-tok-builtin { color: #d2a8ff; }
-  .dsh-bsb-ipynb-tok-class { color: #ffa657; }
-  .dsh-bsb-ipynb-stream-stderr,
-  .dsh-bsb-ipynb-error { color: #ff7b72; }
-  .dsh-bsb-ipynb-save-state.is-error { color: #ff7b72; }
-}
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-tok-keyword { color: #ff7b72; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-tok-string { color: #a5d6ff; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-tok-comment { color: #8b949e; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-tok-number { color: #79c0ff; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-tok-builtin { color: #d2a8ff; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-tok-class { color: #ffa657; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-stream-stderr,
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-error { color: #ff7b72; }
+body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-save-state.is-error { color: #ff7b72; }
 `
 
     /** The optional DSH locale face; a composition without it keeps the browser fallback. */

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
-import { readFile, writeFile, readdir, truncate } from 'node:fs/promises'
+import { chmod, readFile, writeFile, readdir, stat, truncate } from 'node:fs/promises'
 import path from 'node:path'
 import {
   METADATA_DEPTH_LIMIT,
@@ -165,6 +165,24 @@ test('saveNotebookFile writes atomically and changes the version', async (t) => 
   assert.deepEqual(onDisk.cells[0].source, ['print("saved")'])
   const entries = await readdir(dir)
   assert.deepEqual(entries, ['demo.ipynb'])
+})
+
+test('save preserves the original permission bits despite umask', {
+  skip: process.platform === 'win32' && 'POSIX permission bits are not portable to Windows',
+}, async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()), { mode: 0o664 })
+  await chmod(file, 0o664)
+  const read = await readNotebookFile(file)
+  read.notebook.cells[0].source = 'print("permissions")'
+  const previousUmask = process.umask(0o022)
+  try {
+    await saveNotebookFile(file, read.notebook, read.version)
+  } finally {
+    process.umask(previousUmask)
+  }
+  assert.equal((await stat(file)).mode & 0o777, 0o664)
 })
 
 test('concurrent saves with the same baseVersion conflict instead of overwriting', async (t) => {
