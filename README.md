@@ -162,7 +162,7 @@ npm test          # 317 tests at the time of writing
 
 Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe.
 
-See [CODE_REVIEW.md](CODE_REVIEW.md) for the macOS review and [CODE_REVIEW_WINDOWS.md](CODE_REVIEW_WINDOWS.md) for the Windows review.
+See [CODE_REVIEW.md](CODE_REVIEW.md) for the combined macOS + Windows review and known-issue log.
 
 ## 🤝 Contributing
 
