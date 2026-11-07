@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { execFile, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,21 +24,35 @@ test('discovery preserves two venvs that share one base Python', {
   const environments = [path.join(root, 'venv-a'), path.join(root, 'venv-b')]
   const home = path.join(root, 'home')
   await mkdir(home)
-  const variableNames = ['PATH', 'HOME', 'DSH_IPYNB_PYTHON', 'DSH_PRIMARY_RUNTIME', 'DSH_HOME']
+  const variableNames = ['PATH', 'HOME', 'USERPROFILE', 'DSH_IPYNB_PYTHON', 'DSH_PRIMARY_RUNTIME', 'DSH_HOME']
   const originalEnvironment = Object.fromEntries(variableNames.map((name) => [name, process.env[name]]))
   try {
     const baseReal = await realpath(basePython)
+    // A Windows venv keeps its interpreter under Scripts/ and copies the base
+    // executable instead of symlinking it; POSIX venvs keep bin/python3.
+    const venvBin = process.platform === 'win32' ? 'Scripts' : 'bin'
+    const venvInterpreter = process.platform === 'win32' ? 'python.exe' : 'python3'
     for (const environment of environments) {
       const result = spawnSync(basePython, ['-m', 'venv', '--system-site-packages', environment], {
         encoding: 'utf8',
         timeout: 30_000,
       })
       assert.equal(result.status, 0, result.stderr || String(result.error || 'venv creation failed'))
-      assert.equal(await realpath(path.join(environment, 'bin', 'python3')), baseReal)
+      const interpreter = path.join(environment, venvBin, venvInterpreter)
+      if (process.platform === 'win32') {
+        // The copied interpreter is a different file, so realpath identity does
+        // not apply; the sys.prefix assertion after discovery proves it.
+        assert.ok((await stat(interpreter)).isFile(), `missing venv interpreter ${interpreter}`)
+      } else {
+        assert.equal(await realpath(interpreter), baseReal)
+      }
     }
 
     process.env.HOME = home
-    process.env.PATH = environments.map((environment) => path.join(environment, 'bin')).join(path.delimiter)
+    // os.homedir() uses USERPROFILE on Windows; pin it too so a developer's
+    // real ~/.conda/environments.txt cannot leak into the discovery result.
+    if (process.platform === 'win32') process.env.USERPROFILE = home
+    process.env.PATH = environments.map((environment) => path.join(environment, venvBin)).join(path.delimiter)
     delete process.env.DSH_IPYNB_PYTHON
     delete process.env.DSH_PRIMARY_RUNTIME
     delete process.env.DSH_HOME
@@ -46,7 +60,7 @@ test('discovery preserves two venvs that share one base Python', {
 
     const discovered = await discoverInterpreters({ fresh: true })
     for (const environment of environments) {
-      const interpreterPath = path.join(environment, 'bin', 'python3')
+      const interpreterPath = path.join(environment, venvBin, venvInterpreter)
       const entry = discovered.interpreters.find((candidate) => candidate.path === interpreterPath)
       assert.ok(entry, `missing independent interpreter entry for ${environment}`)
       assert.equal(entry.ok, true, entry.detail)

@@ -38,13 +38,65 @@ jobs:
           python -m pip install jupyter_client ipykernel nbformat
           echo "DSH_IPYNB_TEST_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
 
+      # `node --check` only checks its first argument, so check each file
+      # explicitly instead of relying on a glob to hide the rest.
       - name: Static checks
         run: |
-          node --check index.js lib/*.js client.js
+          for file in index.js lib/*.js client.js; do node --check "$file"; done
           python -m py_compile python/bridge.py
 
       # Real-kernel tests run because the Python dependencies are installed.
-      # The ~28 case-insensitivity tests skip on Linux (case-sensitive ext4).
+      # Symlink-only regressions probe the filesystem capability and skip when
+      # it is unavailable (Linux normally skips them).
+      - name: Run tests
+        run: npm test
+
+      - name: Check package contents
+        run: npm pack --dry-run
+
+  test-windows:
+    # Advisory while the Windows test infrastructure is validated on the runner
+    # (symlink privileges, POSIX-assumption cleanups). Remove
+    # `continue-on-error` once a Windows run has been green for a while.
+    runs-on: windows-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install kernel dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install jupyter_client ipykernel nbformat
+          # Both variables matter: test/python-helper.mjs reads
+          # DSH_IPYNB_TEST_PYTHON, while lib/env.js (the plugin side, which the
+          # route and real-kernel tests exercise) reads DSH_IPYNB_PYTHON.
+          echo "DSH_IPYNB_TEST_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "DSH_IPYNB_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
+      - name: Static checks
+        run: |
+          for file in index.js lib/*.js client.js; do node --check "$file"; done
+          python -m py_compile python/bridge.py
+
+      - name: Verify interpreter discovery is not silently empty
+        run: |
+          node --input-type=module -e "const { discoverInterpreters } = await import('./lib/env.js'); const result = await discoverInterpreters({ fresh: true }); if (!result.default) { console.error(JSON.stringify(result, null, 2)); process.exit(1) } console.log('default:', result.default, '| entries:', result.interpreters.length)"
+
       - name: Run tests
         run: npm test
 

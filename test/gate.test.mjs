@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
 import { mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { tempDir } from './python-helper.mjs'
+import { canCreateSymlinks, tempDir } from './python-helper.mjs'
 import {
   assertNotebookPath,
   isInside,
@@ -11,6 +11,14 @@ import {
   resolveTarget,
   resolveWorkspace,
 } from '../lib/gate.js'
+
+// Windows without Developer Mode/elevation cannot create symlinks. Keep the
+// lexical path cases running and skip only the ones that need a real symlink.
+const symlinkSkip = (await canCreateSymlinks())
+  ? false
+  : 'requires symlink privileges (on Windows: enable Developer Mode or run as administrator)'
+const symlinkTest = (name, fn) => nodeTest(name, { skip: symlinkSkip }, fn)
+const test = nodeTest
 
 async function workspace(t) {
   const root = await tempDir(t, 'dsh-bsb-ipynb-gate-')
@@ -83,7 +91,7 @@ test('resolveTarget rejects traversal and outside absolute paths', async (t) => 
   await assert.rejects(resolveTarget(cwd, path.join(root, 'outside.ipynb')), (error) => error.code === 'path-outside-root')
 })
 
-test('resolveTarget rejects symlink escapes', async (t) => {
+symlinkTest('resolveTarget rejects symlink escapes', async (t) => {
   const { root, dir } = await workspace(t)
   await writeFile(path.join(root, 'secret.ipynb'), '{}')
   await symlink(root, path.join(dir, 'escape'))
@@ -103,7 +111,7 @@ test('assertNotebookPath enforces the extension', async () => {
   assert.throws(() => assertNotebookPath('/tmp/a.txt'), (error) => error.code === 'not-notebook')
 })
 
-test('resolveControlTarget accepts a deleted notebook inside the workspace', async (t) => {
+symlinkTest('resolveControlTarget accepts a deleted notebook inside the workspace', async (t) => {
   const { root, dir } = await workspace(t)
   const cwd = await resolveWorkspace(ctxFor(dir), 's1')
   assert.equal(await resolveControlTarget(ctxFor(dir), 's1', 'a.ipynb'), path.join(cwd, 'a.ipynb'))
@@ -139,7 +147,7 @@ test('resolveControlTarget accepts a deleted notebook inside the workspace', asy
   )
 })
 
-test('control paths retain the canonical target of dangling file and directory symlinks', async (t) => {
+symlinkTest('control paths retain the canonical target of dangling file and directory symlinks', async (t) => {
   const { root, dir } = await workspace(t)
   const cwd = await realpath(dir)
   await mkdir(path.join(dir, 'notebooks'))
@@ -163,7 +171,7 @@ test('control paths retain the canonical target of dangling file and directory s
   }
 })
 
-test('dangling symlink targets are still checked against the workspace and notebook extension', async (t) => {
+symlinkTest('dangling symlink targets are still checked against the workspace and notebook extension', async (t) => {
   const { root, dir } = await workspace(t)
   await symlink('../missing.ipynb', path.join(dir, 'escape.ipynb'))
   await symlink(path.join(root, 'missing-directory'), path.join(dir, 'escape-directory'))
@@ -176,7 +184,7 @@ test('dangling symlink targets are still checked against the workspace and noteb
     (error) => error.code === 'not-notebook' && error.status === 400)
 })
 
-test('missing-target resolution expands symlinks before parent components', async (t) => {
+symlinkTest('missing-target resolution expands symlinks before parent components', async (t) => {
   const { root, dir } = await workspace(t)
   const outside = path.join(root, 'outside', 'nested')
   await mkdir(outside, { recursive: true })
@@ -192,7 +200,7 @@ test('missing-target resolution expands symlinks before parent components', asyn
     path.join(await realpath(dir), 'inside', 'missing.ipynb'))
 })
 
-test('control paths reject symlink cycles and non-directory ancestors', async (t) => {
+symlinkTest('control paths reject symlink cycles and non-directory ancestors', async (t) => {
   const { root, dir } = await workspace(t)
   await symlink('two.ipynb', path.join(dir, 'one.ipynb'))
   await symlink('one.ipynb', path.join(dir, 'two.ipynb'))
@@ -207,7 +215,7 @@ test('control paths reject symlink cycles and non-directory ancestors', async (t
   }
 })
 
-test('missing-target resolution still rejects an existing directory named as a notebook', async (t) => {
+symlinkTest('missing-target resolution still rejects an existing directory named as a notebook', async (t) => {
   const { root, dir } = await workspace(t)
   await mkdir(path.join(dir, 'folder.ipynb'))
   await symlink('missing/../folder.ipynb', path.join(dir, 'alias.ipynb'))

@@ -7,7 +7,16 @@ import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
+import { canCreateSymlinks } from './python-helper.mjs'
+
+// Every regression in this file builds real file/directory symlinks. Windows
+// refuses symlink() for users without Developer Mode/elevation, so probe the
+// capability once and skip the cases instead of failing every setup().
+const symlinkSkip = (await canCreateSymlinks())
+  ? false
+  : 'requires symlink privileges (on Windows: enable Developer Mode or run as administrator)'
+const test = (name, fn) => nodeTest(name, { skip: symlinkSkip }, fn)
 
 // Keep real routing, filesystem resolution, and interpreter selection, while
 // avoiding a Python/Jupyter requirement for these path-identity regressions.

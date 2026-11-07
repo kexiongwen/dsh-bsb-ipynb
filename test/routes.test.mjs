@@ -211,12 +211,15 @@ test('JSON Content-Type accepts parameters but rejects look-alike media types', 
 })
 
 test('read rejects paths outside the session workspace', async (t) => {
-  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
-  const ctx = makeCtx({ cwd: dir })
+  const root = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  const dir = path.join(root, 'session')
+  await mkdir(dir)
+  const outside = path.join(root, 'outside.ipynb')
+  await writeFile(outside, JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [] }))
   const { state, json } = await invoke(
-    ctx,
+    makeCtx({ cwd: dir }),
     makeKernels(),
-    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: '/etc/hosts' } }),
+    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: outside } }),
   )
   assert.equal(state.status, 403)
   assert.equal(json.error.code, 'path-outside-root')
@@ -312,7 +315,7 @@ test('save rejects malformed client notebooks without modifying the file', async
   assert.deepEqual(await readdir(dir), ['demo.ipynb'])
 })
 
-test('save distinguishes bad requests and inaccessible paths from write conflicts', { skip: process.getuid?.() === 0 }, async () => {
+test('save distinguishes bad requests and inaccessible paths from write conflicts', { skip: (process.platform === 'win32' && 'POSIX permission bits are not portable to Windows') || process.getuid?.() === 0 }, async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-routes-'))
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
   const ctx = makeCtx({ cwd: dir })

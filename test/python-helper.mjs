@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -22,4 +22,20 @@ export async function tempDir(t, prefix = 'dsh-bsb-ipynb-test-') {
   const dir = await mkdtemp(path.join(os.tmpdir(), prefix))
   t.after(() => rm(dir, { recursive: true, force: true }))
   return dir
+}
+
+// Windows only grants SeCreateSymbolicLinkPrivilege to elevated users or with
+// Developer Mode enabled. Symlink-based regressions probe the capability
+// instead of guessing from the platform/filesystem and then failing in setup.
+export async function canCreateSymlinks() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-symlink-'))
+  try {
+    await writeFile(path.join(dir, 'target'), '')
+    await symlink('target', path.join(dir, 'link'), 'file')
+    return true
+  } catch {
+    return false
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 }

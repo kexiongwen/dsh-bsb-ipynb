@@ -2,6 +2,15 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+// Pin the browser fallback locale: Node exposes a global navigator whose
+// language follows the host region (e.g. zh-CN on a Chinese Windows install),
+// which would otherwise make the English assertions below depend on the OS.
+Object.defineProperty(globalThis, 'navigator', {
+  value: { language: 'en-US', languages: ['en-US'] },
+  configurable: true,
+  writable: true,
+})
+
 const clientPath = fileURLToPath(new URL('../client.js', import.meta.url))
 let loadCount = 0
 
