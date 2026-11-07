@@ -413,10 +413,20 @@ class IOPubTests(unittest.TestCase):
             entered_idle.set()
             return original_wait(timeout)
 
+        def pending_lock_held():
+            lock = self.bridge.pending_lock
+            # RLock.locked() only exists on Python 3.14+; older versions expose
+            # the current-thread ownership check as the private _is_owned().
+            locked = getattr(lock, "locked", None)
+            if callable(locked):
+                return locked()
+            is_owned = getattr(lock, "_is_owned", None)
+            return is_owned() if callable(is_owned) else True
+
         def staged_stop():
             # If death wakes idle before publishing cancellation under the
             # routing lock, let that waiter take the next scheduling turn.
-            if not self.bridge.pending_lock.locked():
+            if not pending_lock_held():
                 run.join(0.2)
             original_stop()
 
