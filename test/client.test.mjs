@@ -1248,3 +1248,61 @@ test('image data URIs require an image MIME type', async () => {
   assert.match(imageSource('abc', 'image/png'), /^data:image\/png;base64,abc$/)
   assert.match(imageSource('<svg></svg>', 'image/svg+xml'), /^data:image\/svg\+xml;base64,/)
 })
+
+test('sanitizeUrl keeps Windows local image paths for the local resolver', async () => {
+  const { exports } = await loadClient()
+  const { sanitizeUrl } = exports.__test
+  assert.equal(sanitizeUrl('C:\\pics\\a.png', { image: true }), 'C:\\pics\\a.png')
+  assert.equal(sanitizeUrl('C:/pics/a.png', { image: true }), 'C:/pics/a.png')
+  assert.equal(sanitizeUrl('\\\\server\\share\\a.png', { image: true }), '\\\\server\\share\\a.png')
+  assert.equal(sanitizeUrl('C:\\pics\\a.png'), null, 'local paths are not valid link destinations')
+  assert.equal(sanitizeUrl('javascript:alert(1)', { image: true }), null)
+  assert.equal(sanitizeUrl('file:///C:/pics/a.png', { image: true }), null)
+})
+
+test('makeImageResolver resolves images next to a Windows absolute notebook path', async () => {
+  const { exports } = await loadClient()
+  const { makeImageResolver } = exports.__test
+  const ctx = { betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route } }
+  const scope = { sessionId: 's1', cwd: 'C:\\Users\\me\\notes' }
+  const filePath = (resolved) => new URL(resolved).searchParams.get('path')
+  const resolve = makeImageResolver(ctx, scope, 'C:\\Users\\me\\notes\\nb\\demo.ipynb', { attachments: {} })
+  assert.equal(filePath(resolve('images/plot.png')), 'C:/Users/me/notes/nb/images/plot.png')
+  assert.equal(new URL(resolve('images/plot.png')).searchParams.get('sessionId'), 's1')
+  assert.equal(filePath(resolve('C:\\pics\\a.png')), 'C:/pics/a.png')
+
+  // POSIX absolute and session-relative notebook paths keep their old behavior.
+  const posix = makeImageResolver(ctx, scope, '/Users/me/notes/demo.ipynb', {})
+  assert.equal(filePath(posix('img/a.png')), '/Users/me/notes/img/a.png')
+  const relative = makeImageResolver(ctx, scope, 'examples/demo.ipynb', {})
+  assert.equal(filePath(relative('img/a.png')), 'C:/Users/me/notes/examples/img/a.png')
+
+  // Remote/data/attachment sources are unchanged.
+  assert.equal(resolve('https://example.com/a.png'), 'https://example.com/a.png')
+  assert.equal(resolve('data:image/png;base64,aaaa'), 'data:image/png;base64,aaaa')
+  assert.equal(resolve('attachment:missing.png'), null)
+})
+
+test('cell shortcuts ignore IME composition and accept CapsLock Ctrl+S', async () => {
+  const { exports } = await loadClient()
+  const { isImeKeyEvent, isSaveShortcut } = exports.__test
+  assert.equal(isSaveShortcut({ key: 's', ctrlKey: true }), true)
+  assert.equal(isSaveShortcut({ key: 'S', ctrlKey: true }), true, 'CapsLock reports an uppercase key')
+  assert.equal(isSaveShortcut({ key: 'S', metaKey: true }), true)
+  assert.equal(isSaveShortcut({ code: 'KeyS', key: 'Unidentified', ctrlKey: true }), true)
+  assert.equal(isSaveShortcut({ key: 'S', ctrlKey: false }), false)
+  assert.equal(isSaveShortcut({ key: 'S', ctrlKey: true, isComposing: true }), false)
+  assert.equal(isSaveShortcut({ key: 'S', ctrlKey: true, keyCode: 229 }), false)
+  assert.equal(isImeKeyEvent({ isComposing: true }), true)
+  assert.equal(isImeKeyEvent({ keyCode: 229 }), true)
+  assert.equal(isImeKeyEvent({ nativeEvent: { isComposing: true } }), true)
+  assert.equal(isImeKeyEvent({}), false)
+})
+
+test('blocked saves back off instead of retrying every autosave tick', async () => {
+  const { exports } = await loadClient()
+  const { blockedAutosaveDelay } = exports.__test
+  assert.equal(blockedAutosaveDelay(1500), 6000)
+  assert.equal(blockedAutosaveDelay(6000), 24000)
+  assert.equal(blockedAutosaveDelay(24000), 30000, 'the delay is capped at 30 s')
+})

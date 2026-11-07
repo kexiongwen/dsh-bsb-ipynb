@@ -94,6 +94,7 @@ dsh-bsb-ipynb/
 ## 🛡️ 可靠性
 
 - **保存串行化** — 同一 notebook 的并发保存按序执行，仅第一个成功，其余返回 `write-conflict`（409）。
+- **保存被阻止** — 目标为只读，或正被其它程序占用（Windows 上常见）时返回 `write-blocked`（409）与可操作提示，而不是内部错误；autosave 最长退避 30 秒，响应中不再包含本地路径或临时文件名。
 - **安全写入** — 先在同一目录写临时文件，rename 前再次校验版本，再原子替换；可缩小外部写入竞态窗口（极端交错仍属已知竞态）。
 - **不会挂起** — 重启/关闭、内核崩溃或 `os._exit()` 都会让 NDJSON 流以失败终态结束。
 - **输出完整性** — 内核回复后仍等待对应 IOPub idle；超过 10 秒则报失败并提示输出可能不完整。
@@ -118,7 +119,7 @@ dsh-bsb-ipynb/
 
 除 `/health`、`/interpreters` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
 
-错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`not-notebook`、`too-large`、`write-conflict`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
+错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`not-notebook`、`too-large`、`write-conflict`、`write-blocked`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
 
 ## ⚠️ 已知限制
 

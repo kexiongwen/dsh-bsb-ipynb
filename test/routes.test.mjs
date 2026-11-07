@@ -590,3 +590,33 @@ test('save rejects a notebook that grew past the cap on disk', async (t) => {
   assert.equal(state.status, 413)
   assert.equal(json.error.code, 'too-large')
 })
+
+test('save reports a retryable write-blocked error for a read-only notebook', {
+  skip: process.platform !== 'win32' && 'Windows-only: the read-only attribute blocks the replacing rename',
+}, async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  await chmod(file, 0o444)
+  t.after(async () => {
+    try { await chmod(file, 0o666) } catch { /* already cleaned up */ }
+  })
+  const { state, json } = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: {
+        sessionId: 's1',
+        path: 'demo.ipynb',
+        notebook: emptyNotebook(),
+        baseVersion: sha256(Buffer.from(original, 'utf8')),
+      },
+    }),
+  )
+  assert.equal(state.status, 409)
+  assert.equal(json.error.code, 'write-blocked')
+  assert.deepEqual(json.error.details, { reason: 'readonly' })
+})

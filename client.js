@@ -47,6 +47,8 @@ window.__ModuleLoader__.load({
         conflict: 'The file changed on disk. Reload it before saving again.',
         saved: 'Saved',
         saveFailed: 'Save failed',
+        saveBlockedReadonly: 'The notebook file is read-only. Clear the read-only attribute and save again.',
+        saveBlockedLocked: 'The notebook file is in use by another program. Close it and save again.',
         capacityTooLarge: 'Notebook is {size} MiB; the save limit is 32 MiB. Clear outputs and save again.',
         metadataTooComplex: 'Notebook metadata is too complex to save. Reduce its nesting or number of entries.',
         clearCellOutputs: 'Clear outputs',
@@ -102,6 +104,8 @@ window.__ModuleLoader__.load({
         conflict: '文件已在磁盘上发生变化，请重新加载后再保存。',
         saved: '已保存',
         saveFailed: '保存失败',
+        saveBlockedReadonly: '文件为只读，请清除只读属性后再保存。',
+        saveBlockedLocked: '文件正被其它程序占用，请关闭后重试。',
         capacityTooLarge: 'notebook 内容约 {size} MiB，保存上限为 32 MiB。请清空输出后再保存。',
         metadataTooComplex: 'notebook 的 metadata 过于复杂，无法保存。请减少嵌套层级或条目数量。',
         clearCellOutputs: '清空输出',
@@ -144,12 +148,31 @@ window.__ModuleLoader__.load({
       return String(value ?? '').replace(/&(amp|lt|gt|quot|#39);/g, (entity) => UNESCAPE[entity])
     }
 
+    const WINDOWS_LOCAL_PATH = /^[A-Za-z]:[\\/]/
+    // A real UNC path starts with two backslashes. Two forward slashes are a
+    // protocol-relative URL and must keep the cross-origin image refusal.
+    const UNC_LOCAL_PATH = /^\\\\[^\\/]/
+
+    // Markdown/HTML destinations may be local files. On Windows those are
+    // drive-letter (C:\... / C:/...) or UNC (\\server\share) paths; they must
+    // reach the local image resolver instead of being rejected as unknown URL
+    // schemes.
+    function isAbsoluteLocalPath(value) {
+      if (typeof value !== 'string' || value === '') return false
+      return value.startsWith('/') || WINDOWS_LOCAL_PATH.test(value) || UNC_LOCAL_PATH.test(value)
+    }
+
     function sanitizeUrl(value, options) {
       if (typeof value !== 'string') return null
       // Browsers normalize ASCII control characters out of URLs, so remove them
       // before the allowlist check or `java\nscript:` becomes `javascript:`.
       const url = value.replace(/[\u0000-\u001F\u007F]/g, '').trim()
       if (!url) return null
+      if (WINDOWS_LOCAL_PATH.test(url) || UNC_LOCAL_PATH.test(url)) {
+        // Images are resolved to file URLs by makeImageResolver; links to local
+        // paths are not supported.
+        return options && options.image ? url : null
+      }
       if (/^(javascript|vbscript|file):/i.test(url)) return null
       if (url.startsWith('attachment:')) return url
       if (/^data:/i.test(url)) {
@@ -740,6 +763,29 @@ window.__ModuleLoader__.load({
       return clean
     }
 
+    // Chinese IMEs deliver composition keystrokes with keyCode 229 (React also
+    // exposes isComposing); they must never trigger cell shortcuts such as
+    // running a cell or leaving edit mode.
+    function isImeKeyEvent(event) {
+      if (!event) return false
+      return Boolean(event.isComposing || event.keyCode === 229 ||
+        (event.nativeEvent && event.nativeEvent.isComposing))
+    }
+
+    // Ctrl/Cmd+S regardless of CapsLock: with the lock on (or Shift held) the
+    // browser reports event.key === 'S', so match the physical key as well.
+    function isSaveShortcut(event) {
+      if (!event || isImeKeyEvent(event) || !(event.metaKey || event.ctrlKey)) return false
+      if (event.code === 'KeyS') return true
+      return typeof event.key === 'string' && event.key.toLowerCase() === 's'
+    }
+
+    // A blocked save (read-only or locked file) must not retry every autosave
+    // tick while the user keeps typing: back off up to 30 seconds.
+    function blockedAutosaveDelay(current) {
+      return Math.min(Math.max(current, AUTOSAVE_MS) * 4, 30_000)
+    }
+
     // Autosave must recover after a failed save once the user edits again,
     // but must not retry the same failing snapshot in a loop.
     function shouldScheduleAutosave(state) {
@@ -950,7 +996,7 @@ window.__ModuleLoader__.load({
     function makeImageResolver(ctx, scope, notebookPath, cell) {
       const attachments = (cell && cell.attachments) || {}
       let base = null
-      if (notebookPath && notebookPath.startsWith('/')) base = dirnamePosix(notebookPath)
+      if (notebookPath && isAbsoluteLocalPath(notebookPath)) base = dirnamePosix(notebookPath)
       else if (scope && scope.cwd) base = dirnamePosix(normalizePosix(String(scope.cwd).replace(/\/$/, '') + '/' + notebookPath))
       const fileUrl = (target) => {
         const params = new URLSearchParams()
@@ -978,7 +1024,7 @@ window.__ModuleLoader__.load({
         }
         if (/^data:image\//i.test(source)) return source
         if (/^https?:\/\//i.test(source)) return source
-        if (source.startsWith('/')) return fileUrl(normalizePosix(source))
+        if (isAbsoluteLocalPath(source)) return fileUrl(normalizePosix(source))
         if (!base) return null
         return fileUrl(normalizePosix(base + '/' + source))
       }
@@ -1216,6 +1262,7 @@ window.__ModuleLoader__.load({
         element.style.height = Math.max(48, element.scrollHeight) + 'px'
       }, [source, editing])
       const onKeyDown = (event) => {
+        if (isImeKeyEvent(event)) return
         if (event.key === 'Escape') {
           event.preventDefault()
           onDone()
@@ -1229,7 +1276,7 @@ window.__ModuleLoader__.load({
         } else if (event.key === 'Enter' && event.altKey) {
           event.preventDefault()
           onInsertBelow(cell.id)
-        } else if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
+        } else if (isSaveShortcut(event)) {
           event.preventDefault()
           onSave()
         } else if (event.key === 'Tab') {
@@ -1298,7 +1345,7 @@ window.__ModuleLoader__.load({
                 tabIndex: 0,
                 onClick: () => onEdit(cell.id),
                 onKeyDown: (event) => {
-                  if (event.key === 'Enter') onEdit(cell.id)
+                  if (!isImeKeyEvent(event) && event.key === 'Enter') onEdit(cell.id)
                 },
                 dangerouslySetInnerHTML: { __html: source ? highlightPython(source) : '<span class="dsh-bsb-ipynb-empty-source"> </span>' },
               })
@@ -1332,7 +1379,7 @@ window.__ModuleLoader__.load({
                   tabIndex: 0,
                   onClick: () => onEdit(cell.id),
                   onKeyDown: (event) => {
-                    if (event.key === 'Enter') onEdit(cell.id)
+                    if (!isImeKeyEvent(event) && event.key === 'Enter') onEdit(cell.id)
                   },
                 }, source),
         code && Array.isArray(cell.outputs) && cell.outputs.length
@@ -1438,6 +1485,7 @@ window.__ModuleLoader__.load({
       const [conflict, setConflict] = useState(null)
       const [banner, setBanner] = useState(null)
       const [autosaveBlocked, setAutosaveBlocked] = useState(false)
+      const [autosaveDelay, setAutosaveDelay] = useState(AUTOSAVE_MS)
       const [capacityBlocked, setCapacityBlocked] = useState(false)
       const [editingCell, setEditingCell] = useState(null)
       const [runningCell, setRunningCell] = useState(null)
@@ -1642,6 +1690,7 @@ window.__ModuleLoader__.load({
             setDirty(true)
           }
           setSaveState('saved')
+          setAutosaveDelay(AUTOSAVE_MS)
           setEmptyFile(false)
           setConflict(null)
           setBanner(null)
@@ -1656,6 +1705,16 @@ window.__ModuleLoader__.load({
           if (error && error.code === 'write-conflict') {
             setConflict((error.details && error.details.version) || 'conflict')
             setBanner({ kind: 'error', text: t('conflict'), action: 'reload' })
+          } else if (error && error.code === 'write-blocked') {
+            const readOnly = Boolean(error.details && error.details.reason === 'readonly')
+            setBanner({
+              kind: 'error',
+              reason: 'write-blocked',
+              text: t(readOnly ? 'saveBlockedReadonly' : 'saveBlockedLocked'),
+            })
+            // Retry with backoff instead of hitting the same filesystem error
+            // on every autosave tick.
+            setAutosaveDelay((current) => blockedAutosaveDelay(current))
           } else {
             setBanner({ kind: 'error', text: t('saveFailed') + (error && error.message ? ': ' + error.message : '') })
           }
@@ -1740,9 +1799,9 @@ window.__ModuleLoader__.load({
         if (!shouldScheduleAutosave({ loadStatus, dirty, conflict, autosaveBlocked, capacityBlocked, runningCell, saveState, notebookChangedSinceFailure: changedSinceFailure })) return undefined
         const timer = setTimeout(() => {
           void saveRef.current()
-        }, AUTOSAVE_MS)
+        }, autosaveDelay)
         return () => clearTimeout(timer)
-      }, [dirty, notebook, conflict, autosaveBlocked, capacityBlocked, saveState, loadStatus, runningCell])
+      }, [dirty, notebook, conflict, autosaveBlocked, capacityBlocked, saveState, loadStatus, runningCell, autosaveDelay])
 
       // Only committed output snapshots can trigger a notice. Replayed or
       // discarded React updaters must not leave a stale truncation flag.
@@ -2511,6 +2570,11 @@ body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-save-state.is-error 
       readNotebook,
       normalizePosix,
       dirnamePosix,
+      isAbsoluteLocalPath,
+      makeImageResolver,
+      isImeKeyEvent,
+      isSaveShortcut,
+      blockedAutosaveDelay,
       apply,
       NotebookView,
       CellView,

@@ -12,6 +12,7 @@ import {
   normalizeNotebook,
   parseNotebookBytes,
   readNotebookFile,
+  saveFailureReason,
   saveNotebookFile,
   serializeNotebook,
   sha256,
@@ -667,4 +668,36 @@ test('real nbformat validation accepts repaired serialized and saved MIME fixtur
   })
   assert.equal(result.status, 0, `${result.error?.message || ''}\n${result.stderr}`)
   assert.equal(Number(result.stdout.trim()), valid.length)
+})
+
+test('save failure reasons classify retryable filesystem errors', () => {
+  assert.equal(saveFailureReason({ code: 'EBUSY' }), 'locked')
+  assert.equal(saveFailureReason({ code: 'EPERM' }), 'blocked')
+  assert.equal(saveFailureReason({ code: 'EACCES' }), 'blocked')
+  assert.equal(saveFailureReason({ code: 'EROFS' }), 'blocked')
+  assert.equal(saveFailureReason({ code: 'ENOSPC' }), null)
+  assert.equal(saveFailureReason(new Error('boom')), null)
+  assert.equal(saveFailureReason(null), null)
+})
+
+test('a read-only notebook reports a retryable write-blocked error', {
+  skip: process.platform !== 'win32' && 'Windows-only: the read-only attribute blocks the replacing rename',
+}, async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, serializeNotebook(emptyNotebook()))
+  const read = await readNotebookFile(file)
+  await chmod(file, 0o444)
+  t.after(async () => {
+    try { await chmod(file, 0o666) } catch { /* already cleaned up */ }
+  })
+  await assert.rejects(saveNotebookFile(file, emptyNotebook(), read.version), (error) => {
+    assert.equal(error.code, 'write-blocked')
+    assert.equal(error.status, 409)
+    assert.deepEqual(error.details, { reason: 'readonly' })
+    // The response must not leak the absolute path or the temp file name.
+    assert.doesNotMatch(error.message, /\.tmp|C:\\/)
+    return true
+  })
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'], 'no temp file is left behind')
 })

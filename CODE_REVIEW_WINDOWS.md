@@ -175,7 +175,7 @@
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
 | **P0** | **W-A1**（+ W-A2、W-A10 一起） | 平台化解释器发现。这是 Windows 用户唯一「开箱即不可用」的问题；修好后路由/内核测试在 Windows 上会由 skip/503 转绿。**✅ 已修复（见 §9）**。 |
-| **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。 |
+| **P1** | W-D1（Windows CI + 防假 skip）、W-B2（只读/锁定保存错误语义）、W-B3（Windows 绝对路径图片）、W-C1（Ctrl+S CapsLock） | 影响可诊断性/数据工作流与 UI 正确性；改动小、收益直接。**W-D1 部分完成**（Windows CI 已加，advisory；防假 skip 断言已置于 CI 中）；**W-B2/W-B3/W-C1 已修复（见 §10）**；W-C5 IME 守卫也已一并修复。 |
 | **P2** | W-A3（连接文件清理）、W-A4（子进程树回收）、W-A5/W-A6（M-3/M-5）、W-B1（M-6 加固）、W-B4（EBUSY 映射）、W-C8（测试 locale）、W-D2（文档） | 资源泄漏/失败终止/安全加固/测试可信度；部分与 Mac 修复同批完成。 |
 | **P3** | W-A7～W-A10、W-B5～W-B9、W-C2～W-C7、W-D3～W-D5、全部 Nit | 低成本、可按批清理。 |
 
@@ -242,5 +242,20 @@
 **后续（本次未完成，建议按 §5 优先级推进）**
 
 - Windows CI 作业目前为 advisory（`continue-on-error: true`）：GitHub `windows-latest` 的 symlink 权限与 Windows 专属语义尚未在 runner 上实测，建议观察首次运行后再决定是否转 required；macOS 作业（唯一能跑满 42 个 symlink/大小写用例的 runner）仍未添加。
-- §5 的 P1/P2 项未改动：W-B2（只读/锁定目标保存错误语义）、W-B3（Windows 绝对路径 Markdown 图片）、W-C1（CapsLock Ctrl+S）、W-A3（连接文件泄漏）、W-A4（用户子进程孤儿）、W-B1（M-6 TOCTOU）等。
-- README / README_ZH 的 Windows Quick Start 与 Known Limitations 尚未更新（`python3` 命令、`Cmd+R` 等）。
+- §5 的 P2/P3 项仍未改动：W-A3（连接文件泄漏）、W-A4（用户子进程孤儿）、W-B1（M-6 TOCTOU）、W-A5/W-A6（M-3/M-5）等；其中 P1 的 W-B2/W-B3/W-C1 与 §3.3 的 W-C5 已在 §10 的第一批修复中完成。
+- README / README_ZH 的 Windows Quick Start 与 Known Limitations 尚未更新（`python3` 命令、`Cmd+R` 等）；本次只更新了错误码表与保存可靠性说明。
+
+## 10. 第一批修复（2026-11-07，后续）
+
+按 §5 的 P1「Windows 日常可见缺陷」完成第一批修复：
+
+| 项 | 状态 | 改动 |
+| --- | --- | --- |
+| **W-B2 / W-B9** | ✅ 已修复 | 新增 `write-blocked`（409）错误码：`lib/notebook.js` 把只读目标、被其它程序占用（EPERM/EACCES/EBUSY）和只读文件系统（EROFS）映射为可重试错误，`details.reason` 区分 `readonly` / `locked`；`fsp.stat`/`readFile`/`rename` 各失败路径统一映射，响应不再包含绝对路径、临时文件名或 PID（细节只进服务端日志）；Windows 跳过无意义的 chmod 权限位复制。`lib/json.js` 注册状态码，客户端新增中英文 banner，autosave 对 `write-blocked` 指数退避（1.5s→6s→24s→30s 封顶）；README / README_ZH 更新错误码表与「Blocked saves」说明。 |
+| **W-C1** | ✅ 已修复 | Ctrl/Cmd+S 改用物理键 `event.code === 'KeyS'` 判断（同时保留 `key.toLowerCase()==='s'` 兜底），CapsLock 开启或 `Ctrl+Shift+S` 时不再落到浏览器「保存网页」。 |
+| **W-C5** | ✅ 已修复 | `client.js` 的 `onKeyDown` 首行加 IME 守卫（`isComposing` / `keyCode === 229` / React `nativeEvent.isComposing`），三个编辑 textarea 与两个只读预览的 Enter 进入编辑共用；组合输入下 Esc / Ctrl+Enter / Shift+Enter / Alt+Enter / Ctrl+S 均不再误触发（宿主 guard 仅是额外防线，不再依赖）。 |
+| **W-B3 / W-C2** | ✅ 已修复 | 客户端新增 `isAbsoluteLocalPath`（POSIX `/`、Windows 盘符 `C:\`/`C:/`、真正的 UNC `\\server\share`）；`makeImageResolver` 用它判断 notebookPath 与图片源，Windows 绝对路径不再与 `scope.cwd` 重复拼接；`sanitizeUrl` 放行盘符/UNC 图片给本地 resolver（protocol-relative `//host` 图片仍按跨源图片拒绝）。HTML 输出图片（L-16）仍未接 resolver。 |
+
+**验证（Windows 实机）**：全量 `npm test` = **299 tests / 255 pass / 0 fail / 44 skip**（新增 7 个测试：`sanitizeUrl` Windows 路径、`makeImageResolver` Windows/POSIX/相对路径、IME + CapsLock Ctrl+S、autosave 退避纯函数、保存错误分类、Windows 只读保存的 notebook + route 集成用例）；`node --check` 全部通过；`git diff --check` 无空白错误。
+
+**未做（留待后续）**：§5 的 P2/P3（W-A3 连接文件泄漏、W-A4 子进程孤儿、W-A5/W-A6、W-B1 TOCTOU、W-PS-03 读取 EBUSY 映射等）、L-16 HTML 输出图片、W-D2 的 Windows Quick Start/Known Limitations、W-D3 `.gitattributes`；Windows CI 仍为 advisory。
