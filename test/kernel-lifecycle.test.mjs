@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { promises as fsp } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { test } from 'node:test'
 import { KernelManager } from '../lib/kernel.js'
@@ -535,6 +536,34 @@ for (const failure of ['kernel-died', 'startup-error']) {
     })
   }
 }
+
+test('each process exit unlinks only its own connection file', async (t) => {
+  const unlinked = []
+  t.mock.method(fsp, 'unlink', async (file) => {
+    unlinked.push(file)
+  })
+  const h = harness(t, { exitOnKill: false })
+  const first = await h.startReady()
+  const oldProc = first.proc
+  const oldConnectionFile = first.entry.connectionFile
+  oldProc.event({ type: 'kernel_died', message: 'first kernel died' })
+  const replacement = h.start()
+  const replacementConnectionFile = replacement.entry.connectionFile
+  assert.notEqual(replacementConnectionFile, oldConnectionFile)
+  replacement.proc.event({ type: 'ready' })
+  await replacement.started
+
+  oldProc.exit(7)
+  await flush()
+  assert.deepEqual(unlinked, [oldConnectionFile])
+  assert.equal(replacement.entry.connectionFile, replacementConnectionFile)
+  assert.equal(replacement.entry.proc, replacement.proc)
+
+  replacement.proc.exit(9)
+  await flush()
+  assert.deepEqual(unlinked, [oldConnectionFile, replacementConnectionFile])
+  assert.equal(replacement.entry.connectionFile, null)
+})
 
 const staleProcessEvents = {
   'stdin error': (proc) => proc.stdin.emit('error', new Error('stale EPIPE')),

@@ -243,6 +243,13 @@ function mountNotebook(t, options = {}) {
   const api = {
     flush, settle, component, components, find,
     timersFor: (delay) => [...timers.values()].filter((timer) => timer.delay === delay),
+    fireTimer(delay) {
+      const entry = [...timers.entries()].find(([, timer]) => timer.delay === delay)
+      assert.ok(entry, 'timer is armed for ' + delay + 'ms')
+      timers.delete(entry[0])
+      entry[1].callback()
+      flush()
+    },
     get toolbar() { return component('Toolbar').props },
     get cell() { return component('CellView').props },
     get banner() { return component('Banner').props.banner },
@@ -422,6 +429,83 @@ for (const outcome of ['conflict', 'failure', 'success']) {
     await app.settle()
   })
 }
+
+test('a save completion preserves a kernel death reported while it was in flight', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit()
+  const save = app.save()
+  const execution = app.run()
+  const stream = executionStream()
+  execution.resolve(stream.response)
+  await app.settle()
+  stream.emit({ type: 'kernel_died', message: 'kernel crashed' })
+  await app.settle()
+  assert.equal(app.banner?.kind, 'error')
+  assert.equal(app.banner.text, 'kernel crashed')
+
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
+  assert.equal(app.toolbar.saveState, 'saved')
+  assert.equal(app.banner?.text, 'kernel crashed', 'the older save must not erase the newer kernel error')
+  stream.end()
+  await app.settle()
+  assert.equal(app.banner?.text, 'kernel crashed')
+})
+
+test('write-blocked saves retry unchanged snapshots with backoff and stop after success', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit()
+  let request = app.save()
+  const originalSnapshot = JSON.stringify(request.body.notebook)
+  for (const [index, delay] of [6000, 24000, 30000].entries()) {
+    request.resolve(response({ ok: false, error: { code: 'write-blocked', message: 'locked', details: { reason: 'locked' } } }, 409))
+    await app.settle()
+    assert.equal(app.toolbar.dirty, true)
+    assert.equal(app.banner?.reason, 'write-blocked')
+    assert.equal(app.timersFor(delay).length, 1, 'the unchanged snapshot retries after ' + delay + 'ms')
+    app.fireTimer(delay)
+    await app.settle()
+    request = app.requests('save').at(-1)
+    assert.equal(app.requests('save').length, index + 2)
+    assert.equal(JSON.stringify(request.body.notebook), originalSnapshot)
+  }
+
+  request.resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, false)
+  assert.equal(app.banner, null, 'success clears the write-blocked banner')
+  for (const delay of [1500, 6000, 24000, 30000]) {
+    assert.equal(app.timersFor(delay).length, 0, 'a clean notebook leaves no retry armed')
+  }
+})
+
+test('ordinary save failures wait for an edit and clear their banner after the next success', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit()
+  const failed = app.save()
+  failed.resolve(response({ ok: false, error: { message: 'disk error' } }, 500))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, true)
+  assert.equal(app.toolbar.saveState, 'failed')
+  assert.equal(app.banner?.reason, 'save-failed')
+  for (const delay of [1500, 6000, 24000, 30000]) {
+    assert.equal(app.timersFor(delay).length, 0, 'an unchanged ordinary failure must not retry')
+  }
+
+  app.edit('print("retry")')
+  assert.equal(app.timersFor(1500).length, 1, 'a new edit re-arms normal autosave')
+  app.fireTimer(1500)
+  await app.settle()
+  const retry = app.requests('save').at(-1)
+  assert.equal(app.requests('save').length, 2)
+  retry.resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, false)
+  assert.equal(app.banner, null, 'success clears the old generic save failure')
+})
 
 test('successful execution remains editable and its completed outputs can be saved', async (t) => {
   const app = mountNotebook(t)
@@ -922,6 +1006,7 @@ test('the empty-file hint disappears once the notebook is saved', async (t) => {
   app.reload({ ...notebookData(), emptyFile: true })
   await app.settle()
   assert.ok(app.find((value) => value.props?.className === 'dsh-bsb-ipynb-hint'), 'empty-file hint is visible')
+  assert.equal(app.banner?.reason, 'empty-file')
   app.edit('print("saved")')
   const request = app.save()
   assert.ok(request)
@@ -929,6 +1014,26 @@ test('the empty-file hint disappears once the notebook is saved', async (t) => {
   await app.settle()
   assert.equal(app.find((value) => value.props?.className === 'dsh-bsb-ipynb-hint'), null,
     'a successful save clears the empty-file hint')
+  assert.equal(app.banner, null, 'a successful save clears the empty-file banner')
+  assert.equal(app.toolbar.dirty, false)
+})
+
+test('the open-as-empty hint also clears after a successful save', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
+  await app.settle()
+  const open = app.find((value) => value.props?.title === 'Open as empty notebook')
+  assert.ok(open, 'the invalid document offers the open-as-empty action')
+  open.props.onClick()
+  await app.settle()
+  assert.equal(app.banner?.reason, 'empty-file')
+  app.edit('print("saved")')
+  const request = app.save()
+  assert.ok(request)
+  request.resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await app.settle()
+  assert.equal(app.banner, null, 'saving clears the open-as-empty hint')
   assert.equal(app.toolbar.dirty, false)
 })
 

@@ -1,17 +1,36 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { execFile, spawnSync } from 'node:child_process'
+import childProcess, { execFile, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { discoverInterpreters, resetInterpreterCache, resolveInterpreter } from '../lib/env.js'
 import { KernelManager } from '../lib/kernel.js'
 import { findPython, tempDir } from './python-helper.mjs'
 
 const execFileAsync = promisify(execFile)
+let probeOverride = null
+const originalExecFile = childProcess.execFile
+const mockExecFile = () => { throw new Error('Unexpected callback-style interpreter probe') }
+mockExecFile[promisify.custom] = async (...args) => {
+  if (probeOverride) return probeOverride(...args)
+  return execFileAsync(...args)
+}
+let discoverInterpreters
+let resetInterpreterCache
+let resolveInterpreter
+try {
+  childProcess.execFile = mockExecFile
+  syncBuiltinESMExports()
+  ;({ discoverInterpreters, resetInterpreterCache, resolveInterpreter } = await import('../lib/env.js'))
+} finally {
+  childProcess.execFile = originalExecFile
+  syncBuiltinESMExports()
+}
+
 const basePython = findPython('jupyter_client, ipykernel')
 const hasJupyter = Boolean(basePython)
 const bridgePath = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
@@ -89,6 +108,38 @@ test('resolveInterpreter rejects malformed python arguments before probing', asy
   await assert.rejects(resolveInterpreter('   '), (error) => error.code === 'bad-request' && error.status === 400)
   await assert.rejects(resolveInterpreter('python'), (error) =>
     error.code === 'bad-request' && error.status === 400 && /absolute/.test(error.message))
+})
+
+test('discovery rejects a failed probe even when stdout reports ok:true', async () => {
+  const previous = process.env.DSH_IPYNB_PYTHON
+  const failure = Object.assign(new Error('Python probe exited with code 1'), {
+    code: 1,
+    stdout: JSON.stringify({
+      ok: true,
+      executable: process.execPath,
+      version: '3.14',
+      jupyter_client: 'test',
+      ipykernel: 'test',
+    }),
+    stderr: 'probe failed after writing stdout',
+  })
+  try {
+    process.env.DSH_IPYNB_PYTHON = process.execPath
+    probeOverride = async () => { throw failure }
+    resetInterpreterCache()
+    const discovered = await discoverInterpreters({ fresh: true })
+    const entry = discovered.interpreters.find((candidate) => candidate.source === 'DSH_IPYNB_PYTHON')
+    assert.ok(entry, 'the rejected interpreter stays visible')
+    assert.equal(entry.ok, false)
+    assert.equal(discovered.default, null)
+    assert.equal(entry.version, '3.14', 'stdout remains available for diagnostics')
+    assert.match(entry.detail, /code 1/)
+  } finally {
+    probeOverride = null
+    if (previous === undefined) delete process.env.DSH_IPYNB_PYTHON
+    else process.env.DSH_IPYNB_PYTHON = previous
+    resetInterpreterCache()
+  }
 })
 
 test('discovery keeps a relative DSH_IPYNB_PYTHON visible with a clear reason', async () => {

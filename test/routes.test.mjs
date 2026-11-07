@@ -1,13 +1,38 @@
 import assert from 'node:assert/strict'
+import childProcess from 'node:child_process'
+import { once } from 'node:events'
 import { test } from 'node:test'
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, truncate, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { syncBuiltinESMExports } from 'node:module'
+import { connect } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { registerIpynbRoutes } from '../lib/routes.js'
+import { promisify } from 'node:util'
 import { ApiError, readJsonBody } from '../lib/json.js'
-import { discoverInterpreters } from '../lib/env.js'
 import { NOTEBOOK_CAP_BYTES, emptyNotebook, serializeNotebook, sha256 } from '../lib/notebook.js'
 import { tempDir } from './python-helper.mjs'
+
+// Keep the actual discovery/route code, controlling only the Python probe.
+const originalExecFile = childProcess.execFile
+const mockExecFile = () => { throw new Error('Unexpected callback-style interpreter probe') }
+mockExecFile[promisify.custom] = async () => ({
+  stdout: JSON.stringify({ ok: true, version: '3.14', jupyter_client: 'test', ipykernel: 'test' }),
+  stderr: '',
+})
+let registerIpynbRoutes
+let discoverInterpreters
+let resetInterpreterCache
+try {
+  childProcess.execFile = mockExecFile
+  syncBuiltinESMExports()
+  ;({ registerIpynbRoutes } = await import('../lib/routes.js'))
+  ;({ discoverInterpreters, resetInterpreterCache } = await import('../lib/env.js'))
+} finally {
+  childProcess.execFile = originalExecFile
+  syncBuiltinESMExports()
+}
+
 const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
 function makeRes() {
@@ -562,7 +587,7 @@ test('execute waits for drain instead of dropping the final reply', async (t) =>
   assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
 })
 
-test('execute ends the stream when a client never drains', async (t) => {
+test('execute destroys the stream when a client never drains', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
@@ -572,6 +597,7 @@ test('execute ends the stream when a client never drains', async (t) => {
   const handler = ctx.registered[0].handler
   const drainCallbacks = []
   let ended = false
+  let destroyed = false
   const res = {
     headersSent: false,
     writeHead() {
@@ -583,6 +609,9 @@ test('execute ends the stream when a client never drains', async (t) => {
     },
     end() {
       ended = true
+    },
+    destroy() {
+      destroyed = true
     },
     on() {
       return this
@@ -598,8 +627,80 @@ test('execute ends the stream when a client never drains', async (t) => {
   )
   assert.ok(drainCallbacks.length > 0, 'the route waits for the drain that never comes')
   assert.equal(ended, false)
+  assert.equal(destroyed, false)
   t.mock.timers.tick(10_000)
-  assert.equal(ended, true, 'the bounded drain wait must end the response')
+  assert.equal(destroyed, true, 'the bounded drain wait must destroy the response')
+  assert.equal(ended, false, 'the forced close must not also end the response')
+})
+
+test('execute destroys a backpressured real HTTP response and socket', { timeout: 30_000 }, async (t) => {
+  const priorPython = process.env.DSH_IPYNB_PYTHON
+  process.env.DSH_IPYNB_PYTHON = process.execPath
+  resetInterpreterCache()
+  t.after(() => {
+    if (priorPython === undefined) delete process.env.DSH_IPYNB_PYTHON
+    else process.env.DSH_IPYNB_PYTHON = priorPython
+    resetInterpreterCache()
+  })
+  const discovered = await discoverInterpreters()
+  assert.ok(discovered.default, 'the controlled interpreter probe must provide an executable')
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const ctx = makeCtx({ cwd: dir })
+  const kernels = makeKernels()
+  const output = 'x'.repeat(4 * 1024 * 1024)
+  kernels.entry.run = async (cellId, code, onEvent) => {
+    for (let index = 0; index < 4; index += 1) {
+      onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text: output })
+    }
+    onEvent({ type: 'execute_reply', cell_id: cellId, ok: true, execution_count: 1 })
+  }
+  registerIpynbRoutes(ctx, kernels)
+  const handler = ctx.registered[0].handler
+  const sockets = new Set()
+  let response
+  let serverSocket
+  let notifyRequest
+  const requestReceived = new Promise((resolve) => { notifyRequest = resolve })
+  const server = createServer((req, res) => {
+    response = res
+    serverSocket = req.socket
+    notifyRequest()
+    void handler(req, res)
+  })
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
+  let client
+  t.after(async () => {
+    client?.destroy()
+    for (const socket of sockets) socket.destroy()
+    if (server.listening) await new Promise((resolve) => server.close(resolve))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  client = connect(server.address().port, '127.0.0.1')
+  // The forced server-side close may reset the raw client. Never consume data.
+  client.on('error', () => {})
+  await once(client, 'connect')
+  const body = JSON.stringify({ sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1' })
+  client.write([
+    'POST /ipynb/execute HTTP/1.1',
+    'Host: 127.0.0.1',
+    'Content-Type: application/json',
+    `Content-Length: ${Buffer.byteLength(body)}`,
+    'Connection: close',
+    '',
+    body,
+  ].join('\r\n'))
+  await requestReceived
+  assert.ok(response)
+  assert.ok(serverSocket)
+
+  await new Promise((resolve) => setTimeout(resolve, 11_000))
+  assert.equal(response.destroyed || response.closed, true, 'the HTTP response must be forcibly closed')
+  assert.equal(serverSocket.destroyed, true, 'the backpressured server socket must be destroyed')
 })
 
 test('status, interrupt, restart and shutdown work after the notebook is deleted', async (t) => {

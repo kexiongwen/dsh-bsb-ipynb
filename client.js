@@ -7,6 +7,7 @@ window.__ModuleLoader__.load({
 
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
+    const SAVE_BANNER_REASONS = new Set(['write-blocked', 'write-conflict', 'save-failed', 'capacity', 'metadata-too-complex', 'empty-file'])
     const STATUS_POLL_MS = 10000
     const MAX_MARKDOWN_QUOTE_DEPTH = 64
     const METADATA_DEPTH_LIMIT = 100
@@ -799,8 +800,8 @@ window.__ModuleLoader__.load({
       return Math.min(Math.max(current, AUTOSAVE_MS) * 4, 30_000)
     }
 
-    // Autosave must recover after a failed save once the user edits again,
-    // but must not retry the same failing snapshot in a loop.
+    // Ordinary failures wait for another edit; retryable write-blocked failures
+    // instead retry the unchanged snapshot with the backoff above.
     function shouldScheduleAutosave(state) {
       if (state.loadStatus !== 'ok' || !state.dirty) return false
       if (state.conflict || state.autosaveBlocked || state.capacityBlocked || state.runningCell) return false
@@ -1636,7 +1637,7 @@ window.__ModuleLoader__.load({
           setConflict(null)
           setAutosaveBlocked(false)
           failedSnapshotRef.current = null
-          setBanner(data.emptyFile ? { kind: 'info', text: t('emptyFile') } : null)
+          setBanner(data.emptyFile ? { kind: 'info', reason: 'empty-file', text: t('emptyFile') } : null)
           return
         }
         notebookRef.current = null
@@ -1686,7 +1687,7 @@ window.__ModuleLoader__.load({
         dirtyRef.current = false
         setDirty(false)
         setAutosaveBlocked(true)
-        setBanner({ kind: 'info', text: t('emptyHint') })
+        setBanner({ kind: 'info', reason: 'empty-file', text: t('emptyHint') })
       }, [invalidateDocumentWork])
 
       const save = useCallback(async () => {
@@ -1697,7 +1698,7 @@ window.__ModuleLoader__.load({
           // A 409 blocks saving until the user reloads; surface that instead of
           // silently ignoring the click or Ctrl+S.
           setSaveState('failed')
-          setBanner({ kind: 'error', text: t('conflict'), action: 'reload' })
+          setBanner({ kind: 'error', reason: 'write-conflict', text: t('conflict'), action: 'reload' })
           return
         }
         const snapshot = notebookRef.current
@@ -1758,18 +1759,20 @@ window.__ModuleLoader__.load({
           setAutosaveDelay(AUTOSAVE_MS)
           setEmptyFile(false)
           setConflict(null)
-          setBanner(null)
+          setBanner((current) => (current && SAVE_BANNER_REASONS.has(current.reason) ? null : current))
           if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
           saveTimerRef.current = setTimeout(() => {
             setSaveState((current) => (!isStaleSaveResponse(documentSeqRef.current, seq) && current === 'saved' ? 'idle' : current))
           }, 1000)
         } catch (error) {
           if (!isCurrentSave()) return
-          failedSnapshotRef.current = snapshot
+          // Write-blocked retries the unchanged snapshot with the backoff below;
+          // every other failure still waits for another notebook edit.
+          failedSnapshotRef.current = error && error.code === 'write-blocked' ? null : snapshot
           setSaveState('failed')
           if (error && error.code === 'write-conflict') {
             setConflict((error.details && error.details.version) || 'conflict')
-            setBanner({ kind: 'error', text: t('conflict'), action: 'reload' })
+            setBanner({ kind: 'error', reason: 'write-conflict', text: t('conflict'), action: 'reload' })
           } else if (error && error.code === 'write-blocked') {
             const readOnly = Boolean(error.details && error.details.reason === 'readonly')
             setBanner({
@@ -1781,7 +1784,7 @@ window.__ModuleLoader__.load({
             // on every autosave tick.
             setAutosaveDelay((current) => blockedAutosaveDelay(current))
           } else {
-            setBanner({ kind: 'error', text: t('saveFailed') + (error && error.message ? ': ' + error.message : '') })
+            setBanner({ kind: 'error', reason: 'save-failed', text: t('saveFailed') + (error && error.message ? ': ' + error.message : '') })
           }
         } finally {
           if (isCurrentSave()) savingRef.current = null
