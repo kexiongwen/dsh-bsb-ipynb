@@ -29,12 +29,12 @@
 
 ## ✨ Features
 
-- **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG, Markdown, JSON and ANSI-colored tracebacks.
+- **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks.
 - **Cell editing** — click a cell to edit it; insert or delete cells, move them up/down, switch cell types, preview Markdown, and clear one cell's or all outputs.
 - **Execution** — one persistent kernel per notebook, keyed by file path, keeps variables alive across cells; Run all, interrupt, restart and shut down.
 - **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits.
-- **Interpreter discovery** — checks `DSH_IPYNB_PYTHON`, conda environments, `python3`/`python` on `PATH`, then DSH's bundled Python, and selects only environments that provide `jupyter_client` + `ipykernel`. The launch config is built in-process, so a same-named system kernelspec cannot redirect the selected interpreter.
-- **DSH integration** — base colors use DSH theme tokens and dark mode follows the DSH theme; UI strings are registered under the `dsh-bsb-ipynb` locale namespace and follow DSH's Chinese/English language preference.
+- **Interpreter discovery** — checks `DSH_IPYNB_PYTHON`, conda environments, `python3`/`python` on `PATH`, then DSH's bundled Python, and selects only environments that provide `jupyter_client` + `ipykernel`. `DSH_IPYNB_PYTHON` must be an absolute path; a relative or unusable value is still listed by `/ipynb/interpreters` with a reason but is never used. The launch config is built in-process, so a same-named system kernelspec cannot redirect the selected interpreter.
+- **DSH integration** — core base colors use DSH theme tokens (syntax and state colors remain hard-coded), and dark mode follows the DSH theme; UI strings are registered under the `dsh-bsb-ipynb` locale namespace and follow DSH's Chinese/English language preference.
 - **Contained access** — paths are confined to the session workspace (realpath + relative checks); HTTP routes reuse DSH's admission fence; HTML output is sanitized with a DOMParser allow-list, and `<script>` never runs.
 
 ## 🚀 Quick Start
@@ -55,7 +55,7 @@ python -m pip install jupyter_client ipykernel    # Windows (or: py -3 -m pip ..
 2. Refresh the page (`Cmd+R` on macOS; `Ctrl+R` or `F5` on Windows).
 3. Open any `.ipynb` from the right-hand file tree; [examples/demo.ipynb](examples/demo.ipynb) is a good first run.
 
-> **Windows**: interpreter discovery looks for `python.exe`/`python3.exe` on `PATH` (Microsoft Store app-execution aliases under `WindowsApps` are skipped), conda environments (`<env>\python.exe`) and DSH's bundled Python. Set `DSH_IPYNB_PYTHON` to an **absolute** `python.exe` path when the interpreter lives elsewhere; read-only or locked notebooks reject saves with `write-blocked` (409) until the file is writable again.
+> **Windows**: interpreter discovery looks for `python.exe`/`python3.exe` on `PATH` (Microsoft Store app-execution aliases under `WindowsApps` are skipped), conda environments (`<env>\python.exe`) and DSH's bundled Python. Set `DSH_IPYNB_PYTHON` to an **absolute** `python.exe` path when the interpreter lives elsewhere; read-only or locked notebooks reject saves with `write-blocked` (409) until the file is writable again, and reading a file locked by another program returns `read-blocked` (409).
 
 ## 🖱️ Usage
 
@@ -65,9 +65,10 @@ python -m pip install jupyter_client ipykernel    # Windows (or: py -3 -m pip ..
 | Run and advance to the next cell | `Shift + Enter` |
 | Insert a code cell below | `Alt + Enter` |
 | Save | `Cmd/Ctrl + S` |
+| Outdent the current line | `Shift + Tab` |
 | Leave edit mode | `Esc` |
 
-Shortcuts work while a cell is being edited; every action is also available from the toolbar (interpreter, Run all, interrupt, restart, save, reload, shut down kernel).
+Shortcuts work while a cell is being edited; Tab inserts four spaces and Shift+Tab removes one indent unit. Every action is also available from the toolbar (interpreter, Run all, interrupt, restart, save, reload, shut down kernel).
 
 - Autosave pauses while a cell or Run all is running, so transiently cleared or partial outputs never reach disk.
 - Switching interpreters restarts the kernel; an active run asks for confirmation first.
@@ -98,7 +99,7 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 
 - **Serialized saves** — concurrent saves of the same notebook run in order; only the first succeeds and the rest return `write-conflict` (409).
 - **Blocked saves** — a read-only notebook, or one held open by another program (common on Windows), returns `write-blocked` (409) with a fixable message instead of an internal error; autosave backs off up to 30 s and the response never embeds local paths or temp-file names.
-- **Safe writes** — write a temp file in the same directory, check the version again, then rename it into place; this narrows the external-write race window (extreme interleavings remain a known race).
+- **Safe writes** — write a temp file in the same directory, check the version again, then rename it into place; this narrows the external-write race window (extreme interleavings remain a known race). If a crash leaves a `.dsh-bsb-ipynb-*.tmp` behind, the next save sweeps stale ones older than an hour.
 - **No stalled streams** — restart/shutdown, kernel death or `os._exit()` always ends the NDJSON stream with a terminal failure event.
 - **Complete output** — after the kernel replies, the bridge waits for the matching IOPub idle; after 10 s it reports a failure and warns that output may be incomplete.
 - **Resource limits** — 32 MiB of client-side output per cell, a 64 MiB server-side NDJSON queue and a 64 MiB cap per kernel output line; exceeding a limit cancels the run and interrupts the kernel.
@@ -148,6 +149,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Metadata nesting / node limit | 100 levels / 10,000 nodes |
 | Autosave / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
 | Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s / 3 s |
+| Execute stream drain timeout | 10 s (a client that stops reading is disconnected) |
 | Kernel idle sweep | 30 minutes by default; `DSH_IPYNB_KERNEL_IDLE_MS` changes it (`0` disables the sweep) |
 
 ## 🧪 Development & Testing

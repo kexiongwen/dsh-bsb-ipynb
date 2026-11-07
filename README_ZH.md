@@ -29,12 +29,12 @@
 
 ## ✨ 特性
 
-- **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG、Markdown、JSON 与 ANSI 彩色 traceback。
+- **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。
 - **编辑**：点击单元格进入编辑；插入/删除、上移/下移、切换类型、Markdown 预览、清空单个或全部输出。
 - **执行**：每个 notebook 一个按文件路径共享的常驻内核，变量跨单元格保留；支持全部运行、中断、重启与关闭。
 - **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后 1.5 秒自动保存。
-- **解释器发现**：按 `DSH_IPYNB_PYTHON` → conda 环境 → PATH 上的 `python3`/`python` → DSH 内置 Python 的顺序查找，且只选择安装了 `jupyter_client` + `ipykernel` 的环境；启动配置在插件进程内构造，同名系统 kernelspec 不会改变所选解释器。
-- **与 DSH 集成**：基础色使用 DSH 主题 token，暗色跟随 DSH 主题设置；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
+- **解释器发现**：按 `DSH_IPYNB_PYTHON` → conda 环境 → PATH 上的 `python3`/`python` → DSH 内置 Python 的顺序查找，且只选择安装了 `jupyter_client` + `ipykernel` 的环境；`DSH_IPYNB_PYTHON` 必须是**绝对路径**，相对路径或不可用的值仍会出现在 `/ipynb/interpreters` 列表中并附原因，但不会被使用；启动配置在插件进程内构造，同名系统 kernelspec 不会改变所选解释器。
+- **与 DSH 集成**：核心基础色使用 DSH 主题 token（语法高亮与状态色仍为硬编码），暗色跟随 DSH 主题设置；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
 - **访问边界**：路径限制在会话工作区内（realpath + 相对路径校验）；HTTP 路由复用 DSH 的 admission fence（请求准入校验）；HTML 输出经 DOMParser 白名单清洗，`<script>` 不会执行。
 
 ## 🚀 快速开始
@@ -55,7 +55,7 @@ python -m pip install jupyter_client ipykernel    # Windows（或：py -3 -m pip
 2. 刷新页面（macOS 为 `Cmd+R`，Windows 为 `Ctrl+R` 或 `F5`）；
 3. 在右侧文件树打开任意 `.ipynb`；首次体验可用 [examples/demo.ipynb](examples/demo.ipynb)。
 
-> **Windows**：解释器发现会检查 `PATH` 上的 `python.exe`/`python3.exe`（跳过 `WindowsApps` 下的 Microsoft Store 应用执行别名）、conda 环境（`<env>\python.exe`）与 DSH 内置 Python。若解释器在其他位置，请把 `DSH_IPYNB_PYTHON` 设为该 `python.exe` 的**绝对路径**；只读或被其它程序占用的 notebook 保存会返回 `write-blocked`（409），直到文件可写。
+> **Windows**：解释器发现会检查 `PATH` 上的 `python.exe`/`python3.exe`（跳过 `WindowsApps` 下的 Microsoft Store 应用执行别名）、conda 环境（`<env>\python.exe`）与 DSH 内置 Python。若解释器在其他位置，请把 `DSH_IPYNB_PYTHON` 设为该 `python.exe` 的**绝对路径**；只读或被其它程序占用的 notebook 保存会返回 `write-blocked`（409），被其它程序独占锁定的文件读取会返回 `read-blocked`（409），直到文件可用。
 
 ## 🖱️ 使用
 
@@ -65,9 +65,10 @@ python -m pip install jupyter_client ipykernel    # Windows（或：py -3 -m pip
 | 运行并跳到下一个单元格 | `Shift + Enter` |
 | 在下方插入代码单元格 | `Alt + Enter` |
 | 保存 | `Cmd/Ctrl + S` |
+| 反缩进当前行 | `Shift + Tab` |
 | 退出编辑 | `Esc` |
 
-快捷键在编辑单元格时生效；所有操作也可通过工具栏完成（解释器选择、全部运行、中断、重启、保存、重新加载、关闭内核）。
+快捷键在编辑单元格时生效；Tab 插入 4 个空格，Shift+Tab 删除一个缩进单位。所有操作也可通过工具栏完成（解释器选择、全部运行、中断、重启、保存、重新加载、关闭内核）。
 
 - 执行单元格或全部运行期间自动保存暂停，临时清空或未完成的输出不会写入磁盘。
 - 切换解释器会重启内核；有执行任务时会先确认。
@@ -98,7 +99,7 @@ dsh-bsb-ipynb/
 
 - **保存串行化** — 同一 notebook 的并发保存按序执行，仅第一个成功，其余返回 `write-conflict`（409）。
 - **保存被阻止** — 目标为只读，或正被其它程序占用（Windows 上常见）时返回 `write-blocked`（409）与可操作提示，而不是内部错误；autosave 最长退避 30 秒，响应中不再包含本地路径或临时文件名。
-- **安全写入** — 先在同一目录写临时文件，rename 前再次校验版本，再原子替换；可缩小外部写入竞态窗口（极端交错仍属已知竞态）。
+- **安全写入** — 先在同一目录写临时文件，rename 前再次校验版本，再原子替换；可缩小外部写入竞态窗口（极端交错仍属已知竞态）。若进程崩溃残留 `.dsh-bsb-ipynb-*.tmp`，后续保存会清理超过一小时的陈旧临时文件。
 - **不会挂起** — 重启/关闭、内核崩溃或 `os._exit()` 都会让 NDJSON 流以失败终态结束。
 - **输出完整性** — 内核回复后仍等待对应 IOPub idle；超过 10 秒则报失败并提示输出可能不完整。
 - **资源上限** — 客户端每单元格 32 MiB，服务端 NDJSON 待发队列 64 MiB、单行内核输出 64 MiB；超限会取消执行并中断内核。
@@ -148,6 +149,7 @@ dsh-bsb-ipynb/
 | metadata 嵌套 / 节点上限 | 100 层 / 10,000 个节点 |
 | 自动保存 / 内核状态轮询 / NDJSON ping | 1.5 秒 / 10 秒 / 15 秒 |
 | ready / shutdown 宽限 / 中断宽限 | 30 秒 / 2 秒 + 2 秒 / 3 秒 |
+| 执行流 drain 超时 | 10 秒（客户端停止读取时主动断开） |
 | 内核空闲回收 | 默认 30 分钟；可用 `DSH_IPYNB_KERNEL_IDLE_MS` 调整（设为 `0` 表示不回收） |
 
 ## 🧪 开发与测试
