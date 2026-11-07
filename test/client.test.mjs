@@ -1,65 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { fileURLToPath, pathToFileURL } from 'node:url'
 import { METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT, NOTEBOOK_CAP_BYTES } from '../lib/notebook.js'
-
-// Pin the browser fallback locale: Node exposes a global navigator whose
-// language follows the host region (e.g. zh-CN on a Chinese Windows install),
-// which would otherwise make the English assertions below depend on the OS.
-Object.defineProperty(globalThis, 'navigator', {
-  value: { language: 'en-US', languages: ['en-US'] },
-  configurable: true,
-  writable: true,
-})
-
-const clientPath = fileURLToPath(new URL('../client.js', import.meta.url))
-let loadCount = 0
-
-async function loadClient(reactOverrides = {}) {
-  let options = null
-  globalThis.window = {
-    __ModuleLoader__: {
-      load(value) {
-        options = value
-      },
-    },
-  }
-  const styles = []
-  globalThis.document = {
-    getElementById() {
-      return null
-    },
-    createElement() {
-      return { dataset: {}, style: {}, textContent: '', remove() {} }
-    },
-    head: {
-      appendChild(element) {
-        styles.push(element)
-      },
-    },
-  }
-  const react = {
-    createElement(type, props, ...children) {
-      return { type, props: { ...props, children } }
-    },
-    Fragment: 'fragment',
-    useState() {},
-    useEffect() {},
-    useMemo() {},
-    useRef() {},
-    useCallback() {},
-    useSyncExternalStore() {},
-    ...reactOverrides,
-  }
-  await import(pathToFileURL(clientPath).href + '?test=' + Date.now() + '-' + (++loadCount))
-  assert.ok(options, 'client artifact registers a module')
-  assert.equal(options.id, 'dsh-bsb-ipynb')
-  const exports = options.factory((id) => {
-    if (id === 'react') return react
-    throw new Error('unexpected module: ' + id)
-  })
-  return { exports, styles }
-}
+import { loadClient } from './client-harness.mjs'
 
 test('registers a custom ipynb file viewer through betterSidebar', async () => {
   const { exports, styles } = await loadClient()
@@ -92,7 +34,31 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
   assert.equal(styles.length, 1)
   assert.equal(styles[0].id, 'dsh-bsb-ipynb-styles')
   assert.match(styles[0].textContent, /\.dsh-bsb-ipynb-root/)
-  for (const token of ['--dsw-alias-border-l1', '--dsw-alias-label-secondary', '--dsw-alias-brand-primary', '--dsw-alias-bg-layer-1']) {
+  for (const token of [
+    '--dsw-alias-border-l1',
+    '--dsw-alias-label-primary',
+    '--dsw-alias-label-secondary',
+    '--dsw-alias-bg-layer-1',
+    '--dsw-alias-bg-module-platform',
+    '--dsw-alias-interactive-bg-hover',
+    '--dsw-alias-markdown-code-block',
+    '--dsw-alias-markdown-inline-code',
+    '--dsw-alias-link',
+    '--dsw-alias-state-idle-primary',
+    '--dsw-alias-state-success-primary',
+    '--dsw-alias-state-warn-primary',
+    '--dsw-alias-state-error-primary',
+    '--dsw-alias-state-business-primary',
+    '--shiki-token-keyword',
+    '--shiki-token-string',
+    '--shiki-token-comment',
+    '--shiki-token-constant',
+    '--shiki-token-function',
+    '--shiki-token-parameter',
+    '--dsh-content-font-size-secondary',
+    '--dsh-code-font-size',
+    '--ds-font-family-code',
+  ]) {
     assert.ok(styles[0].textContent.includes(token), `styles must consume current theme token ${token}`)
   }
   assert.doesNotMatch(
@@ -100,10 +66,10 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
     /--dsw-(border-default|text-muted|accent-default|surface-default)/,
     'legacy --dsw-* tokens are outside the current theme contract',
   )
-  assert.match(
+  assert.doesNotMatch(
     styles[0].textContent,
-    /body\[data-ds-dark-theme\] \.dsh-bsb-ipynb-root \.dsh-bsb-ipynb-tok-string/,
-    'dark syntax colors must follow the explicit host theme',
+    /body\[data-ds-dark-theme\]/,
+    'the host palette is inherited through tokens; the plugin must not select its own dark palette',
   )
   assert.doesNotMatch(
     styles[0].textContent,
