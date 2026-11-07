@@ -1316,6 +1316,53 @@ test('blocked saves back off instead of retrying every autosave tick', async () 
   assert.equal(blockedAutosaveDelay(24000), 30000, 'the delay is capped at 30 s')
 })
 
+test('image/jpg is normalized to image/jpeg', async () => {
+  const { exports } = await loadClient()
+  const { imageSource } = exports.__test
+  assert.equal(imageSource('abc', 'image/jpg'), 'data:image/jpeg;base64,abc')
+})
+
+test('renderJsonOutput shows top-level strings and survives unserializable values', async () => {
+  const { exports } = await loadClient()
+  const { renderJsonOutput } = exports.__test
+  assert.equal(renderJsonOutput('hello'), '"hello"')
+  assert.equal(renderJsonOutput({ a: 1 }), '{\n  "a": 1\n}')
+  assert.equal(renderJsonOutput(1n), '[unserializable JSON output]')
+})
+
+test('output rendering falls back from empty html and accepts image/jpg', async () => {
+  const { exports } = await loadClient()
+  const { OutputView } = exports.__test
+  const render = (data) => OutputView({ output: { output_type: 'display_data', data }, resolveImage: () => null })
+  const fallback = render({ 'text/html': '', 'text/plain': 'plain fallback' })
+  assert.equal(fallback.props.children[0], 'plain fallback')
+  const jpg = render({ 'image/jpg': 'jpgdata' })
+  assert.match(jpg.props.src, /^data:image\/jpeg;base64,jpgdata$/)
+})
+
+test('markdown fences keep c++ and c# language classes', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown } = exports.__test
+  assert.match(renderMarkdown('```c++\nint x;\n```'), /class="language-c\+\+"/)
+  assert.match(renderMarkdown('```c#\nint x;\n```'), /class="language-c#"/)
+})
+
+test('dedentSourceLine removes one indent unit from the caret line', async () => {
+  const { exports } = await loadClient()
+  const { dedentSourceLine } = exports.__test
+  assert.deepEqual(dedentSourceLine('    x', 6), { source: 'x', caret: 2 })
+  assert.deepEqual(dedentSourceLine('a\n    b', 7), { source: 'a\nb', caret: 3 })
+  assert.deepEqual(dedentSourceLine('abc', 1), { source: 'abc', caret: 1 })
+})
+
+test('splitSourceLines keeps trailing newlines like the old lookbehind split', async () => {
+  const { exports } = await loadClient()
+  const { splitSourceLines } = exports.__test
+  assert.deepEqual(splitSourceLines('a\nb\n'), ['a\n', 'b\n'])
+  assert.deepEqual(splitSourceLines('a'), ['a'])
+  assert.deepEqual(splitSourceLines(''), [])
+})
+
 test('output rendering covers MIME priority, fallbacks and sanitization', async () => {
   const { exports } = await loadClient()
   const { OutputView } = exports.__test

@@ -134,6 +134,7 @@ test('bridge executes code, preserves variables and reports errors', { skip: !py
     )
     const reply = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'c1')
     assert.equal(reply.ok, true)
+    assert.equal('error' in reply, false, 'successful replies omit the error field')
     assert.equal(reply.execution_count, 1)
     const stream = context.events.find((event) => event.type === 'stream' && event.cell_id === 'c1')
     assert.equal(stream.text, 'hello\n')

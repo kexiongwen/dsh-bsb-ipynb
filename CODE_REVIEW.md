@@ -8,7 +8,7 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。多轮修复后测试集扩到 317 tests；三平台 CI（ubuntu/windows/macos，均为 required）当前全绿：Windows 315 pass / 2 skip、macOS 314 pass / 3 skip、ubuntu 286 pass / 31 skip、0 fail。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。多轮修复后测试集扩到 325 tests；三平台 CI（ubuntu/windows/macos，均为 required）当前全绿（0 fail）。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
 > **行号说明**：`file:line` 为快照时的源码行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。
@@ -65,12 +65,11 @@
 
 ## 3. Nit（低成本，可批量清理；仅未修复）
 
-- **存储**：metadata 循环引用抛 `TypeError` → 500（而超限是 400；HTTP JSON 不可达）；`DSH_IPYNB_KERNEL_IDLE_MS=0` 不能禁用回收。
-- **内核/桥**：restart 窗口内 `is_alive()` 可能误报 kernel_died（宿主单飞提交不可达）；`exec_queue` 无上限（同上）；协议/文档漂移：`status`/`status_reply` 无调用方、`--kernel-name` 宿主从不传、ready 的 `language_info` 恒 `{}`、`emit()` 吞 stdout 写失败、成功 `execute_reply` 恒带 `error:null`、control `interrupt_reply` 从不消费。
-- **宿主**：dispose 晚到清理重复调用一次 `shutdown()`（无害；真实流上二次写已 end 的 stdin 会 `ERR_STREAM_WRITE_AFTER_END`）；`index.js` 的 `disposeAll()` 未 await；fence 抛异常时每请求打印完整 stack（持续故障期刷屏）；`/interpreters` 冷启动仍同步探测（按设计，无总体超时）。
-- **客户端**：`image/jpg` 未归一化为 `image/jpeg`；空 `text/html` 吞掉 `text/plain` 回退；`application/json` 顶层字符串显示裸文本；fence 语言串 `replace(/[^\w-]/g,'')` 丢 `c++`/`c#`；`source.split(/(?<=\n)/)` lookbehind（旧 Safari 解析风险）；`ALLOWED_TAGS` 放行任意 `class`（视觉伪装面）；`application/json` 输出 `JSON.stringify` 无深度保护；解释器获取失败时 select 仍显示误导文案；执行中编辑态快捷键 Ctrl+Enter/Ctrl+S 静默早退。**Windows 补充（原 W-C6）**：编辑态 Tab 恒被拦截插入 4 空格、无 Shift+Tab 反缩进、无法用 Tab 离开 textarea（键盘导航/高对比度场景）。
+- **内核/桥**：restart 窗口内 `is_alive()` 可能误报 kernel_died（宿主单飞提交不可达）；`exec_queue` 无上限（同上）；协议/文档漂移：`status`/`status_reply` 无调用方、`--kernel-name` 宿主从不传、ready 的 `language_info` 恒 `{}`、`emit()` 吞 stdout 写失败、control `interrupt_reply` 从不消费。
+- **宿主**：dispose 晚到清理重复调用一次 `shutdown()`（无害；真实流上二次写已 end 的 stdin 会 `ERR_STREAM_WRITE_AFTER_END`）；`index.js` 的 `disposeAll()` 未 await；`/interpreters` 冷启动仍同步探测（按设计，无总体超时）。
+- **客户端**：`ALLOWED_TAGS` 放行任意 `class`（视觉伪装面；去掉会破坏 pandas 等 HTML 输出样式，需产品决策）；解释器获取失败时 select 仍显示误导文案；执行中编辑态快捷键 Ctrl+Enter/Ctrl+S 静默早退。**Windows 补充**：编辑态 Tab 仍会插入缩进而非移动焦点（Shift+Tab 已支持反缩进；Tab 焦点逃逸属编辑器习惯，建议文档说明）。
 - **Windows 环境注意**：内核启动失败时 `lastError` 含 Windows 本地化 `WinError` 文本（跨语言界面文案混杂）；Node v24 在 Windows 上对尾点/尾空格/保留设备名采用**字面语义**（与 cmd/Python 的 Win32 归一化不同），升级 Node/Windows 后需复验，`.ipynb` 判断继续以 realpath 为准。
-- **测试/文档**：`routes.test.mjs` 的 root 跳过条件未在 README 说明；少量弱断言/同义反复（注册 dict 与自身比 key；`/health` 只 `typeof`；未绑定 target；用默认值断言默认值）；真实内核测试用固定 `sleep`（有 `within()` 兜底）；`bridge_iopub.py` 的 26 个 unittest 在 node 计数中只显示 2 个（非假绿，计数失真）；locale meta `title` 直接用包名。
+- **测试/文档**：少量弱断言/同义反复（注册 dict 与自身比 key；`/health` 只 `typeof`；未绑定 target；用默认值断言默认值）；真实内核测试用固定 `sleep`（有 `within()` 兜底）；`bridge_iopub.py` 的 26 个 unittest 在 node 计数中只显示 2 个（非假绿，计数失真）。
 
 ---
 
@@ -100,7 +99,7 @@
 
 - **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-9/L-22/L-23 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；M-11 的修复在 Windows 上应依赖显式 shutdown 协议与进程树回收，而不是信号升级。
-- **三平台基线**：修复后的测试集为 317 tests；本地 Windows 基线 317 / 273 pass / 44 skip（skip 为无 symlink 权限与 POSIX 权限位用例），CI 三平台 required 全绿（Windows 315 pass、macOS 314 pass、ubuntu 286 pass，0 fail）。
+- **三平台基线**：修复后的测试集为 325 tests；本地 Windows 基线 325 / 281 pass / 44 skip（skip 为无 symlink 权限与 POSIX 权限位用例），CI 三平台 required 全绿（0 fail）。
 
 ---
 
@@ -108,7 +107,7 @@
 
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
-| 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；修复后测试集 317 tests，三平台 CI 持续覆盖 |
+| 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；修复后测试集 325 tests，三平台 CI 持续覆盖 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |

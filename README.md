@@ -148,7 +148,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Metadata nesting / node limit | 100 levels / 10,000 nodes |
 | Autosave / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
 | Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s / 3 s |
-| Kernel idle sweep | 30 minutes by default, configurable with `DSH_IPYNB_KERNEL_IDLE_MS` |
+| Kernel idle sweep | 30 minutes by default; `DSH_IPYNB_KERNEL_IDLE_MS` changes it (`0` disables the sweep) |
 
 ## 🧪 Development & Testing
 
@@ -157,10 +157,10 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 317 tests at the time of writing
+npm test          # 325 tests at the time of writing
 ```
 
-Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe.
+Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
 
 See [CODE_REVIEW.md](CODE_REVIEW.md) for the combined macOS + Windows review and known-issue log.
 

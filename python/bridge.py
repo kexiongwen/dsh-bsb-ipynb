@@ -378,8 +378,10 @@ class Bridge:
                 "ok": status == "ok",
                 "execution_count": execution_count,
                 "status": status,
-                "error": error,
             }
+            # Only failures carry an error message; keep successful replies minimal.
+            if error is not None:
+                event["error"] = error
             if kernel_restarted is not None:
                 event["kernel_restarted"] = kernel_restarted
             if output_incomplete:

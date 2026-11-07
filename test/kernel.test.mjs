@@ -235,6 +235,32 @@ test('an oversized stdout line aborts the running cell and restarts the kernel',
   }
 })
 
+test('DSH_IPYNB_KERNEL_IDLE_MS=0 disables the idle sweep', async (t) => {
+  const previous = process.env.DSH_IPYNB_KERNEL_IDLE_MS
+  const manager = new KernelManager({}, bridgePath)
+  t.after(async () => {
+    await manager.disposeAll()
+    if (previous === undefined) delete process.env.DSH_IPYNB_KERNEL_IDLE_MS
+    else process.env.DSH_IPYNB_KERNEL_IDLE_MS = previous
+  })
+  const shutdowns = []
+  manager.entries.set('idle-target', {
+    busy: false,
+    startPromise: null,
+    restartPromise: null,
+    stopping: false,
+    lastActivity: 0,
+    async shutdown() { shutdowns.push('shutdown') },
+  })
+  process.env.DSH_IPYNB_KERNEL_IDLE_MS = '0'
+  await manager.sweepIdle()
+  assert.deepEqual(shutdowns, [], '0 disables the idle sweep')
+  process.env.DSH_IPYNB_KERNEL_IDLE_MS = '1000'
+  await manager.sweepIdle()
+  assert.deepEqual(shutdowns, ['shutdown'], 'a positive TTL still sweeps idle kernels')
+  assert.equal(manager.entries.has('idle-target'), false)
+})
+
 test('the oversized-line helper uses a strict byte boundary', () => {
   assert.equal(exceedsMaxLineBytes(64 * 1024 * 1024), false)
   assert.equal(exceedsMaxLineBytes(64 * 1024 * 1024 + 1), true)

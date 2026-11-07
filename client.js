@@ -358,7 +358,7 @@ window.__ModuleLoader__.load({
           const char = fence[1][0]
           const length = fence[1].length
           const info = fence[2].trim()
-          const language = (info.split(/\s+/)[0] || '').replace(/[^\w-]/g, '')
+          const language = (info.split(/\s+/)[0] || '').replace(/[^\w+#.-]/g, '')
           // CommonMark: a closing fence uses the same character and at least
           // as many of them, and may only be followed by spaces.
           const closing = new RegExp('^\\s*' + char + '{' + length + ',}\\s*$')
@@ -931,6 +931,23 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // Older Safari (<16.4) cannot parse lookbehind; keep the same semantics
+    // (each line keeps its trailing newline) with a manual scan.
+    function splitSourceLines(source) {
+      const lines = []
+      let start = 0
+      for (;;) {
+        const index = source.indexOf('\n', start)
+        if (index === -1) {
+          if (start < source.length) lines.push(source.slice(start))
+          break
+        }
+        lines.push(source.slice(start, index + 1))
+        start = index + 1
+      }
+      return lines
+    }
+
     function serializeNotebook(notebook) {
       const value = normalizeNotebook(notebook)
       value.nbformat = 4
@@ -944,7 +961,7 @@ window.__ModuleLoader__.load({
           copy.execution_count = typeof copy.execution_count === 'number' ? copy.execution_count : null
         }
         const source = String(copy.source ?? '')
-        copy.source = source === '' ? [] : source.split(/(?<=\n)/)
+        copy.source = source === '' ? [] : splitSourceLines(source)
         return copy
       })
       assertNotebookMetadataWithinLimits(value)
@@ -1003,7 +1020,9 @@ window.__ModuleLoader__.load({
       if (typeof mime !== 'string' || !/^image\//i.test(mime)) return ''
       const value = Array.isArray(data) ? data.join('') : String(data ?? '')
       if (!value) return ''
-      return 'data:' + mime + ';base64,' + (mime === 'image/svg+xml' ? toBase64(value) : value)
+      // image/jpg is a common alias; nbformat/Jupyter expect image/jpeg.
+      const normalized = mime.toLowerCase() === 'image/jpg' ? 'image/jpeg' : mime
+      return 'data:' + normalized + ';base64,' + (normalized === 'image/svg+xml' ? toBase64(value) : value)
     }
 
     function makeImageResolver(ctx, scope, notebookPath, cell) {
@@ -1191,6 +1210,15 @@ window.__ModuleLoader__.load({
       return value == null ? '' : String(value)
     }
 
+    function renderJsonOutput(value) {
+      try {
+        // A top-level string is JSON (show it quoted), objects get pretty print.
+        return typeof value === 'string' ? JSON.stringify(value) : JSON.stringify(value, null, 2)
+      } catch {
+        return '[unserializable JSON output]'
+      }
+    }
+
     function OutputView({ output, resolveImage }) {
       if (!output || typeof output !== 'object') return null
       if (output.output_type === 'stream') {
@@ -1207,7 +1235,9 @@ window.__ModuleLoader__.load({
         return h('pre', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-error', tabIndex: 0, dangerouslySetInnerHTML: { __html: ansiToHtml(text) } })
       }
       const data = output.data || {}
-      const html = data['text/html'] != null ? mimeText(data['text/html']) : null
+      const htmlText = data['text/html'] != null ? mimeText(data['text/html']) : null
+      // An empty text/html must not hide a usable text/plain fallback.
+      const html = htmlText !== null && htmlText.trim() !== '' ? htmlText : null
       if (html !== null) {
         return h('div', {
           className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-html',
@@ -1220,7 +1250,8 @@ window.__ModuleLoader__.load({
       }
       const png = data['image/png'] != null ? imageSource(data['image/png'], 'image/png') : null
       if (png) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src: png, alt: t('outputImage') })
-      const jpeg = data['image/jpeg'] != null ? imageSource(data['image/jpeg'], 'image/jpeg') : null
+      const jpegValue = data['image/jpeg'] != null ? data['image/jpeg'] : data['image/jpg']
+      const jpeg = jpegValue != null ? imageSource(jpegValue, 'image/jpeg') : null
       if (jpeg) return h('img', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-image', src: jpeg, alt: t('outputImage') })
       if (data['text/markdown'] != null) {
         return h('div', {
@@ -1231,10 +1262,7 @@ window.__ModuleLoader__.load({
         })
       }
       if (typeof data['application/json'] !== 'undefined') {
-        const value = typeof data['application/json'] === 'string'
-          ? data['application/json']
-          : JSON.stringify(data['application/json'], null, 2)
-        return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, value)
+        return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, renderJsonOutput(data['application/json']))
       }
       if (data['text/latex'] != null) {
         return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, mimeText(data['text/latex']))
@@ -1258,6 +1286,20 @@ window.__ModuleLoader__.load({
         },
         props.children,
       )
+    }
+
+    // Remove up to one indent unit (four spaces or one tab) from the line that
+    // contains the caret; used by Shift+Tab in the cell editor.
+    function dedentSourceLine(source, caret) {
+      const lineStart = source.lastIndexOf('\n', Math.max(0, caret - 1)) + 1
+      let remove = 0
+      while (remove < 4 && source[lineStart + remove] === ' ') remove += 1
+      if (remove === 0 && source[lineStart] === '\t') remove = 1
+      if (remove === 0) return { source, caret }
+      return {
+        source: source.slice(0, lineStart) + source.slice(lineStart + remove),
+        caret: Math.max(lineStart, caret - remove),
+      }
     }
 
     function CellView(props) {
@@ -1297,11 +1339,21 @@ window.__ModuleLoader__.load({
           const element = event.currentTarget
           const start = element.selectionStart
           const end = element.selectionEnd
-          const next = source.slice(0, start) + '    ' + source.slice(end)
-          onSource(cell.id, next)
-          requestAnimationFrame(() => {
-            element.selectionStart = element.selectionEnd = start + 4
-          })
+          if (event.shiftKey) {
+            const dedented = dedentSourceLine(source, start)
+            if (dedented.source !== source) {
+              onSource(cell.id, dedented.source)
+              requestAnimationFrame(() => {
+                element.selectionStart = element.selectionEnd = dedented.caret
+              })
+            }
+          } else {
+            const next = source.slice(0, start) + '    ' + source.slice(end)
+            onSource(cell.id, next)
+            requestAnimationFrame(() => {
+              element.selectionStart = element.selectionEnd = start + 4
+            })
+          }
         }
       }
       const code = cell.cell_type === 'code'
@@ -2588,6 +2640,9 @@ body[data-ds-dark-theme] .dsh-bsb-ipynb-root .dsh-bsb-ipynb-save-state.is-error 
       isImeKeyEvent,
       isSaveShortcut,
       blockedAutosaveDelay,
+      dedentSourceLine,
+      renderJsonOutput,
+      splitSourceLines,
       apply,
       NotebookView,
       CellView,

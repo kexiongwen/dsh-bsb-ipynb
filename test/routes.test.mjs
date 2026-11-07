@@ -166,6 +166,23 @@ test('the host admission fence rejects requests before routing', async () => {
   assert.equal(json.error.code, 'forbidden')
 })
 
+test('repeated admission-fence failures are rate limited', async (t) => {
+  const ctx = makeCtx()
+  ctx.connection.requestRejection = () => {
+    throw new Error('fence boom')
+  }
+  const logged = []
+  t.mock.method(console, 'error', (...args) => {
+    logged.push(args)
+  })
+  for (let index = 0; index < 3; index += 1) {
+    const { state, json } = await invoke(ctx, makeKernels(), makeReq())
+    assert.equal(state.status, 403)
+    assert.equal(json.error.code, 'forbidden')
+  }
+  assert.equal(logged.length, 1, 'only the first failure within the interval is logged')
+})
+
 test('non-JSON POST bodies are rejected', async () => {
   const { state, json } = await invoke(
     makeCtx(),

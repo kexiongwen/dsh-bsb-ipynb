@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "dsh-bsb-ipynb",
+    "title": "Jupyter Notebook",
     "description": "Preview and run .ipynb notebooks in the sidebar file tree — edit cells, execute Python in a persistent kernel, and save results back."
   }
 }

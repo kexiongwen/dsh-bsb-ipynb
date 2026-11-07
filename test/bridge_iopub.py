@@ -221,6 +221,7 @@ class IOPubTests(unittest.TestCase):
         relevant = [event.get("text", event["type"]) for event in self.events]
         self.assertEqual(relevant, ["FIRST", "SECOND", "status", "execute_reply"])
         self.assertTrue(self.events[-1]["ok"])
+        self.assertNotIn("error", self.events[-1], "successful replies omit the error field")
         for event in self.events:
             self.assertEqual(event["cell_id"], "current-cell")
             self.assertEqual(event["exec_id"], "current-exec")
@@ -403,6 +404,7 @@ class IOPubTests(unittest.TestCase):
         self.bridge.handle_iopub(message(self.client.parent, text="CURRENT OUTPUT", name="stdout"))
         self.finish_run(next_run)
         self.assertTrue(self.events[-1]["ok"])
+        self.assertNotIn("error", self.events[-1], "successful replies omit the error field")
         self.assertEqual([event.get("text", event["type"]) for event in self.events],
                          ["CURRENT OUTPUT", "status", "execute_reply"])
 
@@ -788,6 +790,7 @@ def real_kernel_regression():
         reply = next(event for event in events if event.get("type") == "execute_reply"
                      and event.get("exec_id") == exec_id)
         assert reply["ok"], reply
+        assert "error" not in reply, reply
 
     threads = []
     with tempfile.TemporaryDirectory(prefix="dsh-iopub-regression-") as cwd:

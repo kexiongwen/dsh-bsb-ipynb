@@ -328,7 +328,7 @@ test('saveNotebookFile maps serialization overflow to a too-large API error', as
   assert.equal(await readFile(file, 'utf8'), original)
 })
 
-test('saveNotebookFile leaves unexpected serialization errors as internal failures', async (t) => {
+test('saveNotebookFile maps circular metadata to a bad request', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
@@ -337,7 +337,9 @@ test('saveNotebookFile leaves unexpected serialization errors as internal failur
   const notebook = emptyNotebook()
   notebook.metadata.circular = notebook.metadata
   await assert.rejects(saveNotebookFile(file, notebook, read.version), (error) => {
-    assert.equal(errorPayload(error).status, 500)
+    assert.equal(error.code, 'bad-request')
+    assert.equal(errorPayload(error).status, 400)
+    assert.match(error.message, /circular/)
     return true
   })
   assert.equal(await readFile(file, 'utf8'), original)
