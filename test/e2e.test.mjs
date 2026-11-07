@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -117,7 +118,11 @@ test('execute route streams a real kernel run to completion', {
     const statusEnvelope = JSON.parse(status.chunks.join(''))
     assert.equal(statusEnvelope.ok, true)
     assert.equal(statusEnvelope.value.running, true)
-    assert.equal(statusEnvelope.value.python, (await discoverInterpreters()).default)
+    const reportedPython = statusEnvelope.value.python
+    assert.equal(typeof reportedPython, 'string')
+    assert.equal(path.isAbsolute(reportedPython), true, 'status reports an absolute interpreter path')
+    assert.equal(existsSync(reportedPython), true, 'the reported interpreter exists on disk')
+    assert.equal(reportedPython, (await discoverInterpreters()).default)
   } finally {
     await kernels.disposeAll()
     await rm(dir, { recursive: true, force: true })

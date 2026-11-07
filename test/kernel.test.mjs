@@ -47,7 +47,7 @@ test('a second execute is rejected without stealing the first listener', { skip 
     const entry = await manager.getOrStart(target, python)
     const firstEvents = []
     const first = entry.run('c1', 'import time\ntime.sleep(0.5)\nprint("first")', (event) => firstEvents.push(event))
-    await sleep(100)
+    assert.equal(entry.busy, true, 'the first run marks the kernel busy')
     await assert.rejects(entry.run('c2', '1'), (error) => error.code === 'kernel-busy')
     const reply = await within(first, 10_000, 'first execution did not settle')
     assert.equal(reply.cell_id, 'c1')
@@ -66,8 +66,10 @@ test('restart settles a running cell and leaves a usable kernel', { skip }, asyn
   try {
     const entry = await manager.getOrStart(target, python)
     const events = []
-    const run = entry.run('c1', 'import time\ntime.sleep(5)\nprint("late")', (event) => events.push(event))
-    await sleep(300)
+    const run = entry.run('c1', 'import time\nprint("started", flush=True)\ntime.sleep(5)\nprint("late")', (event) => events.push(event))
+    // Wait until the kernel has actually started the cell instead of guessing
+    // with a fixed delay.
+    await waitFor(() => events.some((event) => event.type === 'status' && event.execution_state === 'busy'), 10_000)
     await entry.restart()
     const reply = await within(run, 5_000, 'restart did not settle the running cell')
     assert.equal(reply.ok, false)
@@ -85,8 +87,9 @@ test('shutdown and os._exit settle the running cell', { skip }, async (t) => {
   const secondTarget = await makeTarget(t, 'exit.ipynb')
   try {
     const entry = await manager.getOrStart(firstTarget, python)
-    const run = entry.run('c1', 'import time\ntime.sleep(5)', () => {})
-    await sleep(300)
+    const firstEvents = []
+    const run = entry.run('c1', 'import time\nprint("started", flush=True)\ntime.sleep(5)', (event) => firstEvents.push(event))
+    await waitFor(() => firstEvents.some((event) => event.type === 'stream' && event.text.includes('started')), 10_000)
     await manager.shutdown(firstTarget)
     const stopped = await within(run, 5_000, 'shutdown did not settle the running cell')
     assert.equal(stopped.ok, false)
@@ -130,7 +133,7 @@ test('a broken stdin pipe is handled instead of crashing the host', { skip }, as
   try {
     const entry = await manager.getOrStart(target, python)
     entry.proc.stdin.destroy(new Error('write EPIPE'))
-    await sleep(300)
+    await waitFor(() => entry.ready === false, 5_000)
     assert.equal(entry.ready, false)
     await assert.rejects(entry.run('c1', '1'), (error) => error.code === 'kernel-unavailable')
     assert.equal(entry.busy, false)
@@ -187,7 +190,7 @@ test('exec ids keep a restarted cell from stealing the next run', { skip }, asyn
     const entry = await manager.getOrStart(target, python)
     const oldEvents = []
     const oldRun = entry.run('same-cell', 'import time\ntime.sleep(5)\nprint("old")', (event) => oldEvents.push(event))
-    await sleep(300)
+    await waitFor(() => oldEvents.some((event) => event.type === 'status' && event.execution_state === 'busy'), 10_000)
     const restarting = entry.restart()
     assert.equal(entry.ready, false)
     const newEvents = []
@@ -218,7 +221,7 @@ test('an oversized stdout line aborts the running cell and restarts the kernel',
     const entry = await manager.getOrStart(target, python)
     const events = []
     const run = entry.run('big', 'import time\ntime.sleep(5)', (event) => events.push(event))
-    await sleep(300)
+    await waitFor(() => events.some((event) => event.type === 'status' && event.execution_state === 'busy'), 10_000)
     // Simulate a byte flood without materializing 64 MiB in the test.
     entry.stdoutBytes = 64 * 1024 * 1024
     entry.handleStdout('x')

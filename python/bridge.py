@@ -11,15 +11,15 @@ handling stays in the Python ecosystem — no native ZMQ bindings in Node.
 
 Commands (one JSON object per line on stdin):
   {"op": "status"}                          -> {"type": "status_reply", "alive": bool}
+                                               (diagnostic only; the DSH host never sends it)
   {"op": "execute", "cell_id": str, "code": str, "exec_id": str}
   {"op": "interrupt"}
   {"op": "restart", "id": n}                -> {"type": "ready", "op_id": n}
   {"op": "shutdown"}                        -> clean shutdown, then exit(0)
 
 Events (one JSON object per line on stdout):
-  {"type": "ready", "kernel_name": ..., "language_info": {...}}  # op_id echoed
-                                                 after a requested restart
-  {"type": "status_reply", "alive": bool}
+  {"type": "ready", "kernel_name": ...}     # op_id echoed after a requested restart
+  {"type": "status_reply", "alive": bool}   # diagnostic only
   {"type": "status", "execution_state": "busy"|"idle", "cell_id": ...}
   {"type": "stream", "cell_id": ..., "name": "stdout"|"stderr", "text": ...}
   {"type": "display_data", "cell_id": ..., "data": {...}, "metadata": {...}}
@@ -39,6 +39,14 @@ update_display_data/execute_result/error/clear_output/execute_reply, plus a
 kernel_died that belongs to it) echoes the exec_id supplied with that execute
 command, so the host can discard events from a superseded run after restart.
 ready/status_reply/log events carry no exec_id.
+
+Protocol notes:
+- `status`/`status_reply` are diagnostic-only; the DSH host never sends them.
+- `--kernel-name` is an optional label; the DSH host never passes it.
+- Control-channel replies (for example `interrupt_reply`) are not consumed: an
+  interrupt is fire-and-forget.
+- If stdout is gone (host exit), events are dropped; the host notices EOF or
+  the process exit instead of reading an event.
 
 Executions are serialized: a second execute while one is in flight is queued
 and run after the first completes (Jupyter kernels execute one request at a
@@ -81,6 +89,8 @@ def emit(event):
         sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
         sys.stdout.flush()
     except Exception:
+        # stdout is gone (the host exited): dropping the event is the only
+        # option; the host detects EOF or the process exit instead.
         pass
 
 def log(level, message):
@@ -199,7 +209,6 @@ class Bridge:
         event = {
             "type": "ready",
             "kernel_name": getattr(self.km, "kernel_name", "python3") or "python3",
-            "language_info": {},
         }
         if op_id is not None:
             event["op_id"] = op_id
@@ -896,7 +905,7 @@ def main():
     parser.add_argument("--cwd", default=None, help="working directory for the kernel")
     parser.add_argument(
         "--kernel-name", default=None,
-        help="kernel label (always launches this Python interpreter)",
+        help="optional kernel label (diagnostic; the DSH host does not pass it)",
     )
     parser.add_argument(
         "--connection-file", default=None,

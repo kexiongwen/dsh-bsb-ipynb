@@ -158,7 +158,11 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
   assert.equal(registrations.length, 2)
   assert.equal(registrations[0].ns, LOCALE_NS)
   assert.deepEqual(registrations.map((entry) => entry.language).sort(), ['en', 'zh'])
-  assert.deepEqual(Object.keys(registrations[0].dict).sort(), Object.keys(STRINGS.en).sort())
+  const enKeys = Object.keys(registrations[0].dict).sort()
+  const zhKeys = Object.keys(registrations[1].dict).sort()
+  assert.deepEqual(zhKeys, enKeys, 'both locales expose the same string keys')
+  assert.equal(registrations[0].dict.run, 'Run')
+  assert.equal(registrations[1].dict.run, '运行')
   assert.equal(translate('run'), 'Run', 'host preference starts in English')
   active = 'zh'
   assert.equal(translate('run'), '运行', 'translate follows the active host locale')

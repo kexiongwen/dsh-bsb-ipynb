@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, truncate, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, truncate, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { registerIpynbRoutes } from '../lib/routes.js'
@@ -102,15 +102,15 @@ function makeKernels() {
     peek() {
       return entry
     },
-    async interrupt() {
-      calls.push({ interrupt: true })
+    async interrupt(target) {
+      calls.push({ interrupt: true, target })
     },
-    async shutdown() {
-      calls.push({ shutdown: true })
+    async shutdown(target) {
+      calls.push({ shutdown: true, target })
       return true
     },
-    async restart() {
-      calls.push({ restart: true })
+    async restart(target) {
+      calls.push({ restart: true, target })
     },
   }
 }
@@ -136,8 +136,17 @@ test('health reports version, kernels and interpreter counts', async () => {
   assert.equal(json.ok, true)
   assert.equal(json.value.version, packageJson.version)
   assert.equal(json.value.kernels, 1)
-  assert.equal(typeof json.value.interpreters.checked, 'boolean')
-  assert.equal(typeof json.value.interpreters.total, 'number')
+  const interpreters = json.value.interpreters
+  assert.equal(typeof interpreters.checked, 'boolean')
+  assert.ok(Number.isInteger(interpreters.total) && interpreters.total >= 0)
+  assert.ok(Number.isInteger(interpreters.ok) && interpreters.ok >= 0)
+  if (interpreters.checked) {
+    assert.ok(interpreters.total >= 1, 'a warmed cache reports at least one interpreter')
+    assert.ok(interpreters.ok <= interpreters.total)
+  } else {
+    assert.equal(interpreters.total, 0, 'a cold cache reports no interpreters yet')
+    assert.equal(interpreters.ok, 0)
+  }
 })
 
 test('interpreters lists discovered entries with a default', async () => {
@@ -599,6 +608,7 @@ test('status, interrupt, restart and shutdown work after the notebook is deleted
   await writeFile(file, serializeNotebook(emptyNotebook()))
   const kernels = makeKernels()
   const ctx = makeCtx({ cwd: dir })
+  const canonical = path.join(await realpath(dir), 'demo.ipynb')
   await rm(file)
 
   const status = await invoke(
@@ -609,10 +619,10 @@ test('status, interrupt, restart and shutdown work after the notebook is deleted
   assert.equal(status.state.status, 200)
   assert.equal(status.json.value.running, true, 'control status must find the kernel by path')
 
-  for (const [url, expected] of [
-    ['/ipynb/interrupt', { interrupt: true }],
-    ['/ipynb/restart', { restart: true }],
-    ['/ipynb/shutdown', { shutdown: true }],
+  for (const [url, key, requireTarget] of [
+    ['/ipynb/interrupt', 'interrupt', false],
+    ['/ipynb/restart', 'restart', true],
+    ['/ipynb/shutdown', 'shutdown', true],
   ]) {
     const { state, json } = await invoke(
       ctx,
@@ -626,8 +636,8 @@ test('status, interrupt, restart and shutdown work after the notebook is deleted
     assert.equal(state.status, 200, url)
     assert.equal(json.ok, true, url)
     assert.ok(
-      kernels.calls.some((call) => call[Object.keys(expected)[0]]),
-      `${url} must reach the kernel`,
+      kernels.calls.some((call) => call[key] && (!requireTarget || call.target === canonical)),
+      `${url} must reach the kernel${requireTarget ? ' for the canonical target' : ''} (canonical=${canonical}, calls=${JSON.stringify(kernels.calls)})`,
     )
   }
 })
