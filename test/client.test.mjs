@@ -648,6 +648,32 @@ test('the save preflight measures the same serialized size the server caps', asy
   assert.match(capacityText(exact), new RegExp((exact / 1048576).toFixed(1)))
 })
 
+test('notebook capacity caches default results by snapshot identity and bypasses custom limits', async () => {
+  const { exports } = await loadClient()
+  const { notebookCapacity, METADATA_DEPTH_LIMIT } = exports.__test
+  const snapshot = notebookWithMetadata({})
+  const first = notebookCapacity(snapshot)
+  assert.equal(first.ok, true)
+  assert.equal(notebookCapacity(snapshot), first, 'the same snapshot reuses its result without serializing again')
+
+  const custom = notebookCapacity(snapshot, first.bytes - 1)
+  assert.notStrictEqual(custom, first, 'a custom limit cannot consume the cached default result')
+  assert.deepEqual(custom, { ok: false, bytes: first.bytes })
+  assert.notStrictEqual(notebookCapacity(snapshot, first.bytes - 1), custom, 'custom-limit results are not cached')
+  assert.equal(notebookCapacity(snapshot), first, 'a custom-limit call cannot overwrite the default result')
+
+  const nextSnapshot = { ...snapshot }
+  const next = notebookCapacity(nextSnapshot)
+  assert.notStrictEqual(next, first, 'a new snapshot is measured again even when its contents are equal')
+  assert.deepEqual(next, first)
+  assert.equal(notebookCapacity(nextSnapshot), next)
+
+  const failedSnapshot = notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT + 1))
+  const failed = notebookCapacity(failedSnapshot)
+  assert.equal(failed.ok, false)
+  assert.equal(notebookCapacity(failedSnapshot), failed, 'failure results are cached too')
+})
+
 function notebookWithMetadata(metadata, location = 'notebook') {
   const notebook = {
     cells: [{

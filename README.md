@@ -136,6 +136,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 - Results are written back by the client and persisted on save; the server never appends output in the background.
 - No "new notebook" wizard yet: create an empty `.ipynb` in the file tree or open an existing file.
 - Workspace containment uses the session cwd; when the active root is a linked git worktree, requests may return 403 (not supported yet).
+- **Path-error side channel** — for a path outside the session workspace, an existing and accessible target generally returns 403, while a missing or inaccessible target returns 404 (possibly with a reason). An already-admitted same-user client can use this distinction to probe host path existence or accessibility; it does not allow reading or writing outside the workspace.
 - **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409) and locked files fail reads with `read-blocked` (409); images inside `text/html` output are not re-resolved.
 - Very large outputs make browser rendering slow; clear outputs or run in smaller chunks.
 

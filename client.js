@@ -1012,21 +1012,32 @@ window.__ModuleLoader__.load({
     // with 413, so measuring the same serialization is the strictest check.
     const NOTEBOOK_CAP_BYTES = 32 * 1024 * 1024
     const capacityEncoder = new TextEncoder()
+    // Immutable notebook snapshots make their default-limit results reusable;
+    // weak keys do not retain snapshots after the viewer discards them.
+    const notebookCapacities = new WeakMap()
 
     function notebookCapacity(notebook, limit = NOTEBOOK_CAP_BYTES) {
       if (!notebook || !Array.isArray(notebook.cells)) return { ok: true, bytes: 0 }
-      let bytes
+      const cacheable = limit === NOTEBOOK_CAP_BYTES
+      if (cacheable && notebookCapacities.has(notebook)) return notebookCapacities.get(notebook)
+      let result
       try {
-        bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
+        const bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
+        result = { ok: bytes <= limit, bytes }
       } catch (error) {
-        if (error && error.code === 'metadata-too-complex') return { ok: false, reason: 'metadata-too-complex', bytes: 0 }
-        // A notebook whose pretty-printed form exceeds the engine's maximum
-        // string length cannot be uploaded at all; report it as a capacity
-        // failure instead of letting the RangeError escape as a rejected save.
-        if (error instanceof RangeError) return { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES }
-        throw error
+        if (error && error.code === 'metadata-too-complex') {
+          result = { ok: false, reason: 'metadata-too-complex', bytes: 0 }
+        } else if (error instanceof RangeError) {
+          // A notebook whose pretty-printed form exceeds the engine's maximum
+          // string length cannot be uploaded at all; report it as a capacity
+          // failure instead of letting the RangeError escape as a rejected save.
+          result = { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES }
+        } else {
+          throw error
+        }
       }
-      return { ok: bytes <= limit, bytes }
+      if (cacheable) notebookCapacities.set(notebook, result)
+      return result
     }
 
     function interpolateText(text, params) {
@@ -1512,7 +1523,7 @@ window.__ModuleLoader__.load({
 
     function Toolbar(props) {
       const { kernel, python, interpreters, running, runAllRunning, onRunAll, onInterrupt, onRestart, onShutdown, onSave, onReload, onPython, saveState, dirty, conflict } = props
-      const state = !kernel.running ? t('off') : kernel.busy ? t('busy') : t('idle')
+      const state = kernel.busy ? t('busy') : !kernel.running ? t('off') : t('idle')
       return h(
         'div',
         { className: 'dsh-bsb-ipynb-toolbar' },
@@ -1522,7 +1533,7 @@ window.__ModuleLoader__.load({
           h('span', {
             className:
               'dsh-bsb-ipynb-kernel-dot' +
-              (kernel.running ? (kernel.busy ? ' is-busy' : ' is-ready') : ''),
+              (kernel.busy ? ' is-busy' : kernel.running ? ' is-ready' : ''),
             title: t('kernel') + ': ' + state,
           }),
           h('span', { className: 'dsh-bsb-ipynb-kernel-label', 'aria-live': 'polite' }, state),
@@ -2049,7 +2060,7 @@ window.__ModuleLoader__.load({
         setCapacityBlocked(false)
         runningRef.current = cellId
         setRunningCell(cellId)
-        setKernel((previous) => ({ ...previous, running: true, busy: true, executionState: 'busy' }))
+        setKernel((previous) => ({ ...previous, busy: true, executionState: 'busy' }))
         updateRunCell(run.seq, cellId, (entry) => ({ ...entry, outputs: [], execution_count: null }))
         const restorePreRunOutputs = () => {
           if (!isCurrentRun()) return
@@ -2091,7 +2102,7 @@ window.__ModuleLoader__.load({
           } else {
             setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
           }
-          setKernel((previous) => ({ ...previous, busy: false, executionState: 'idle' }))
+          setKernel((previous) => ({ ...previous, busy: false, executionState: previous.running ? 'idle' : 'none' }))
           if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
           return false
         } finally {

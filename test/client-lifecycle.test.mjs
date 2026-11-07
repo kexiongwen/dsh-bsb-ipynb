@@ -1053,6 +1053,57 @@ test('a running cell disables Run on every cell', async (t) => {
   await app.settle()
 })
 
+test('a hidden notebook keeps a stopped kernel off through execution preflight failure', async (t) => {
+  const app = mountNotebook(t, { locale: true })
+  const off = { running: false, ready: false, busy: false, executionState: 'none' }
+  const kernelState = () => {
+    const { running, ready, busy, executionState } = app.toolbar.kernel
+    return { running, ready, busy, executionState }
+  }
+  const toolbarState = () => {
+    const toolbar = app.component('Toolbar')
+    const rendered = toolbar.type(toolbar.props)
+    const label = findElement(rendered, (value) => String(value.props?.className || '').includes('dsh-bsb-ipynb-kernel-label'))
+    const dot = findElement(rendered, (value) => String(value.props?.className || '').includes('dsh-bsb-ipynb-kernel-dot'))
+    assert.ok(label)
+    assert.ok(dot)
+    return { state: label.props.children[0], dot: dot.props.className }
+  }
+
+  // mountNotebook defaults to visible: false, so no status event starts the kernel.
+  assert.deepEqual(kernelState(), off)
+  assert.deepEqual(toolbarState(), { state: 'off', dot: 'dsh-bsb-ipynb-kernel-dot' })
+  await app.settle()
+  const request = app.run()
+  assert.ok(request)
+  assert.deepEqual(kernelState(), { running: false, ready: false, busy: true, executionState: 'busy' })
+  assert.deepEqual(toolbarState(), { state: 'busy', dot: 'dsh-bsb-ipynb-kernel-dot is-busy' })
+
+  request.resolve(response({ ok: false, error: { code: 'kernel-unavailable', message: 'unavailable' } }, 503))
+  await app.settle()
+  assert.deepEqual(kernelState(), off)
+  assert.deepEqual(toolbarState(), { state: 'off', dot: 'dsh-bsb-ipynb-kernel-dot' })
+  assert.equal(app.toolbar.running, false)
+  assert.equal(app.cell.busy, false)
+  assert.equal(app.banner?.key, 'kernelUnavailable')
+  assert.equal(app.banner?.textKey, 'installHint')
+  assert.equal(Object.hasOwn(app.banner, 'text'), false)
+  const english = 'No Python interpreter with jupyter_client and ipykernel was found. Install them with: python -m pip install jupyter_client ipykernel'
+  assert.equal(app.bannerText, english)
+  app.setLocale('zh')
+  const chinese = '未找到安装了 jupyter_client 和 ipykernel 的 Python 解释器。 可使用以下命令安装：python -m pip install jupyter_client ipykernel'
+  assert.equal(app.bannerText, chinese)
+  assert.equal(toolbarState().state, '未启动')
+
+  const retry = app.run()
+  assert.ok(retry)
+  assert.equal(app.requests('execute').length, 2, 'the failed preflight releases the execution lock')
+  retry.resolve(response({ ok: false, error: { code: 'kernel-unavailable', message: 'unavailable' } }, 503))
+  await app.settle()
+  assert.deepEqual(kernelState(), off)
+  assert.equal(app.bannerText, chinese)
+})
+
 test('a kernel death is not undone by the terminal reply it precedes', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
