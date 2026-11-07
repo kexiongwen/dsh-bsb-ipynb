@@ -1,11 +1,27 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import { findPython, tempDir } from './python-helper.mjs'
 
 const bridge = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
 const python = findPython('jupyter_client, ipykernel')
+const unitPython = findPython()
+const runFile = promisify(execFile)
+const fixture = fileURLToPath(new URL('./bridge_iopub.py', import.meta.url))
+
+async function runFixture(executable, ...args) {
+  try {
+    return await runFile(executable, ['-B', fixture, '--bridge', bridge, ...args], {
+      timeout: 45_000,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    })
+  } catch (error) {
+    assert.fail(`IOPub regression fixture failed: ${error.message}\n${error.stdout || ''}\n${error.stderr || ''}`)
+  }
+}
 
 function startBridge(cwd) {
   const proc = spawn(python, ['-u', bridge, '--cwd', cwd], {
@@ -285,4 +301,22 @@ test('bridge tags every execution event with its exec_id and fails input() fast'
   } finally {
     await shutdown(context.proc)
   }
+})
+
+test('bridge IOPub routing bounds retained messages and preserves registration/output ordering', {
+  skip: !unitPython && 'Requires Python',
+}, async () => {
+  const result = await runFixture(unitPython)
+  assert.match(result.stderr, /OK\s*$/)
+})
+
+test('a real kernel drops 1000 background messages from a completed cell without retaining or misattributing them', {
+  skip: !python && 'Requires jupyter_client/ipykernel',
+}, async () => {
+  const result = await runFixture(python, '--integration')
+  const value = JSON.parse(result.stdout.trim())
+  assert.equal(value.received, 1000)
+  assert.equal(value.retained, 0)
+  assert.equal(value.forwarded, 0)
+  assert.equal(value.currentOutput, 'CURRENT RESULT\n')
 })

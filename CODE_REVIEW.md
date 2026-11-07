@@ -1,8 +1,8 @@
 # dsh-bsb-ipynb 代码审核报告（现存问题）
 
-- **审核对象**：`dsh-bsb-ipynb`，git HEAD `8e0e1f4` + 当前修复的未提交工作树；除第一批修复、DSH 最低版本声明、对应测试和本报告外无无关改动。
+- **审核对象**：`dsh-bsb-ipynb`，git HEAD `e38177f` + 测试去重与合并的未提交工作树；第一批修复和 DSH 最低版本声明已包含在 HEAD，本次仅整理测试入口并同步文档。
 - **环境**：macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1。
-- **验证依据**：`npm test` **292 pass / 0 fail / 0 skipped**（约 19.8s）；行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%（client.js 24.8%，动态加载及 vm 沙箱用例使该数字不代表完整客户端行为覆盖）；静态检查、`npm pack --dry-run`（18 文件，含 `examples/demo.ipynb`）、README 数字/错误码/路由核对均通过。
+- **验证依据**：`npm test` **289 pass / 0 fail / 0 skipped**（约 22.0s）；行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%（client.js 24.8%，动态加载及 vm 沙箱用例使该数字不代表完整客户端行为覆盖）；静态检查、`npm pack --dry-run`（18 文件，含 `examples/demo.ipynb`）、README 数字/错误码/路由核对均通过。
 - **方式**：按 6 个领域（宿主 HTTP/内核、存储/路径/env、客户端渲染、客户端状态机、Python 桥、测试/文档）逐文件审查，关键结论均给出 `file:line`、触发条件与可重跑证据。第 0 节记录当前已关闭项，后续章节仅描述当前仍存在的问题或测试缺口。
 - **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH 0.2.2-rc.1 asar 运行时、dsh-better-sidebar 0.30.1 源码/类型、npm registry 或上游仓库；【推测】= 仅代码推理。
 
@@ -27,6 +27,8 @@
 | L-6（umask 部分） | 临时文件写入后、rename 前显式 `chmod` 为原文件 permission bits，避免 0664 经 umask 变 0644（`lib/notebook.js:439-444`）。 | `test/notebook.test.mjs:170-187` 在 umask 022 下验证 0664 保持。ACL/xattr/硬链接因 rename 换 inode 的问题不在本批范围。 |
 | D-2 | `examples` 已加入 `package.json files`（`package.json:32`）。 | `test/package.test.mjs:5-9` 防回归；`npm pack --dry-run` 为 18 文件且包含 `examples/demo.ipynb`。 |
 | D-3 | `package.json:6-9` 已声明 `"engines": {"node": ">=20", "dsh": ">=0.2.2-rc.1"}`，与 README 最低 DSH 版本一致。 | `test/package.test.mjs:12-15` 断言安装器可读取的最低版本；旧 DSH 将被安装器版本约束阻止。 |
+| 测试去重 | 删除 `routes.test.mjs` 末尾 3 个与 `execute-disconnect.test.mjs` 重复的断连用例，以及随之失去调用方的 `trackedRes()`；专用断连覆盖保持不变。 | `node --test test/routes.test.mjs test/execute-disconnect.test.mjs` **41/41**；全量测试由 292 降为 **289**，0 失败、0 跳过。 |
+| 测试合并 | `env.test.mjs` + `kernel-interpreter.test.mjs` 合并为 `test/interpreter.test.mjs`；`bridge-iopub.test.mjs` wrapper 并入 `test/bridge.test.mjs`，`bridge_iopub.py` fixture 保留。各 test、skip 条件和环境清理逻辑不变，未共享 venv。 | 合并入口 `node --test test/interpreter.test.mjs test/bridge.test.mjs` **9/9**；全量仍为 **289**，0 失败、0 跳过。 |
 
 ---
 
@@ -100,7 +102,7 @@
 - **内核/桥**：restart 窗口内 `is_alive()` 可能误报 kernel_died（宿主单飞提交不可达）；`exec_queue` 无上限（同上）；死协议/文档漂移：`status`/`status_reply` 无调用方、`--kernel-name` 宿主从不传、ready 的 `language_info` 恒 `{}`、`emit()` 吞 stdout 写失败、成功 `execute_reply` 恒带 `error:null`、control `interrupt_reply` 从不消费。
 - **宿主**：dispose 晚到清理重复调用一次 `shutdown()`（无害；真实流上二次写已 end 的 stdin 会 `ERR_STREAM_WRITE_AFTER_END`）；`index.js:17-19` 的 `disposeAll()` 未 await；fence 抛异常时每请求打印完整 stack（持续故障期刷屏）；`/interpreters` 冷启动仍同步探测（按设计，无总体超时）。
 - **客户端**：`image/jpg` 未归一化为 `image/jpeg`；空 `text/html` 吞掉 `text/plain` 回退；`application/json` 顶层字符串显示裸文本；fence 语言串 `replace(/[^\w-]/g,'')` 丢 `c++`/`c#`；`source.split(/(?<=\n)/)` lookbehind（旧 Safari 解析风险）；`ALLOWED_TAGS` 放行任意 `class`（视觉伪装面）；`application/json` 输出 `JSON.stringify` 无深度保护；解释器获取失败时 select 仍显示误导文案（`client.js:1335`）；执行中编辑态快捷键 Ctrl+Enter/Ctrl+S 静默早退（`client.js:1805,1545`）。
-- **测试/文档**：`routes.test.mjs` 的 root 跳过条件未在 README 说明；少量弱断言/同义反复（`client.test.mjs:149` 注册 dict 与自身比 key；`routes.test.mjs:173` `/health` 只 `typeof`；`:551-554` 未绑定 target；`e2e.test.mjs:120` 用默认值断言默认值）；真实内核测试用固定 `sleep`（有 `within()` 兜底）；`bridge_iopub.py` 的 22 个 unittest 在 node 计数中只显示 2 个（非假绿，计数失真）；locale meta `title` 直接用包名。
+- **测试/文档**：`routes.test.mjs` 的 root 跳过条件未在 README 说明；少量弱断言/同义反复（`client.test.mjs:149` 注册 dict 与自身比 key；`routes.test.mjs:132` `/health` 只 `typeof`；`:517-520` 未绑定 target；`e2e.test.mjs:120` 用默认值断言默认值）；真实内核测试用固定 `sleep`（有 `within()` 兜底）；`bridge_iopub.py` 的 22 个 unittest 在 node 计数中只显示 2 个（非假绿，计数失真）；locale meta `title` 直接用包名。
 
 ---
 
@@ -143,9 +145,9 @@
 
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
-| 全量测试 | `npm test` | **292 pass / 0 fail / 0 skipped**，约 19.8s |
-| 当前回归 | `node --test test/client.test.mjs test/notebook.test.mjs test/package.test.mjs`；`npm pack --dry-run --json` | examples 打入 18 文件产物；Markdown/权限/清单/宿主主题断言及 DSH 最低版本断言通过 |
-| 覆盖率 | `node --experimental-test-coverage --test …` | 宿主行覆盖沿用上轮 291 测试测量（本轮仅 manifest/声明测试变化）；当前全量测试 292 pass，client 动态加载覆盖率仅作风险信号 |
+| 全量测试 | `npm test` | **289 pass / 0 fail / 0 skipped**，约 22.0s |
+| 当前回归 | `node --test test/client.test.mjs test/notebook.test.mjs test/package.test.mjs`；`node --test test/routes.test.mjs test/execute-disconnect.test.mjs`；`node --test test/interpreter.test.mjs test/bridge.test.mjs`；`npm pack --dry-run --json` | examples 打入 18 文件产物；路由与专用断连 **41/41**；合并后的 interpreter/bridge 入口 **9/9**；全量测试数保持 289 |
+| 覆盖率 | `node --experimental-test-coverage --test …` | 宿主行覆盖沿用上轮 291 测试测量（本轮仅 manifest/声明测试变化）；当前全量测试 289 pass，client 动态加载覆盖率仅作风险信号 |
 | M-1 | `local-scratch/ipynb-current-quality-probe.mjs`；`test/client.test.mjs:323-342` | 当前仍复现自动链接被 `<em>` 拆断、wiki URL 破坏 target、图片 `_` 注入；`&` 双重转义已关闭 |
 | M-2 | 当前源码 `local-scratch` 深度 JSON 故障注入 | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-3 | 当前源码 `local-scratch` 真实内核 start_channels 故障注入 | 失败后约 14,963 次 IOPub 调用/秒、无 kernel_died、新内核存活 |
