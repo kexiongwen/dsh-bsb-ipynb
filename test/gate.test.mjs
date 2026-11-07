@@ -233,19 +233,20 @@ test('resolveWorkspace rejects a relative session cwd', async () => {
 
 test('control resolution retries a transient file change instead of failing', async (t) => {
   const { dir } = await workspace(t)
-  const target = path.join(dir, 'a.ipynb')
   const realLstat = fsp.lstat
   const realReadlink = fsp.readlink
   let linkServed = false
   t.mock.method(fsp, 'lstat', async (file) => {
-    if (!linkServed && path.resolve(String(file)) === path.resolve(target)) {
+    // Match on the basename: the tmpdir path may be an alias (/var vs
+    // /private/var on macOS, short names on some Windows runners).
+    if (!linkServed && path.basename(String(file)) === 'a.ipynb') {
       linkServed = true
       return { isSymbolicLink: () => true, dev: 1, ino: 2, birthtimeMs: 3 }
     }
     return realLstat.call(fsp, file)
   })
   t.mock.method(fsp, 'readlink', async (file) => {
-    if (path.resolve(String(file)) === path.resolve(target)) return 'elsewhere.ipynb'
+    if (path.basename(String(file)) === 'a.ipynb') return 'elsewhere.ipynb'
     return realReadlink.call(fsp, file)
   })
   const kernelPaths = new KernelPaths(ctxFor(dir), { peek: () => null })
