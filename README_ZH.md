@@ -12,9 +12,9 @@
   <a href="https://github.com/kexiongwen/dsh-bsb-ipynb"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-kexiongwen%2Fdsh--bsb--ipynb-181717?logo=github"></a>
   <a href="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml"><img alt="CI" src="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
-  <img alt="Node.js >= 20" src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white">
-  <img alt="DSH >= 0.2.2-rc.1" src="https://img.shields.io/badge/DSH-%3E%3D0.2.2--rc.1-4C8DFF">
-  <img alt="better-sidebar 0.30.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.30.x-8A2BE2">
+  <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.1+" src="https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-4C8DFF"></a>
+  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.30.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.30.x-8A2BE2"></a>
 </p>
 
 <p align="center">
