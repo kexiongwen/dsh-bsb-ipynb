@@ -248,35 +248,72 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // Inline link/image destinations may contain one level of balanced
+    // parentheses, so wiki-style URLs such as Foo_(bar) stay intact.
+    const INLINE_DESTINATION = '((?:[^()\\s]|\\([^()\\s]*\\))+)'
+    const INLINE_IMAGE_PATTERN = new RegExp('!\\[([^\\]]*)\\]\\(' + INLINE_DESTINATION + '\\)', 'g')
+    const INLINE_LINK_PATTERN = new RegExp('\\[([^\\]]+)\\]\\(' + INLINE_DESTINATION + '\\)', 'g')
+
     function renderInline(value) {
-      let text = escapeHtml(value)
-      const codes = []
-      text = text.replace(/`([^`]+)`/g, (match, code) => {
-        codes.push(code)
-        return '\u0000CODE' + (codes.length - 1) + '\u0000'
-      })
-      // Captured text and attribute values are already escaped. Re-escaping
-      // them here would turn entities such as &amp; into visible text.
-      text = text.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, src) => {
+      // Control characters carry no Markdown meaning, so one of them can mark
+      // already-rendered fragments. Stripping it from the input keeps user
+      // text from ever colliding with a placeholder.
+      const token = '\u0001'
+      let text = String(value ?? '').replace(/[\u0000\u0001]/g, '')
+      const parts = []
+      const tokenPattern = /\u0001(\d+)\u0001/g
+      const placeholder = (html) => {
+        parts.push(html)
+        return token + (parts.length - 1) + token
+      }
+
+      // Emphasis applies to plain text only; callers pass already-escaped
+      // text. Link labels are inline content, so they get the same treatment.
+      const emphasis = (escapedText) => escapedText
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+        .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+        .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+        .replace(/(^|[^_])_([^_\s][^_]*)_/g, '$1<em>$2</em>')
+
+      // Code spans first: their contents must not take part in any later link
+      // or emphasis parsing.
+      text = text.replace(/`([^`]+)`/g, (match, code) => placeholder('<code>' + escapeHtml(code) + '</code>'))
+
+      // Links and images are captured before escaping so their attributes are
+      // escaped exactly once and emphasis can never rewrite them.
+      text = text.replace(INLINE_IMAGE_PATTERN, (match, alt, src) => {
         const url = sanitizeUrl(src, { image: true })
         if (!url) return alt
-        return '<img src="' + url + '" alt="' + alt + '" loading="lazy">'
+        return placeholder('<img src="' + escapeHtml(url) + '" alt="' + escapeHtml(alt) + '" loading="lazy">')
       })
-      text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
+      text = text.replace(INLINE_LINK_PATTERN, (match, label, href) => {
         const url = sanitizeUrl(href)
         if (!url) return label
-        return '<a href="' + url + '" target="_blank" rel="noreferrer noopener">' + label + '</a>'
+        return placeholder('<a href="' + escapeHtml(url) + '" target="_blank" rel="noreferrer noopener">' + emphasis(escapeHtml(label)) + '</a>')
       })
-      text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      text = text.replace(/__([^_]+)__/g, '<strong>$1</strong>')
-      text = text.replace(/~~([^~]+)~~/g, '<del>$1</del>')
-      text = text.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
-      text = text.replace(/(^|[^_])_([^_\s][^_]*)_/g, '$1<em>$2</em>')
+
+      // Bare URLs become links before emphasis can split them at `_` or `*`.
       text = text.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (match, prefix, url) => {
-        return prefix + '<a href="' + url + '" target="_blank" rel="noreferrer noopener">' + url + '</a>'
+        const safe = sanitizeUrl(url)
+        if (!safe) return match
+        return prefix + placeholder('<a href="' + escapeHtml(safe) + '" target="_blank" rel="noreferrer noopener">' + escapeHtml(url) + '</a>')
       })
-      text = text.replace(/\u0000CODE(\d+)\u0000/g, (match, index) => '<code>' + codes[Number(index)] + '</code>')
-      return text
+
+      // Only plain text remains: escape it once, then apply emphasis.
+      text = emphasis(escapeHtml(text))
+
+      // Restore fragments; loop so a code span inside a link label resolves too.
+      let restored = text
+      for (let depth = 0; depth < 8 && restored.includes(token); depth += 1) {
+        const next = restored.replace(tokenPattern, (match, index) => {
+          const part = parts[Number(index)]
+          return part === undefined ? '' : part
+        })
+        if (next === restored) break
+        restored = next
+      }
+      return restored
     }
 
     function renderMarkdown(source, options) {

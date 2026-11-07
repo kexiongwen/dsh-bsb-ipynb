@@ -340,6 +340,67 @@ test('markdown escapes code, URLs and image attributes exactly once', async () =
   )
 })
 
+test('inline emphasis never rewrites link attributes or image names', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown, renderMarkdownWithImages } = exports.__test
+  assert.equal(
+    renderMarkdown('[wiki](https://en.wikipedia.org/wiki/Foo_(bar))'),
+    '<p><a href="https://en.wikipedia.org/wiki/Foo_(bar)" target="_blank" rel="noreferrer noopener">wiki</a></p>',
+  )
+  assert.equal(
+    renderMarkdown('[q](https://example.test/?user_id=1&my_param=2)'),
+    '<p><a href="https://example.test/?user_id=1&amp;my_param=2" target="_blank" rel="noreferrer noopener">q</a></p>',
+  )
+  assert.equal(
+    renderMarkdown('see https://example.test/a_b_c now'),
+    '<p>see <a href="https://example.test/a_b_c" target="_blank" rel="noreferrer noopener">https://example.test/a_b_c</a> now</p>',
+  )
+  assert.equal(
+    renderMarkdown('![alt_a_b](img/my_image_v2.png)'),
+    '<p><img src="img/my_image_v2.png" alt="alt_a_b" loading="lazy"></p>',
+  )
+  assert.equal(
+    renderMarkdownWithImages('![alt_a_b](img/my_image_v2.png)', (source) => '/sidebar/file?path=' + encodeURIComponent(source)),
+    '<p><img src="/sidebar/file?path=img%2Fmy_image_v2.png" alt="alt_a_b" loading="lazy"></p>',
+  )
+})
+
+test('inline emphasis still applies to plain text and code spans stay literal', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown } = exports.__test
+  assert.equal(
+    renderMarkdown('**bold** and __strong__ and ~~gone~~'),
+    '<p><strong>bold</strong> and <strong>strong</strong> and <del>gone</del></p>',
+  )
+  assert.equal(renderMarkdown('*em* / _em_'), '<p><em>em</em> / <em>em</em></p>')
+  assert.equal(renderMarkdown('`a_b *c*`'), '<p><code>a_b *c*</code></p>')
+  assert.equal(renderMarkdown('a\u0000\u0001b'), '<p>ab</p>')
+  assert.equal(
+    renderMarkdown('[**bold** link](https://example.test)'),
+    '<p><a href="https://example.test" target="_blank" rel="noreferrer noopener"><strong>bold</strong> link</a></p>',
+  )
+  assert.equal(
+    renderMarkdown('[`a_b`](https://example.test)'),
+    '<p><a href="https://example.test" target="_blank" rel="noreferrer noopener"><code>a_b</code></a></p>',
+  )
+})
+
+test('hostile markup cannot add attributes to generated links or images', async () => {
+  const { exports } = await loadClient()
+  const { renderMarkdown } = exports.__test
+  const payloads = [
+    '[x](https://example.test/"><img src=x onerror=alert(1)>)',
+    '![x" onerror="alert(1)](img.png)',
+    '[x" onmouseover="alert(1)](https://example.test)',
+  ]
+  for (const payload of payloads) {
+    const html = renderMarkdown(payload)
+    assert.doesNotMatch(html, /\son(?:error|mouseover|load|click)="/i, payload)
+    assert.doesNotMatch(html, /<img src=x/i, payload)
+    assert.doesNotMatch(html, /<script/i, payload)
+  }
+})
+
 test('markdown refuses javascript links and keeps relative images', async () => {
   const { exports } = await loadClient()
   const { renderMarkdown, sanitizeUrl } = exports.__test
