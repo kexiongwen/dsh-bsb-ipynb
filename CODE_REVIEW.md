@@ -1,7 +1,7 @@
 # dsh-bsb-ipynb 代码审核报告（macOS + Windows 快照，仅未修复项）
 
 > **审核快照**：2026-11-07，macOS APFS 与 Windows 11 实机各一轮。**本文件只保留仍未修复或只修复了一部分的问题**；已经完全修复的条目已删除，修复记录与回归测试见 `git log`（2026-11-07 的系列提交）与 `test/`。
-> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试，按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **393 tests / 349 pass / 44 skip / 0 fail**（Windows 11，约 46.2s）。
+> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取）也已完成（+5 回归）。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **398 tests / 354 pass / 44 skip / 0 fail**（Windows 11，约 44.3s）。
 > **环境**：
 
 | 平台 | 环境 |
@@ -9,17 +9,17 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **393 tests / 349 pass / 44 skip / 0 fail**（2026-11-08）。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **398 tests / 354 pass / 44 skip / 0 fail**（2026-11-08）。
 > **增量复核**：独立审查新增问题编号为 **M-13～M-16**（其中 M-16 已修复）；此前及后续已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
-> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。M-13～M-16 使用当前工作区行号（M-16 已修复）。
+> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。M-13～M-16 使用当前工作区行号（M-15、M-16 已修复）。
 
 **问题总览（仅未修复）**
 
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
-| Medium | 9 | M-2、M-4、M-6、M-7、M-8、M-11、M-13、M-14、M-15 |
+| Medium | 8 | M-2、M-4、M-6、M-7、M-8、M-11、M-13、M-14 |
 | Low | 5 | L-5、L-12、L-13、L-22、L-23 |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
 | 测试缺口 | 5 | T-1、T-3、T-5、T-6、T-8 |
@@ -28,7 +28,7 @@
 
 ---
 
-## 1. Medium（9 项，未修复）
+## 1. Medium（8 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题与影响 | 证据 | 建议 |
 | --- | --- | --- | --- | --- | --- |
@@ -40,7 +40,6 @@
 | **M-11**（P2） | 全平台 | `lib/kernel.js:564-616`（shutdown/kill）、`738-743`（manager 删除）、`757-766`（dispose） | shutdown 2s 时才由 kill 发 SIGTERM，kill 再隔 2s 才 SIGKILL（总计约 4s），外层 grace 却在 2.5s 结束；随后 manager 无条件删条目，disposeAll 更提前 clear。若 SIGTERM 清理卡住，管理器已显示无内核并允许替代启动，旧 bridge 仍活。Windows 上 SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义（代码已注明），清理只能依赖显式 shutdown 协议。 | 【已验证】受控不退出 child：约 **2502ms** 返回时 `managerKnowsEntry=false、processAlive=true、kills=['SIGTERM']`。 | 等待 exit 覆盖完整 SIGKILL 升级；未确认退出前保留 stopping entry 并报告失败，不能当作已回收；测试忽略 SIGTERM、2.5s 不遗忘/不重复启动、SIGKILL+exit 后才删除。 |
 | **M-13**（P1） | 全平台 | `client.js:1661-1675`（invalidate 仅清 savingRef）、`1728-1740`（reload）、`1810-1818`（save 无 signal，旧响应仅被忽略）；`lib/notebook.js:503-531`（read 不与 save 共队列） | Reload 与在途 save 无同步：D0/v1 上发出保存 A 后 Reload，若 host read 先返回 D0/v1 并 adopt，已发出的 A 仍可随后合法提交为 v3；客户端因 generation 失效忽略 v3，界面显示 D0、磁盘却为 A，下一次保存仍用 v1 并收到 409。用户确认“丢弃”的草稿可能晚到落盘，UI/磁盘版本分叉。 | 【已验证】客户端时序复现 `lateServerVersion=v3、nextBaseVersion=v1`；服务端 read/save 调用顺序核对确认可达，未做真实浏览器端到端复现。 | Reload 必须等待/协调在途保存，在保存 settle 后重新 read/adopt 并采用真实最新版本；仅 abort fetch 或忽略响应不能阻止服务器已提交的写入。 |
 | **M-14**（P2） | 全平台 | `lib/routes.js:436-461`（restartRoute） | `/restart` 在 await 前缓存旧 entry，之后未验证当前 entry 身份。两个并发切换 A→B、A→C 可都 shutdown A，随后第一个 start B，第二个却把当前 B restart 而非启动 C；两个请求均 200，C 响应还返回 C，但最终 current=B。相同窗口也可能让旧 entry 的 busy 检查漏过 replacement 的忙态。 | 【已验证】受控路由并发调用序列为 `shutdown:A, shutdown:A, start:B, restart:B`；B、C 请求均 200，C 响应 value.python=C，最终 current=B。 | 按 target 串行化完整 restart/switch 生命周期，或在管理器内提供原子操作；await 后重新核验 entry 身份、busy 与实际 python，响应必须反映真实启动结果。 |
-| **M-15**（P1） | 全平台 | `lib/notebook.js:565-580`（assertNotebookVersion），调用点 `658`、`676` | 版本校验注释声称有界读取，实际是 `stat` 后无界 `fsp.readFile`：文件在二者之间增长可绕过 32MiB 上限并被完整缓冲；一次保存的两次版本校验均受影响。外部写者可扩大到 GB 级造成宿主内存峰值/OOM，增长内容最终还可能只被归为 409 而非 413。此项重开 L-5 中曾认为已经消除的风险。 | 【已验证】确定性增长故障注入在第一次版本读取前把文件增至 40MiB，实际返回/缓冲 **41,943,040 bytes**（cap 33,554,432），最终为 `409 write-conflict`。 | 版本读取复用统一的 `open + fstat + 有界循环`，最多读取 cap+1 字节；补充 stat→read 之间增长的回归测试，并确保两次校验都使用同一安全实现。 |
 
 ---
 
@@ -48,7 +47,7 @@
 
 | ID | 平台 | 位置（快照时） | 问题 | 建议 |
 | --- | --- | --- | --- | --- |
-| L-5 | 全平台 | `lib/notebook.js:565-580,602-693`（`assertNotebookVersion` 与 `writeNotebook`） | 每次保存仍执行 **2 次全量 `readFile` + 2 次 sha256**（32MiB notebook 每次读 64MiB），产生额外 I/O 与哈希成本。stat→readFile 增长窗口导致的无界读取风险见 **M-15**，不能再声称这两次读取已有完整 32MiB 上限保护。 | 复用首次读取的 Buffer 比较；或改 `open`+`fstat` 身份校验以省掉一次读取，同时满足 M-15 的有界读取要求。 |
+| L-5 | 全平台 | `lib/notebook.js`（`assertNotebookVersion` 与 `writeNotebook`） | 每次保存仍执行 **2 次全量有界读取 + 2 次 sha256**（32MiB notebook 每次读 64MiB），产生额外 I/O 与哈希成本。M-15 修复后两次读取均已按 cap 有界，不再有无界内存风险。 | 可用 `open`+`fstat` 身份校验（dev/ino/mtime/size）在文件未变化时省掉第二次全量读，同时保持外部写入检测；单纯复用首次 Buffer 会削弱 CAS。 |
 | L-12 | 全平台 | `client.js:183-220`（`cleanNode`，递归点 195-201）、`222-233`（`sanitizeHtml`） | HTML 清洗器仍为「unwrap 后递归重启父遍历」实现：O(n²)；规模再大时整段 HTML 输出降级为转义文本。try/catch 只防止异常逃逸，未降低复杂度；真实白名单分支无行为测试（T-1）。【已验证】最小 DOM 替身中 500/1000/2000/4000 个未知兄弟标签约 **17.8/55.5/165.0/653.4ms**，符合二次增长（非浏览器耗时）。 | 改显式栈/游标，从替换位置继续，并设节点/深度预算；用最小 DOM 或 jsdom 补白名单及操作计数回归。 |
 | L-13 | POSIX（Windows 不成立） | `lib/env.js:159-206,274-286,42-45` | 探测超时只发 SIGTERM、不升级 SIGKILL：忽略 SIGTERM 的候选（wrapper shell、`SIG_IGN` 的 sitecustomize）使 `execFile` 永不 settle → `discoverInterpreters()` 永久 pending、`inflight` 永不清空、`resetInterpreterCache()` 无效 → `/interpreters`、`/execute`、`/restart` 永久挂起。Windows 上 kill=TerminateProcess，不成立。 | 自行 spawn，超时后 SIGTERM→短宽限→SIGKILL，并等待 close 后 settle；整轮 discovery 加总超时/watchdog。reset 可中止当前 probe，但不能只 `Promise.race` 返回而遗留子进程。 |
 | **L-22** | Windows 形态 | `lib/gate.js:91-150`（`walkTarget`）、`214-233`（`KernelPaths`） | 通过 junction 访问 notebook，先删除其目标目录（junction 悬空后 Node 视为 ENOENT）再调用控制端点：控制路径退化为「请求拼写路径」，与内核 canonical 键不一致 → 活内核不可达（`/status` running:false、interrupt 503）。属于**安全失败方向**，不会控制错内核。 | 可不改；若要修，需要显式处理悬空 reparse point 并保留授权时观察到的 identity。 |
@@ -73,7 +72,7 @@
 | **T-1**（High，测试可信度） | `client.js` 的 `cleanNode`/`sanitizeHtml` vs `test/client.test.mjs` | 白名单清洗器的真实行为测试仍不完整：2026-11-08 新增 `test/client-dom-stub.mjs` 后，`img[src]` 解析、`sanitizeUrl` 图片策略、缺失图片降级与无 DOMParser 降级已有真实 DOM 用例；`cleanNode` 的 DROP_TAGS、属性删除、`javascript:` 链接化、`target+rel` 覆写及 unwrap 主路径仍无覆盖。L-12 藏于此。 | 复用现有最小 DOM stub 补 DROP_TAGS/属性白名单/`a[target][rel]` 断言，以操作计数验证大量未知标签不再反复扫描。 |
 | T-3 | `client.js` 的快捷键/工具栏/解释器切换/轮询/autosave | 客户端主交互缺测试：工具栏 interrupt/restart/shutdown、解释器切换（confirm + localStorage）、`visible` 轮询、1.5s autosave 正路径、`onToolbarState` 上报仍无直接覆盖；2026-11-08 已补阅读态窗口快捷键（目标解析/IME/preventDefault/双触发/unmount）。 | 复用现有 mount harness（已 mock timer/localStorage/confirm）补齐其余交互；补 composition（`isComposing`/229）× 5 快捷键、CapsLock `KeyS`、CRLF 渲染的回归。 |
 | T-5 | `test/routes.test.mjs`、`test/e2e.test.mjs`、`test/execute-disconnect.test.mjs` 等 | `/execute` 的永不 drain 已有真实 `node:http` + TCP 回归，但其余 HTTP 路径仍主要使用手写 `req/res` 替身；NDJSON 分块、真实 `close`/`writableEnded`、header 大小写及中途 abort 的覆盖仍不完整。 | 扩展真实 socket 端到端测试（`/health`、`/read` 成功/404、`/execute` 流式读取与中途 abort），保留现有慢读/永不 drain 用例。 |
-| T-6 | — | 剩余放大/保护/恢复类逻辑缺少回归测试：M-2 的 data 放大与整本预算、M-15 的 stat→read 增长窗口。 | 随对应修复一起补测试。 |
+| T-6 | — | 剩余放大/保护/恢复类逻辑缺少回归测试：M-2 的 data 放大与整本预算。M-15 的 stat→read 增长窗口已随修复补齐（首次/第二次版本校验与 stale-stat 端到端均断言 413）。 | 随 M-2 修复补测试。 |
 | T-8 | `lib/kernel.js`、`lib/routes.js`、`lib/notebook.js`、`client.js`、`test/bridge_iopub.py` | 剩余失败/竞态路径缺回归：M-11 忽略 SIGTERM、M-13 Reload/在途 save、M-14 并发 restart。M-10 坏帧、M-12 迟到 GET、M-16 边界 chunk 的回归已随 2026-11-08 修复补齐。 | 注入不退出 child、deferred save/read/interpreter，断言有界终态、进程回收、真实解释器、文档版本一致及旧响应被忽略。 |
 
 ---
@@ -82,7 +81,7 @@
 
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
-| **P1** | M-2（+T-1）、M-13、M-15 | M-2 序列化放大、M-15 无界版本读取均可造成内存/CPU 资源风险；M-13 会让已丢弃草稿晚到落盘并造成版本分叉。T-1 仍是安全关键测试可信度问题。 |
+| **P1** | M-2（+T-1）、M-13 | M-2 序列化放大可造成内存/CPU 资源风险；M-13 会让已丢弃草稿晚到落盘并造成版本分叉。T-1 仍是安全关键测试可信度问题。 |
 | **P2** | M-4、M-6、M-7、M-8、M-11、M-14 | 性能、失败终止、状态竞态、错误内核生命周期与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-14 需按 target 串行化。 |
 | **P3** | §2 的 Low（按组批量）、T-3/T-5/T-6/T-8、§3 Nit | 低成本、低风险，可合并处理。 |
 
@@ -92,7 +91,7 @@
 
 - **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-22/L-23 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；M-11 的修复在 Windows 上应依赖显式 shutdown 协议与进程树回收，而不是信号升级。
-- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **393 / 349 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
+- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **398 / 354 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
 
 ---
 
@@ -101,7 +100,7 @@
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
 | 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
-| 全量测试（当前工作区） | `npm test`（Windows） | **393 tests / 349 pass / 44 skip / 0 fail**（约 46.2s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
+| 全量测试（当前工作区） | `npm test`（Windows） | **398 tests / 354 pass / 44 skip / 0 fail**（约 44.3s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |
@@ -110,7 +109,6 @@
 | M-8 | 本地 rename 钩子注入（脚本未随仓库提供） | save fulfilled、外部编辑丢失 |
 | M-13 | 当前客户端 mountNotebook 时序复现 + 服务端 read/save 调用顺序核对（脚本未随仓库提供） | 已丢弃草稿晚到为 v3，UI 仍显示 Reload 文档且 next baseVersion=v1；下一次保存模拟 409 conflict=v3 |
 | M-14 | 受控解释器 probe 与并发 `/restart`（脚本未随仓库提供） | `shutdown:A, shutdown:A, start:B, restart:B`；两个请求均 200，C 响应为 C，最终 current=B |
-| M-15 | 临时目录 stat→readFile 增长故障注入（脚本未随仓库提供） | 合法文件增长至 40MiB 后实际读取 41,943,040 bytes；返回 409 而非 413 |
 | L-12 | 当前源码最小 DOM 替身微基准 | 500/1000/2000/4000 标签约 17.8/55.5/165.0/653.4ms |
 | L-22 / L-23 | Windows 真实 junction/大小写实验 | 悬空 junction 控制路径退化为请求拼写；`NB.IPYNB` 删除后不匹配活内核，`nb.ipynb` 可匹配 |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |

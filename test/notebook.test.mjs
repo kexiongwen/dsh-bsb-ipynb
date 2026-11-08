@@ -11,6 +11,7 @@ import {
   emptyNotebook,
   normalizeNotebook,
   parseNotebookBytes,
+  readBoundedNotebookFile,
   readNotebookFile,
   readFailureReason,
   saveFailureReason,
@@ -473,6 +474,155 @@ test('saveNotebookFile caps the on-disk file before reading it', async (t) => {
       error.status === 413 &&
       error.details.size === NOTEBOOK_CAP_BYTES + 1,
   )
+})
+
+test('bounded notebook reads return exact bytes and stop at the cap', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const text = serializeNotebook(emptyNotebook())
+  await writeFile(file, text)
+  assert.deepEqual(await readBoundedNotebookFile(file), Buffer.from(text))
+
+  await writeFile(file, '{}')
+  await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+  await assert.rejects(
+    readBoundedNotebookFile(file),
+    (error) =>
+      error.code === 'too-large' &&
+      error.status === 413 &&
+      error.details.size === NOTEBOOK_CAP_BYTES + 1,
+  )
+})
+
+test('bounded notebook reads stop even when the opened handle size is stale', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  await writeFile(file, '{}')
+  await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+  const originalOpen = fs.promises.open
+  let closed = false
+  let requestedBytes = 0
+  fs.promises.open = async (target, flags, mode) => {
+    const handle = await originalOpen.call(fs.promises, target, flags, mode)
+    // A stale fstat must not lift the cap: the chunk loop still reads at most
+    // one byte past it and reports a 413 instead of buffering the whole file.
+    return {
+      stat: async () => ({ isFile: () => true, size: 2 }),
+      read: (buffer, offset, length, position) => {
+        requestedBytes += length
+        return handle.read(buffer, offset, length, position)
+      },
+      close: async () => {
+        closed = true
+        return handle.close()
+      },
+    }
+  }
+  try {
+    await assert.rejects(
+      readBoundedNotebookFile(file),
+      (error) =>
+        error.code === 'too-large' &&
+        error.status === 413 &&
+        error.details.size === NOTEBOOK_CAP_BYTES + 1,
+    )
+  } finally {
+    fs.promises.open = originalOpen
+  }
+  assert.equal(closed, true, 'the handle is closed on the failure path')
+  assert.equal(requestedBytes, NOTEBOOK_CAP_BYTES + 1, 'the read stops one byte past the cap')
+})
+
+test('a notebook grown after the authorization stat is reported as too-large', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const baseVersion = sha256(Buffer.from(original))
+  const grown = Buffer.alloc(40 * 1024 * 1024, 0x20)
+  const originalStat = fs.promises.stat
+  let injected = false
+  fs.promises.stat = async (target, ...rest) => {
+    if (!injected && String(target) === file) {
+      injected = true
+      // The file grows after authorization: the stale stat must not be trusted.
+      await writeFile(file, grown)
+      return { isFile: () => true, size: Buffer.byteLength(original), mode: 0o100644 }
+    }
+    return originalStat.call(fs.promises, target, ...rest)
+  }
+  try {
+    await assert.rejects(
+      saveNotebookFile(file, emptyNotebook(), baseVersion),
+      (error) =>
+        error.code === 'too-large' && error.status === 413 &&
+        error.details.size === grown.length,
+    )
+  } finally {
+    fs.promises.stat = originalStat
+  }
+  assert.equal(injected, true, 'the injected growth ran after the authorization stat')
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'], 'the failed save leaves no temp file')
+  assert.equal((await stat(file)).size, grown.length, 'the oversized file is left untouched')
+})
+
+test('a notebook that grows after the save stat fails with too-large, not a conflict', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const baseVersion = sha256(Buffer.from(original))
+  const originalOpen = fs.promises.open
+  let injected = false
+  fs.promises.open = async (target, flags, mode) => {
+    if (!injected && String(target) === file) {
+      injected = true
+      await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+    }
+    return originalOpen.call(fs.promises, target, flags, mode)
+  }
+  try {
+    await assert.rejects(
+      saveNotebookFile(file, emptyNotebook(), baseVersion),
+      (error) =>
+        error.code === 'too-large' &&
+        error.status === 413 &&
+        error.details.size === NOTEBOOK_CAP_BYTES + 1,
+    )
+  } finally {
+    fs.promises.open = originalOpen
+  }
+  assert.equal(injected, true, 'the injected growth ran before the version read')
+})
+
+test('the second save version check also bounds a file that grew past the cap', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const baseVersion = sha256(Buffer.from(original))
+  const originalWrite = fs.promises.writeFile
+  let injected = false
+  fs.promises.writeFile = async (target, data, options) => {
+    if (!injected && String(target).includes('.dsh-bsb-ipynb-')) {
+      injected = true
+      await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+    }
+    return originalWrite(target, data, options)
+  }
+  try {
+    await assert.rejects(
+      saveNotebookFile(file, emptyNotebook(), baseVersion),
+      (error) =>
+        error.code === 'too-large' &&
+        error.status === 413 &&
+        error.details.size === NOTEBOOK_CAP_BYTES + 1,
+    )
+  } finally {
+    fs.promises.writeFile = originalWrite
+  }
+  assert.equal(injected, true, 'the injected growth ran before the second version check')
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'], 'the failed save leaves no temp file')
 })
 
 function mixedMimeBundle() {
