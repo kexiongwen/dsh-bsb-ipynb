@@ -87,6 +87,8 @@ function mountNotebook(t, options = {}) {
   const windowListeners = new Map()
   let cursor = 0, nextTimer = 0, needsRender = true, mounted = true
   let pendingEffects = [], pendingState = [], tree, moduleOptions, moduleExports, hostReloads = 0
+  let confirmResult = true
+  const confirmations = []
   // Optional Host locale face: when requested, apply() binds the plugin's
   // namespace dictionaries and the viewer subscribes through
   // useSyncExternalStore, so a locale switch re-renders the same mounted tree.
@@ -191,7 +193,8 @@ function mountNotebook(t, options = {}) {
   const context = vm.createContext({
     window: {
       __ModuleLoader__: { load(options) { moduleOptions = options } },
-      localStorage: { getItem() { return null }, setItem() {} }, confirm() { return true },
+      localStorage: { getItem() { return null }, setItem() {} },
+      confirm(message) { confirmations.push(message); return confirmResult },
       addEventListener(type, listener) {
         if (!windowListeners.has(type)) windowListeners.set(type, new Set())
         windowListeners.get(type).add(listener)
@@ -279,24 +282,28 @@ function mountNotebook(t, options = {}) {
       return text && text.props.children[0]
     },
     get reloadCount() { return hostReloads },
+    get confirmations() { return confirmations },
+    setConfirm(value) { confirmResult = value },
     requests: (route) => requests.filter((request) => request.route === route),
+    loadReplacement() { return moduleExports.__test.readNotebook(props.ctx, props.path, props.scope) },
     edit(source = 'print("edited")') { api.cell.onSource('cell-1', source); flush() },
     run() { api.cell.onRun('cell-1'); flush(); return api.requests('execute').at(-1) },
     runWithoutCommit() { api.cell.onRun('cell-1'); return api.requests('execute').at(-1) },
     save() { api.toolbar.onSave(); flush(); return api.requests('save').at(-1) },
-    reload(data = notebookData('FRESH', 'v2')) {
+    async reload(data = notebookData('FRESH', 'v2')) {
       api.toolbar.onReload()
-      assert.ok(hostReloads > 0, 'reload delegates to the host')
-      props = { ...props, customData: data }
-      needsRender = true
-      flush()
+      await settle()
+      const request = api.requests('read').at(-1)
+      assert.ok(request, 'the plugin reads after confirmation')
+      request.resolve(response({ ok: true, value: data }))
+      await settle()
     },
     receive(data) {
       props = { ...props, customData: data }
       needsRender = true
       flush()
     },
-    cancelReload() { api.toolbar.onReload(); flush() },
+    cancelReload() { confirmResult = false; api.toolbar.onReload(); flush(); confirmResult = true },
     saveButton() {
       const toolbar = component('Toolbar')
       return findElement(toolbar.type(toolbar.props), (value) => value.props?.title === 'Save').props
@@ -388,7 +395,7 @@ test('reload invalidates an old execution before late output, status, errors and
   const stream = executionStream()
   request.resolve(stream.response)
   await app.settle()
-  app.reload()
+  await app.reload()
   assert.equal(request.init.signal.aborted, true, 'successful adoption aborts the old execution')
   const kernelAfterReload = JSON.stringify(app.toolbar.kernel)
   for (const event of [
@@ -419,7 +426,7 @@ for (const termination of ['fatal', 'stream-error', 'fetch-error']) {
     const request = app.run()
     const stream = executionStream()
     if (termination !== 'fetch-error') { request.resolve(stream.response); await app.settle() }
-    app.reload()
+    await app.reload()
     if (termination === 'fetch-error') request.reject(new Error('STALE FETCH ERROR'))
     else if (termination === 'stream-error') stream.fail(new Error('STALE STREAM ERROR'))
     else { stream.emit({ type: 'fatal', message: 'STALE FATAL' }); stream.end() }
@@ -498,13 +505,9 @@ for (const hostReload of [true, false]) {
       else if (outcome === 'failure') oldSave.reject(new Error('NETWORK FAILURE'))
       else oldSave.resolve(response({ ok: true, value: { version: 'v2' } }))
       await app.settle()
-      if (hostReload) {
-        assert.equal(app.reloadCount, 1)
-        app.receive(disk)
-      } else {
-        assert.equal(app.requests('read').length, 1)
-        app.requests('read')[0].resolve(response({ ok: true, value: disk }))
-      }
+      assert.equal(app.reloadCount, 0, 'plugin reload owns confirmation regardless of host callback availability')
+      assert.equal(app.requests('read').length, 1)
+      app.requests('read')[0].resolve(response({ ok: true, value: disk }))
       await app.settle()
       assert.equal(app.cell.cell.source, disk.notebook.cells[0].source)
       assert.equal(app.cell.cell.outputs[0].text, 'LATEST DISK')
@@ -528,8 +531,7 @@ for (const hostReload of [true, false]) {
     save.resolve(response({ ok: true, value: { version: 'v2' } }))
     await app.settle()
     assert.equal(app.toolbar.dirty, false)
-    if (hostReload) app.receive(notebookData('STALE', 'v1'))
-    else app.requests('read')[0].resolve(response({ ok: true, value: notebookData('STALE', 'v1') }))
+    app.requests('read')[0].resolve(response({ ok: true, value: notebookData('STALE', 'v1') }))
     await app.settle()
     assert.equal(app.cell.cell.source, 'newer draft', 'even a now-clean draft must survive the older read')
     app.edit('next draft')
@@ -546,9 +548,12 @@ test('only the latest queued reload runs after saving, and cancellation does not
   app.toolbar.onReload()
   save.resolve(response({ ok: true, value: { version: 'v2' } }))
   await app.settle()
-  assert.equal(app.reloadCount, 1, 'superseded clicks do not open multiple host prompts')
-  // No customData arrives when the user cancels the host confirmation.
+  assert.equal(app.requests('read').length, 1, 'superseded clicks do not issue multiple reads')
+  app.requests('read')[0].resolve(response({ ok: true, value: notebookData('LATEST', 'v2') }))
+  await app.settle()
   app.edit('unsaved draft')
+  app.cancelReload()
+  assert.equal(app.requests('read').length, 1, 'cancelling confirmation does not start another read')
   assert.equal(app.cell.cell.source, 'unsaved draft')
   assert.equal(app.toolbar.dirty, true)
   const nextSave = app.save()
@@ -581,10 +586,109 @@ test('unmount cancels a reload waiting for a save without aborting the write', a
   const save = app.save()
   app.toolbar.onReload()
   app.unmount()
+  const replacement = app.loadReplacement()
+  await settleWithoutCommit()
+  assert.equal(app.requests('read').length, 0, 'the replacement waits even after the old component is gone')
   save.resolve(response({ ok: true, value: { version: 'v2' } }))
   await settleWithoutCommit()
   assert.equal(app.reloadCount, 0, 'a disposed viewer must not invoke its old host reload callback')
+  assert.equal(app.requests('read').length, 1, 'only the replacement loader reads after saving')
+  app.requests('read')[0].resolve(response({ ok: true, value: notebookData('COMMITTED', 'v2') }))
+  assert.equal((await replacement).version, 'v2')
+})
+
+test('confirmed reload blocks autosave and manual save until its read is adopted', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('unsaved draft')
+  assert.equal(app.timersFor(1500).length, 1)
+  app.toolbar.onReload()
+  await app.settle()
+  assert.equal(app.confirmations.length, 1)
+  assert.equal(app.timersFor(1500).length, 0)
+  app.save()
+  assert.equal(app.requests('save').length, 0)
+  app.requests('read')[0].resolve(response({ ok: true, value: notebookData('DISK', 'v2') }))
+  await app.settle()
+  assert.equal(app.cell.cell.outputs[0].text, 'DISK')
+  assert.equal(app.toolbar.dirty, false)
+  app.edit('new draft')
+  assert.equal(app.save().body.baseVersion, 'v2')
+})
+
+test('execute_reply cannot invalidate a confirmed reload while its disk read is pending', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const execution = app.run()
+  const stream = executionStream()
+  execution.resolve(stream.response)
+  await app.settle()
+  app.toolbar.onReload()
+  await app.settle()
+  assert.equal(app.confirmations.length, 1, 'running results need discard confirmation')
+  stream.emit({ type: 'stream', cell_id: 'cell-1', text: 'UNSAVED RESULT' })
+  stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: true, execution_count: 2 })
+  stream.end()
+  await app.settle()
+  app.save()
+  assert.equal(app.requests('save').length, 0)
+  assert.equal(app.timersFor(1500).length, 0)
+  app.requests('read')[0].resolve(response({ ok: true, value: notebookData('DISK', 'v2') }))
+  await app.settle()
+  assert.equal(app.cell.cell.outputs[0].text, 'DISK')
+  assert.equal(app.toolbar.dirty, false)
+  app.edit('next draft')
+  assert.equal(app.save().body.baseVersion, 'v2')
+})
+
+test('cancelled reload releases autosave and cannot swallow the next independent host snapshot', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('keep')
+  app.cancelReload()
+  await app.settle()
   assert.equal(app.requests('read').length, 0)
+  assert.equal(app.timersFor(1500).length, 1)
+  app.fireTimer(1500)
+  app.requests('save')[0].resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
+  app.receive(notebookData('EXTERNAL', 'v3'))
+  assert.equal(app.cell.cell.outputs[0].text, 'EXTERNAL')
+  app.edit('after external refresh')
+  assert.equal(app.save().body.baseVersion, 'v3')
+})
+
+test('starting a new execution cancels a previously confirmed reload without discarding the new result', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.toolbar.onReload()
+  const read = app.requests('read')[0]
+  const execution = app.run()
+  const stream = executionStream()
+  execution.resolve(stream.response)
+  await app.settle()
+  assert.equal(read.init.signal.aborted, true)
+  stream.emit({ type: 'stream', cell_id: 'cell-1', text: 'NEW RESULT' })
+  stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: true, execution_count: 2 })
+  stream.end()
+  await app.settle()
+  read.resolve(response({ ok: true, value: notebookData('OLD DISK', 'v1') }))
+  await app.settle()
+  assert.equal(app.cell.cell.outputs[0].text, 'NEW RESULT')
+  assert.equal(app.toolbar.dirty, true)
+  assert.ok(app.save(), 'the cancelled reload does not retain a save barrier')
+})
+
+test('unmount aborts a pending reload and prevents adopting its late response', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.toolbar.onReload()
+  const read = app.requests('read')[0]
+  app.unmount()
+  assert.equal(read.init.signal.aborted, true)
+  read.resolve(response({ ok: true, value: notebookData('LATE', 'v2') }))
+  await settleWithoutCommit()
+  assert.equal(app.requests('save').length, 0)
 })
 
 test('fallback reload preserves edits made after its read started', async (t) => {
@@ -599,27 +703,26 @@ test('fallback reload preserves edits made after its read started', async (t) =>
 })
 
 for (const outcome of ['success', 'conflict', 'failure']) {
-  test(`a late save ${outcome} cannot replace an externally adopted version or release its newer save`, async (t) => {
+  test(`an unsolicited host snapshot cannot replace a document during save ${outcome}`, async (t) => {
     const app = mountNotebook(t, { visible: true })
     await app.settle()
-    // Ctrl+S is allowed on a clean document. An independent host snapshot can
-    // replace that document while its write is still in flight.
+    // An independent host response has no causal link to this pending write.
+    // Keep its snapshot until the write settles and a confirmed reload reads it.
     app.dispatchKey({ key: 's', ctrlKey: true, target: fakeTarget('BODY') })
     const oldSave = app.requests('save')[0]
-    app.receive(notebookData('FRESH', 'v2'))
+    app.receive(notebookData('UNORDERED', 'v2'))
+    assert.equal(app.cell.cell.outputs[0].text, 'OLD')
+    app.save()
+    assert.equal(app.requests('save').length, 1)
+    if (outcome === 'success') oldSave.resolve(response({ ok: true, value: { version: 'v2' } }))
+    else if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', details: { version: 'v2' } } }, 409))
+    else oldSave.reject(new Error('NETWORK FAILURE'))
+    await app.settle()
+    await app.reload(notebookData('FRESH', 'v2'))
     app.edit('fresh draft')
     const currentSave = app.save()
     assert.equal(currentSave.body.baseVersion, 'v2')
-    if (outcome === 'success') oldSave.resolve(response({ ok: true, value: { version: 'STALE' } }))
-    else if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', details: { version: 'STALE' } } }, 409))
-    else oldSave.reject(new Error('STALE ERROR'))
-    await app.settle()
-    assert.equal(app.cell.cell.source, 'fresh draft')
     assert.equal(app.cell.cell.outputs[0].text, 'FRESH')
-    assert.equal(app.toolbar.conflict, null)
-    assert.equal(app.toolbar.saveState, 'saving')
-    app.save()
-    assert.equal(app.requests('save').length, 2, 'the old finally cannot release the newer request lock')
     currentSave.resolve(response({ ok: true, value: { version: 'v3' } }))
     await app.settle()
     app.edit('next draft')
@@ -762,7 +865,7 @@ test('an old execution finalizer cannot clear the newer execution or allow overl
   const oldStream = executionStream()
   oldRequest.resolve(oldStream.response)
   await app.settle()
-  app.reload()
+  await app.reload()
   const newRequest = app.run()
   assert.equal(app.requests('execute').length, 2, 'the adopted notebook can start a new execution')
   const newStream = executionStream()
@@ -790,13 +893,13 @@ test('an old Run all finalizer cannot stop or duplicate the newly adopted batch'
   await app.settle()
   const twoCells = notebookData()
   twoCells.notebook.cells.push({ ...twoCells.notebook.cells[0], id: 'cell-2', source: 'print("second")' })
-  app.reload(twoCells)
+  await app.reload(twoCells)
   const oldBatch = app.toolbar.onRunAll()
   app.flush()
   const oldStream = executionStream()
   app.requests('execute')[0].resolve(oldStream.response)
   await app.settle()
-  app.reload({ ...twoCells, version: 'v2' })
+  await app.reload({ ...twoCells, version: 'v2' })
   const newBatch = app.toolbar.onRunAll()
   app.flush()
   assert.equal(app.requests('execute').length, 2)
@@ -999,7 +1102,7 @@ test('a deferred clear resets a truncated cell on its next display update, and r
   assert.equal(app.cell.cell.outputs[0].text, 'AFTER DEFERRED CLEAR')
   await run.send(oversized)
   assertOutputLimit(app)
-  app.reload()
+  await app.reload()
   const fresh = await startOutputRun(app)
   run.emit({ type: 'clear_output', wait: true })
   run.emit({ type: 'update_display_data', display_id: 'missing', data: { 'text/plain': 'STALE' }, metadata: {} })
@@ -1016,7 +1119,7 @@ test('truncating one cell in Run all does not consume the next cell budget', asy
   await app.settle()
   const data = notebookData()
   data.notebook.cells.push({ ...data.notebook.cells[0], id: 'cell-2', outputs: [] })
-  app.reload(data)
+  await app.reload(data)
   const batch = app.toolbar.onRunAll()
   app.flush()
   const first = executionStream()
@@ -1068,7 +1171,7 @@ test('an oversized notebook retranslates its dynamic banner and can be saved aft
   }
   assert.equal(saveTitle(), 'Save', 'the mounted toolbar starts in the Host English locale')
   // Load a document whose pretty nbformat form exceeds the server's 32 MiB cap.
-  app.reload(notebookData('x'.repeat(33 * MiB), 'v2'))
+  await app.reload(notebookData('x'.repeat(33 * MiB), 'v2'))
   await app.settle()
   app.edit('print("edited")')
   app.save()
@@ -1119,7 +1222,7 @@ test('an oversized notebook without outputs does not offer a no-op clear action'
   const data = notebookData('', 'v2')
   data.notebook.cells[0].outputs = []
   data.notebook.cells[0].source = 'x'.repeat(33 * MiB)
-  app.reload(data)
+  await app.reload(data)
   await app.settle()
   app.edit(data.notebook.cells[0].source)
   app.save()
@@ -1152,7 +1255,7 @@ test('metadata preflight offers the matching recovery for output, notebook and c
     } else {
       data.notebook.cells[0].metadata = nestedMetadata(101)
     }
-    app.reload(data)
+    await app.reload(data)
     await app.settle()
     app.edit('print("edited")')
     app.save()
@@ -1187,9 +1290,10 @@ test('metadata preflight offers the matching recovery for output, notebook and c
       const clearAll = findElement(rendered, (value) => value.props?.title === 'Clear all outputs')
       assert.ok(reload, `${scenario}: the banner provides the host reload action`)
       assert.equal(clearAll, null, `${scenario}: clearing outputs cannot repair notebook or cell metadata`)
-      const reloadCount = app.reloadCount
+      const reloadCount = app.requests('read').length
       reload.props.onClick()
-      assert.equal(app.reloadCount, reloadCount + 1, `${scenario}: the action delegates to the existing host reload flow`)
+      await app.settle()
+      assert.equal(app.requests('read').length, reloadCount + 1, `${scenario}: the action performs the confirmed plugin reload`)
     }
   }
 })
@@ -1209,7 +1313,7 @@ test('JSON preflight blocks upload and offers recovery that matches the offendin
     } else {
       cell.outputs = [{ output_type: 'display_data', data: payload, metadata: {} }]
     }
-    app.reload(data)
+    await app.reload(data)
     await app.settle()
     app.edit('edited')
     app.save()
@@ -1227,9 +1331,10 @@ test('JSON preflight blocks upload and offers recovery that matches the offendin
       assert.equal(clear, null, 'clearing outputs cannot fix attachments')
       const reload = findElement(rendered, (value) => value.props?.title === 'Reload')
       assert.ok(reload)
-      const count = app.reloadCount
+      const count = app.requests('read').length
       reload.props.onClick()
-      assert.equal(app.reloadCount, count + 1)
+      await app.settle()
+      assert.equal(app.requests('read').length, count + 1)
     } else {
       assert.ok(clear)
       clear.props.onClick()
@@ -1278,7 +1383,7 @@ test('a running cell disables Run on every cell', async (t) => {
   await app.settle()
   const twoCells = notebookData()
   twoCells.notebook.cells.push({ ...twoCells.notebook.cells[0], id: 'cell-2', source: 'print("second")' })
-  app.reload(twoCells)
+  await app.reload(twoCells)
   await app.settle()
   const request = app.run()
   const stream = executionStream()
@@ -1384,7 +1489,7 @@ test('raw cells become editable in place', async (t) => {
 test('the empty-file hint disappears once the notebook is saved', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
-  app.reload({ ...notebookData(), emptyFile: true })
+  await app.reload({ ...notebookData(), emptyFile: true })
   await app.settle()
   assert.ok(app.find((value) => value.props?.className === 'dsh-bsb-ipynb-hint'), 'empty-file hint is visible')
   assert.equal(app.banner?.reason, 'empty-file')
@@ -1402,7 +1507,7 @@ test('the empty-file hint disappears once the notebook is saved', async (t) => {
 test('the open-as-empty hint also clears after a successful save', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
-  app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
+  await app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
   await app.settle()
   const open = app.find((value) => value.props?.title === 'Open as empty notebook')
   assert.ok(open, 'the invalid document offers the open-as-empty action')
@@ -1422,7 +1527,7 @@ test('error adoption clears dirty state so a later host snapshot can be adopted'
   const app = mountNotebook(t)
   await app.settle()
   app.edit('unsaved draft')
-  app.reload({ status: 'invalid', error: 'broken', version: 'v2' })
+  await app.reload({ status: 'invalid', error: 'broken', version: 'v2' })
   await app.settle()
 
   app.receive(notebookData('RECOVERED', 'v3'))
@@ -1438,7 +1543,7 @@ test('open as empty clears an old conflict and preserves the invalid file versio
   const failed = app.save()
   failed.resolve(response({ ok: false, error: { code: 'write-conflict', message: 'conflict', details: { version: 'v2' } } }, 409))
   await app.settle()
-  app.reload({ status: 'invalid', error: 'broken', version: 'v3' })
+  await app.reload({ status: 'invalid', error: 'broken', version: 'v3' })
   await app.settle()
 
   const open = app.find((value) => value.props?.title === 'Open as empty notebook')
@@ -1467,7 +1572,7 @@ test('a malformed attachment reference degrades instead of crashing the render',
     metadata: {},
     source: 'before ![x](attachment:%ZZ) after',
   }
-  app.reload(data)
+  await app.reload(data)
   await app.settle()
   assert.equal(app.cell.cell.cell_type, 'markdown')
   const cellView = app.component('CellView')
@@ -1538,7 +1643,7 @@ test('reading-mode Ctrl+S saves and prevents the browser save dialog', async (t)
 test('reading-mode Ctrl+S is prevented but does not save an unusable notebook', async (t) => {
   const app = mountNotebook(t, { visible: true })
   await app.settle()
-  app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
+  await app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
   await app.settle()
   const event = app.dispatchKey({ key: 's', ctrlKey: true, target: fakeTarget('BODY') })
   assert.equal(event.defaultPrevented, true, 'the browser save dialog is blocked even on the error card')
@@ -1751,7 +1856,7 @@ test('a late shutdown success cannot overwrite the kernel state after reload', a
   app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
   await app.settle()
   app.toolbar.onShutdown()
-  app.reload()
+  await app.reload()
   await app.settle()
   const kernelAfterReload = JSON.stringify(app.toolbar.kernel)
 
@@ -1780,7 +1885,7 @@ test('a late shutdown success cannot overwrite a newer restart', async (t) => {
   assert.equal(app.toolbar.kernel.python, '/python2')
 })
 
-test('a current kernel-unavailable shutdown response still commits the off state', async (t) => {
+test('a shutdown error stays visible and only status can confirm that the kernel is off', async (t) => {
   const app = mountNotebook(t, { deferStatus: true })
   await app.settle()
   app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
@@ -1788,10 +1893,86 @@ test('a current kernel-unavailable shutdown response still commits the off state
   app.toolbar.onShutdown()
   app.requests('shutdown')[0].resolve(response({ ok: false, error: { code: 'kernel-unavailable', message: 'already stopped' } }, 503))
   await app.settle()
+  assert.equal(app.toolbar.kernel.running, true, 'a generic unavailable error does not prove exit')
+  assert.equal(app.banner?.reason, 'shutdown-failed')
+  assert.match(app.bannerText, /could not be shut down/)
+  const refresh = app.requests('status').at(-1)
+  assert.notEqual(refresh, app.requests('status')[0])
+  refresh.resolve(response({ ok: true, value: { running: false, ready: false, busy: false, executionState: 'none', python: null } }))
+  await app.settle()
   assert.equal(app.toolbar.kernel.running, false)
   assert.equal(app.toolbar.kernel.busy, false)
   assert.equal(app.toolbar.kernel.executionState, 'none')
 })
+
+test('shutdown timeout keeps the stopping kernel managed in the UI and permits a successful retry', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true, locale: true })
+  await app.settle()
+  app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
+  await app.settle()
+  app.toolbar.onShutdown()
+  app.requests('shutdown')[0].resolve(response({ ok: false, error: {
+    code: 'kernel-unavailable', message: 'process has not exited', details: { state: 'stopping' },
+  } }, 503))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, true)
+  assert.equal(app.toolbar.kernel.ready, false)
+  assert.equal(app.toolbar.kernel.executionState, 'stopping')
+  assert.equal(app.banner?.reason, 'shutdown-failed')
+  const toolbar = app.component('Toolbar')
+  const label = findElement(toolbar.type(toolbar.props), (value) => value.props?.className === 'dsh-bsb-ipynb-kernel-label')
+  assert.equal(label.props.children[0], 'stopping')
+  app.setLocale('zh')
+  await app.settle()
+  assert.match(app.bannerText, /内核未能关闭/)
+  const staleStatus = app.requests('status').at(-1)
+  app.toolbar.onShutdown()
+  app.requests('shutdown')[1].resolve(response({ ok: true, value: {} }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false)
+  assert.equal(app.banner, null)
+  staleStatus.resolve(response({ ok: true, value: { running: true, ready: false, busy: false, executionState: 'stopping' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false)
+})
+
+for (const outcome of ['success', 'timeout']) {
+  for (const terminalOrder of ['before', 'after']) {
+    test(`shutdown ${outcome} survives the old execution terminal arriving ${terminalOrder} its response`, async (t) => {
+      const app = mountNotebook(t, { deferStatus: true })
+      await app.settle()
+      app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
+      await app.settle()
+      const execution = app.run()
+      const stream = executionStream()
+      execution.resolve(stream.response)
+      await app.settle()
+      stream.emit({ type: 'status', cell_id: 'cell-1', execution_state: 'busy' })
+      await app.settle()
+      app.toolbar.onShutdown()
+      const terminal = async () => {
+        stream.emit({ type: 'error', cell_id: 'cell-1', ename: 'KernelShutdown', evalue: 'Kernel shut down', traceback: [] })
+        stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: false, execution_count: 2 })
+        stream.end()
+        await app.settle()
+      }
+      if (terminalOrder === 'before') await terminal()
+      app.requests('shutdown')[0].resolve(outcome === 'success'
+        ? response({ ok: true, value: {} })
+        : response({ ok: false, error: { code: 'kernel-unavailable', message: 'still alive', details: { state: 'stopping' } } }, 503))
+      await app.settle()
+      if (terminalOrder === 'after') await terminal()
+      assert.equal(app.toolbar.kernel.running, outcome === 'timeout')
+      assert.equal(app.toolbar.kernel.executionState, outcome === 'timeout' ? 'stopping' : 'none')
+      assert.equal(app.toolbar.running, false)
+      assert.equal(app.cell.cell.execution_count, 2, 'terminal bookkeeping is retained')
+      if (outcome === 'timeout') {
+        assert.equal(app.banner?.reason, 'shutdown-failed')
+        assert.match(app.bannerText, /still alive/)
+      }
+    })
+  }
+}
 
 test('restart advances the kernel generation and refreshes with the replacement state', async (t) => {
   const app = mountNotebook(t, { deferStatus: true })
@@ -1835,7 +2016,7 @@ test('reload advances the kernel generation and ignores a status GET from the ol
   const app = mountNotebook(t, { deferStatus: true })
   await app.settle()
   const stale = app.requests('status').at(-1)
-  app.reload()
+  await app.reload()
   await app.settle()
   assert.equal(stale.init.signal.aborted, true, 'adopting a document invalidates its status GET')
   stale.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
@@ -2019,7 +2200,7 @@ test('a stale cross-cell display update cannot change newly created displays aft
   await first.send(sharedDisplay())
   await first.finish()
   const old = await startDisplayCellRun(app, 'cell-2')
-  app.reload(displayNotebookData())
+  await app.reload(displayNotebookData())
   const fresh = await startDisplayCellRun(app, 'cell-1')
   await fresh.send(sharedDisplay('NEW DOCUMENT'))
   old.emit(sharedDisplay('STALE', 'update_display_data'))

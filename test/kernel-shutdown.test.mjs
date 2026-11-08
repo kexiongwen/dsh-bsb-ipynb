@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { realpath, writeFile } from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
+import path from 'node:path'
 import { test } from 'node:test'
 import { KernelManager } from '../lib/kernel.js'
+import { registerIpynbRoutes } from '../lib/routes.js'
+import { tempDir } from './python-helper.mjs'
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 
@@ -18,7 +22,7 @@ function observe(promise) {
 
 // Keep real entry/manager logic and control only the child and elapsed time.
 // Every process is explicitly exited in cleanup, including assertion failures.
-function harness(t, { exitOnShutdown = false, exitOnSignal = null } = {}) {
+function harness(t, { exitOnShutdown = false, exitOnSignal = null, target = '/controlled/notebook.ipynb' } = {}) {
   const timers = new Set()
   const processes = []
   let now = 0
@@ -68,7 +72,6 @@ function harness(t, { exitOnShutdown = false, exitOnSignal = null } = {}) {
   })
   syncBuiltinESMExports()
   const manager = new KernelManager({}, '/controlled/bridge.py')
-  const target = '/controlled/notebook.ipynb'
   t.after(async () => {
     for (const proc of processes) proc.exit()
     await manager.disposeAll()
@@ -147,6 +150,7 @@ test('shutdown timeout retains a stopping entry, permits retry and cleans up on 
   await h.advance(4500)
   assert.equal(state.status, 'rejected')
   assert.equal(state.error.code, 'kernel-unavailable')
+  assert.deepEqual(state.error.details, { state: 'stopping' })
   assert.match(state.error.message, /did not exit/)
   assert.equal(entry.lastError, state.error.message)
   assert.equal(entry.stopping, true)
@@ -165,6 +169,82 @@ test('shutdown timeout retains a stopping entry, permits retry and cleans up on 
   await retried
   assert.equal(h.manager.peek(h.target), null)
   assert.equal(h.timers.size, 0)
+})
+
+test('shutdown route preserves stopping failures and status until actual exit, then allows retry', async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'shutdown.ipynb')
+  await writeFile(file, '{}')
+  const target = await realpath(file)
+  const h = harness(t, { target })
+  const { entry, proc } = await h.startReady()
+  let enteredShutdown
+  const shutdown = h.manager.shutdown.bind(h.manager)
+  t.mock.method(h.manager, 'shutdown', (...args) => {
+    const result = shutdown(...args)
+    enteredShutdown?.()
+    return result
+  })
+  let handler
+  registerIpynbRoutes({
+    sessions: { get: (id) => id === 's1' ? { header: { cwd: dir } } : undefined },
+    connection: { requestRejection: () => undefined },
+    webServer: { register(route) { handler = route.handler; return () => {} } },
+  }, h.manager)
+  function request(method, url) {
+    const chunks = []
+    const state = { status: null, ended: false }
+    const body = method === 'POST' ? { sessionId: 's1', path: 'shutdown.ipynb' } : undefined
+    const req = {
+      method, url, headers: { 'content-type': 'application/json' },
+      async *[Symbol.asyncIterator]() {
+        if (body) yield Buffer.from(JSON.stringify(body))
+      },
+    }
+    const res = {
+      headersSent: false,
+      writeHead(status) { state.status = status; this.headersSent = true },
+      end(value) { if (value) chunks.push(Buffer.from(value)); state.ended = true },
+    }
+    return {
+      state,
+      promise: handler(req, res).then(() => JSON.parse(Buffer.concat(chunks).toString('utf8'))),
+    }
+  }
+  let entered = new Promise((resolve) => { enteredShutdown = resolve })
+  const closing = request('POST', '/ipynb/shutdown')
+  // Admission/path validation runs asynchronously before entering the manager.
+  assert.equal(await Promise.race([entered.then(() => true), closing.promise.then(() => false)]), true)
+  assert.ok(proc.commands.some((command) => command.op === 'shutdown'))
+  assert.equal(closing.state.ended, false)
+  await h.advance(4500)
+  const failure = await closing.promise
+  assert.equal(closing.state.status, 503)
+  assert.equal(failure.ok, false)
+  assert.equal(failure.error.code, 'kernel-unavailable')
+  assert.deepEqual(failure.error.details, { state: 'stopping' })
+  assert.match(failure.error.message, /did not exit/)
+  assert.equal(h.manager.peek(target), entry)
+  assert.equal(entry.proc, proc)
+  const status = await request('GET', '/ipynb/status?sessionId=s1&path=shutdown.ipynb').promise
+  assert.equal(status.value.running, true)
+  assert.equal(status.value.ready, false)
+  assert.equal(status.value.executionState, 'stopping')
+  assert.equal(status.value.lastError, failure.error.message)
+
+  entered = new Promise((resolve) => { enteredShutdown = resolve })
+  const retry = request('POST', '/ipynb/shutdown')
+  // Wait for the route to retry the same retained entry, not a replacement.
+  assert.equal(await Promise.race([entered.then(() => true), retry.promise.then(() => false)]), true)
+  assert.ok(entry.shutdownPromise)
+  proc.exit(null, 'SIGKILL')
+  assert.equal((await retry.promise).ok, true)
+  assert.equal(retry.state.status, 200)
+  const stopped = await request('GET', '/ipynb/status?sessionId=s1&path=shutdown.ipynb').promise
+  assert.equal(stopped.value.running, false)
+  assert.equal(stopped.value.executionState, 'none')
+  assert.equal((await request('POST', '/ipynb/shutdown').promise).ok, true, 'an absent kernel remains an idempotent success')
+  assert.equal(h.processes.length, 1)
 })
 
 for (const exitMode of ['protocol', 'SIGTERM', 'SIGKILL']) {

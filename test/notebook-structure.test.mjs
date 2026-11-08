@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import {
   JSON_DEPTH_LIMIT,
   JSON_NODE_LIMIT,
+  METADATA_NODE_LIMIT,
   NOTEBOOK_CAP_BYTES,
   NOTEBOOK_NODE_LIMIT,
   normalizeNotebook,
@@ -79,10 +80,11 @@ test('JSON payloads count shared references at every occurrence and reject cycle
 })
 
 test('aggregate budget counts JSON MIME entries together rather than resetting per payload', () => {
-  const value = new Array(JSON_NODE_LIMIT - 1).fill(0)
+  const chunkNodes = 10_000
+  const value = new Array(chunkNodes - 1).fill(0)
   const notebook = notebookWith(value)
   const data = notebook.cells[0].outputs[0].data
-  for (let index = 1; index < NOTEBOOK_NODE_LIMIT / JSON_NODE_LIMIT - 1; index += 1) {
+  for (let index = 1; index < NOTEBOOK_NODE_LIMIT / chunkNodes - 1; index += 1) {
     data[`application/vnd.example-${index}+json`] = value
   }
   assert.doesNotThrow(() => normalizeNotebook(notebook))
@@ -91,13 +93,14 @@ test('aggregate budget counts JSON MIME entries together rather than resetting p
 })
 
 test('aggregate budget is shared across cells, output metadata and attachments', () => {
-  const metadata = { values: new Array(JSON_NODE_LIMIT - 2).fill(0) }
-  const value = new Array(JSON_NODE_LIMIT - 1).fill(0)
+  const chunkNodes = 10_000
+  const metadata = { values: new Array(METADATA_NODE_LIMIT - 2).fill(0) }
+  const value = new Array(chunkNodes - 1).fill(0)
   const notebook = notebookWith(value)
   notebook.metadata = metadata
   notebook.cells[0].metadata = metadata
   notebook.cells[0].outputs[0].metadata = metadata
-  for (let index = 4; index < NOTEBOOK_NODE_LIMIT / JSON_NODE_LIMIT - 1; index += 1) {
+  for (let index = 4; index < NOTEBOOK_NODE_LIMIT / chunkNodes - 1; index += 1) {
     const cell = notebookWith(value, index % 2 ? 'markdown' : 'execute_result').cells[0]
     cell.id = `cell-${index}`
     notebook.cells.push(cell)

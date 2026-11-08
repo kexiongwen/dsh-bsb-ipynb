@@ -71,10 +71,10 @@ python -m pip install jupyter_client ipykernel    # Windows (or: py -3 -m pip ..
 Run (`Cmd/Ctrl + Enter`) and save (`Cmd/Ctrl + S`) shortcuts also work in reading mode while the notebook view is visible: the target is the focused cell, otherwise the cell you last edited or ran, and `Cmd/Ctrl + S` is intercepted so the browser's save dialog does not open. While editing, Tab inserts four spaces and Shift+Tab removes one indent unit. Every action is also available from the toolbar (interpreter, Run all, interrupt, restart, save, reload, shut down kernel).
 
 - Autosave pauses while a cell or Run all is running, so transiently cleared or partial outputs never reach disk.
-- Reload waits for an in-flight save before reading the file. Edits or saves made while a reload is pending supersede its older response; cancelling the host confirmation leaves the draft editable.
+- Reload waits for in-flight saves, then confirms discarding any unsaved changes before reading. It blocks new saves until the read finishes; new edits or a new Run cancel the read. Cancelling the plugin's confirmation leaves editing and saving available.
 - A display handle can update matching outputs in other cells (`display(..., display_id=...)` / `handle.update(...)`); updated results are included in the next save.
 - Switching interpreters restarts the kernel; an active run asks for confirmation first.
-- A file changed on disk produces a 409 conflict that can only be resolved by reloading — external edits are never overwritten.
+- A detected disk change produces a 409 conflict that can only be resolved by reloading; the remaining check-to-rename race is documented under Safe writes below.
 - The notebook is measured in its on-disk form before upload; above 32 MiB the UI asks you to clear outputs or trim content instead of failing with a 413 after the fact.
 
 ## 🧱 Architecture
@@ -100,14 +100,16 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 ## 🛡️ Reliability
 
 - **Serialized notebook I/O** — within the process, reads and saves queued for the same canonical notebook path run in order. A reload waits for an earlier queued save even if its client disconnected; concurrent saves using the same base version still return `write-conflict` (409) after the first succeeds. Hard-link aliases of the same inode are treated as different paths and are not serialized with each other. This does not acknowledge requests that have not yet reached the file queue after a network failure.
+- **Reload ordering** — the plugin's Reload pauses autosave, waits for pending saves, confirms discarding unsaved changes if needed, then reads. New edits or a new Run cancel that read; results from an execution already running at confirmation do not cancel it. Host Refresh and replacement viewers share pending-save tracking for the same host/session/path; a save from another view during a read triggers a fresh read. Unmounting does not cancel an accepted write. This coordination is local to one plugin instance, not shared across browser pages, and cannot confirm an ambiguous server commit after a network failure.
 - **Blocked saves** — a read-only notebook, or one held open by another program (common on Windows), returns `write-blocked` (409) with a fixable message instead of an internal error; autosave backs off up to 30 s and the response never embeds local paths or temp-file names.
 - **Capacity-blocked saves** — if client-side preflight blocks a notebook for exceeding 32 MiB, deleting cells or shortening source to bring it back under the limit does not resume autosave; click **Save** once manually. Existing recovery actions such as clearing outputs or reloading are unaffected.
 - **Safe writes** — write a temp file in the same directory, check the version again, then rename it into place; this narrows the external-write race window (extreme interleavings remain a known race). If a crash leaves a `.dsh-bsb-ipynb-*.tmp` behind, the next save sweeps stale ones older than an hour.
 - **No stalled streams** — restart/shutdown, kernel death or `os._exit()` always ends the NDJSON stream with a terminal failure event.
 - **Complete output** — after the kernel replies, the bridge waits for the matching IOPub idle; after 10 s it reports a failure and warns that output may be incomplete.
 - **Resource limits** — 32 MiB of client-side output per cell, a 64 MiB server-side NDJSON queue and a 64 MiB cap per kernel output line; exceeding a limit cancels the run and interrupts the kernel.
-- **Kernel lifecycle** — starts, restarts and interpreter switches are serialized per notebook, with busy state checked against the current kernel. Shutdown cancels pending starts/switches immediately; restart responses report the interpreter actually started.
+- **Kernel lifecycle** — starts, restarts and interpreter switches are serialized per notebook. Interpreter changes check the current kernel's busy state; restarting the same interpreter can deliberately interrupt a running cell. Shutdown cancels pending starts/switches immediately; restart responses report the interpreter actually started.
 - **Kernel cleanup** — idle kernels are swept after 30 minutes (`DSH_IPYNB_KERNEL_IDLE_MS`); ready timeout is 30 s. Shutdown waits 2 s, sends SIGTERM, then SIGKILL 2 s later and allows 500 ms for exit confirmation. If the process still has not exited, the request fails and the stopping entry remains managed; no replacement is started on that path until exit is confirmed. Disposal failures are logged instead of becoming unhandled errors.
+- **Shutdown failures** — the viewer displays the failure and keeps a timed-out kernel in `stopping` state. A failed request is not evidence that the process is off; status or a successful retry must confirm exit. Late messages from the old execution cannot overwrite a newer shutdown or restart result.
 - **Process cleanup** — the kernel connection file is removed on every exit path (the host owns its path, so a hard-killed bridge leaves nothing behind); on Windows a kill-on-close job object reaps the kernel and any subprocess a cell spawned.
 - **Restart resilience** — a failed kernel restart reports `kernel_died` and tears the bridge down instead of busy-looping; restarts run off the control loop, so status/interrupt/shutdown stay responsive during a slow restart.
 
@@ -172,7 +174,8 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | POST request body cap | 64 MiB (36 MiB on `/ipynb/save`) |
 | Client output budget per cell | 32 MiB (UTF-8 bytes of the complete JSON) |
 | Pending NDJSON queue / single kernel output line | 64 MiB / 64 MiB |
-| Metadata and JSON MIME values (outputs / attachments) | 100 levels / 10,000 nodes per value |
+| Metadata | 100 levels / 10,000 nodes per value |
+| JSON MIME values (outputs / attachments) | 100 levels / 250,000 nodes per value |
 | Complete notebook structure | 128 levels / 1,000,000 nodes, including source lines on save |
 | Autosave / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
 | Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s + 500 ms exit confirmation / 3 s |
@@ -188,7 +191,7 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 331 tests at the time of writing
+npm test          # run the complete unit and integration suite
 ```
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.

@@ -13,7 +13,7 @@ window.__ModuleLoader__.load({
     const METADATA_DEPTH_LIMIT = 100
     const METADATA_NODE_LIMIT = 10_000
     const JSON_DEPTH_LIMIT = 100
-    const JSON_NODE_LIMIT = 10_000
+    const JSON_NODE_LIMIT = 250_000
     const NOTEBOOK_DEPTH_LIMIT = 128
     const NOTEBOOK_NODE_LIMIT = 1_000_000
     const JSON_MIME_PATTERN = /^application\/(.*\+)?json$/
@@ -26,12 +26,15 @@ window.__ModuleLoader__.load({
         restart: 'Restart',
         save: 'Save',
         reload: 'Reload',
+        reloadConfirm: 'Reload this notebook from disk? Unsaved changes and unsaved execution results will be discarded.',
         shutdown: 'Shut down kernel',
+        shutdownFailed: 'The kernel could not be shut down. Check its status and try again.',
         kernel: 'Kernel',
         python: 'Python',
         busy: 'busy',
         idle: 'idle',
         off: 'off',
+        stopping: 'stopping',
         addCode: '+ Code',
         addMarkdown: '+ Markdown',
         codeCell: 'Code',
@@ -85,12 +88,15 @@ window.__ModuleLoader__.load({
         restart: '重启',
         save: '保存',
         reload: '重新加载',
+        reloadConfirm: '从磁盘重新加载此 notebook？未保存的修改和执行结果将被丢弃。',
         shutdown: '关闭内核',
+        shutdownFailed: '内核未能关闭，请查看状态后重试。',
         kernel: '内核',
         python: 'Python',
         busy: '运行中',
         idle: '空闲',
         off: '未启动',
+        stopping: '关闭中',
         addCode: '+ 代码',
         addMarkdown: '+ Markdown',
         codeCell: '代码',
@@ -734,14 +740,73 @@ window.__ModuleLoader__.load({
       return payload.value
     }
 
+    // A host refresh unmounts the viewer before calling its loader again. Keep
+    // accepted saves outside component refs so that replacement viewers and
+    // other open views of this document still wait for their result.
+    const notebookRequests = new Map()
+
+    function notebookRequestState(ctx, path, sessionId) {
+      const key = JSON.stringify([routeUrl(ctx, 'save'), sessionId, path])
+      let state = notebookRequests.get(key)
+      if (!state) {
+        state = { key, pending: new Set(), readers: 0, generation: 0 }
+        notebookRequests.set(key, state)
+      }
+      return state
+    }
+
+    function releaseNotebookRequestState(state) {
+      if (state.pending.size === 0 && state.readers === 0) notebookRequests.delete(state.key)
+    }
+
+    function readAborted() {
+      const error = new Error('Notebook read was aborted')
+      error.name = 'AbortError'
+      return error
+    }
+
+    async function waitForNotebookSaves(state, signal) {
+      for (;;) {
+        if (signal?.aborted) throw readAborted()
+        if (state.pending.size === 0) return
+        const settled = Promise.all([...state.pending])
+        if (!signal) {
+          await settled
+          continue
+        }
+        await new Promise((resolve, reject) => {
+          const onAbort = () => { cleanup(); reject(readAborted()) }
+          const cleanup = () => signal.removeEventListener('abort', onAbort)
+          signal.addEventListener('abort', onAbort, { once: true })
+          settled.then(() => { cleanup(); resolve() })
+          if (signal.aborted) onAbort()
+        })
+      }
+    }
+
     async function postJson(ctx, method, body, signal) {
-      const response = await fetch(routeUrl(ctx, method), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal,
-      })
-      return readResponse(response)
+      const state = method === 'save' ? notebookRequestState(ctx, body.path, body.sessionId) : null
+      let settleSave, pending
+      if (state) {
+        pending = new Promise((resolve) => { settleSave = resolve })
+        state.pending.add(pending)
+        state.generation += 1
+      }
+      try {
+        const response = await fetch(routeUrl(ctx, method), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        })
+        return await readResponse(response)
+      } finally {
+        if (state) {
+          state.pending.delete(pending)
+          releaseNotebookRequestState(state)
+          settleSave()
+        }
+      }
     }
 
     async function getJson(ctx, method, query, signal) {
@@ -752,8 +817,26 @@ window.__ModuleLoader__.load({
     }
 
     async function readNotebook(ctx, path, scope, signal) {
+      const state = notebookRequestState(ctx, path, scope && scope.sessionId)
+      state.readers += 1
       try {
-        return await postJson(ctx, 'read', { sessionId: scope && scope.sessionId, path }, signal)
+        for (;;) {
+          if (signal?.aborted) throw readAborted()
+          if (state.pending.size) await waitForNotebookSaves(state, signal)
+          const generation = state.generation
+          try {
+            const value = await postJson(ctx, 'read', { sessionId: scope && scope.sessionId, path }, signal)
+            if (signal?.aborted) throw readAborted()
+            // The old viewer can start a save just after a host read was sent.
+            // Its response cannot be adopted even if that save already settled.
+            if (state.generation !== generation) continue
+            return value
+          } catch (error) {
+            if (signal?.aborted || error?.name === 'AbortError') throw readAborted()
+            if (state.generation !== generation) continue
+            throw error
+          }
+        }
       } catch (error) {
         if (error && error.name === 'AbortError') throw error
         return {
@@ -761,6 +844,9 @@ window.__ModuleLoader__.load({
           code: (error && error.code) || 'network',
           message: (error && error.message) || String(error),
         }
+      } finally {
+        state.readers -= 1
+        releaseNotebookRequestState(state)
       }
     }
 
@@ -1142,7 +1228,9 @@ window.__ModuleLoader__.load({
       } catch (error) {
         if (error.code === 'json-too-complex') {
           const depth = error.reason === 'depth'
-          error.message = `${label} exceeds the maximum ${depth ? 'depth of ' + JSON_DEPTH_LIMIT : 'node count of ' + JSON_NODE_LIMIT}`
+          const depthLimit = metadata ? METADATA_DEPTH_LIMIT : JSON_DEPTH_LIMIT
+          const nodeLimit = metadata ? METADATA_NODE_LIMIT : JSON_NODE_LIMIT
+          error.message = `${label} exceeds the maximum ${depth ? 'depth of ' + depthLimit : 'node count of ' + nodeLimit}`
           if (metadata) error.code = 'metadata-too-complex'
         }
         throw error
@@ -1838,7 +1926,7 @@ window.__ModuleLoader__.load({
 
     function Toolbar(props) {
       const { kernel, python, interpreters, running, runAllRunning, onRunAll, onInterrupt, onRestart, onShutdown, onSave, onReload, onPython, saveState, dirty, conflict } = props
-      const state = kernel.busy ? t('busy') : !kernel.running ? t('off') : t('idle')
+      const state = kernel.executionState === 'stopping' ? t('stopping') : kernel.busy ? t('busy') : !kernel.running ? t('off') : t('idle')
       return h(
         'div',
         { className: 'dsh-bsb-ipynb-toolbar' },
@@ -1906,7 +1994,7 @@ window.__ModuleLoader__.load({
     }
 
     function NotebookView(props) {
-      const { ctx, scope, path, customData, onToolbarState, onReload, visible } = props
+      const { ctx, scope, path, customData, onToolbarState, visible } = props
       // Re-render when the host locale preference (or a late dictionary
       // registration) changes, so the bound translate yields the new strings.
       // The locale service is optional: without it the browser fallback stands
@@ -1935,6 +2023,7 @@ window.__ModuleLoader__.load({
       const [autosaveBlocked, setAutosaveBlocked] = useState(false)
       const [autosaveDelay, setAutosaveDelay] = useState(AUTOSAVE_MS)
       const [capacityBlocked, setCapacityBlocked] = useState(false)
+      const [reloading, setReloading] = useState(false)
       const [editingCell, setEditingCell] = useState(null)
       const [runningCell, setRunningCell] = useState(null)
       const [runAllRunning, setRunAllRunning] = useState(false)
@@ -1950,10 +2039,8 @@ window.__ModuleLoader__.load({
       const savingRef = useRef(null)
       const saveRef = useRef(null)
       const pythonRef = useRef('')
-      const forceReloadRef = useRef(false)
       const reloadRequestRef = useRef(0)
       const reloadWaitingRef = useRef(null)
-      const reloadReadRef = useRef(null)
       const saveTimerRef = useRef(null)
       const stopRef = useRef(false)
       const runAllRef = useRef(null)
@@ -1962,6 +2049,7 @@ window.__ModuleLoader__.load({
       const failedSnapshotRef = useRef(null)
       const documentSeqRef = useRef(0)
       const notebookRevisionRef = useRef(0)
+      const notebookEditRevisionRef = useRef(0)
       const notifiedTruncationsRef = useRef(new WeakSet())
       // Reading-mode shortcuts: the focused cell wins, then the most recently
       // edited or run cell. These refs let the single window listener commit to
@@ -1978,6 +2066,9 @@ window.__ModuleLoader__.load({
       // a /status response captured before it can never overwrite the newer
       // state. The request id orders concurrent GETs: only the latest commits.
       const kernelEpochRef = useRef(0)
+      // User actions own control responses. Stream events advance the status
+      // epoch, but an old run finishing must not invalidate its own shutdown.
+      const kernelActionRef = useRef(0)
       const kernelRequestRef = useRef(0)
       const kernelAbortRef = useRef(null)
 
@@ -1988,8 +2079,18 @@ window.__ModuleLoader__.load({
       loadStatusRef.current = loadStatus
       visibleRef.current = visible
 
-      const markDirty = useCallback(() => {
-        forceReloadRef.current = false
+      const markDirty = useCallback((fromExecution = false) => {
+        if (!fromExecution) {
+          notebookEditRevisionRef.current += 1
+          // New user edits supersede a pending reload. Kernel results do not:
+          // the user already confirmed that those unsaved results may be lost.
+          reloadRequestRef.current += 1
+          if (reloadWaitingRef.current) {
+            reloadWaitingRef.current.controller?.abort()
+            reloadWaitingRef.current = null
+            setReloading(false)
+          }
+        }
         notebookRevisionRef.current += 1
         dirtyRef.current = true
         setDirty(true)
@@ -2010,11 +2111,13 @@ window.__ModuleLoader__.load({
         // Invalidate first: aborting the old stream can immediately reject it.
         // A different document also means a different kernel generation.
         bumpKernelEpoch()
+        kernelActionRef.current += 1
         documentSeqRef.current += 1
         notebookRevisionRef.current += 1
+        notebookEditRevisionRef.current += 1
         reloadRequestRef.current += 1
+        reloadWaitingRef.current?.controller?.abort()
         reloadWaitingRef.current = null
-        reloadReadRef.current = null
         // A replaced document has no "recently edited cell" yet.
         activeCellRef.current = null
         savingRef.current = null
@@ -2037,6 +2140,7 @@ window.__ModuleLoader__.load({
         setRunAllRunning(false)
         setSaveState('idle')
         setCapacityBlocked(false)
+        setReloading(false)
         // Every adoption, including an invalid/error response, starts a new
         // document generation. Failure and conflict state belongs to the old one.
         dirtyRef.current = false
@@ -2081,60 +2185,49 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (customData === customRef.current) return
         customRef.current = customData
-        const read = reloadReadRef.current
-        if (read) {
-          reloadReadRef.current = null
-          // A later edit/save supersedes this read even if saving has already
-          // made the draft clean again. Never roll its version back on arrival.
-          if (read.id !== reloadRequestRef.current || read.seq !== documentSeqRef.current || read.revision !== notebookRevisionRef.current) {
-            forceReloadRef.current = false
-            return
-          }
-        }
-        if (dirtyRef.current && !forceReloadRef.current) return
-        forceReloadRef.current = false
+        // Host refreshes use the module-wide read/write barrier. Unsolicited
+        // snapshots cannot replace a draft or an in-flight local write.
+        if (dirtyRef.current || savingRef.current || reloadWaitingRef.current) return
         adopt(customData)
       }, [customData, adopt])
 
       const reload = useCallback(async () => {
+        reloadWaitingRef.current?.controller?.abort()
         const read = {
           id: ++reloadRequestRef.current,
           seq: documentSeqRef.current,
-          revision: notebookRevisionRef.current,
+          revision: notebookEditRevisionRef.current,
+          controller: typeof AbortController === 'function' ? new AbortController() : null,
         }
         const isCurrentReload = () => read.id === reloadRequestRef.current &&
-          read.seq === documentSeqRef.current && read.revision === notebookRevisionRef.current
-        // Ignoring/aborting a save response cannot undo a server-side commit.
-        // Wait for it before asking either the host or the fallback to read.
-        // Only this short wait blocks new saves: a cancelled host prompt does
-        // not report completion and must not leave the editor locked.
+          read.seq === documentSeqRef.current && read.revision === notebookEditRevisionRef.current
+        // Keep this barrier until adoption/cancellation completes. The host
+        // callback has no completion or cancellation signal, so the plugin
+        // owns its confirmation and read. Unmounting cannot cancel a commit:
+        // the module-wide barrier also protects the next viewer's initial read.
         reloadWaitingRef.current = read
+        setReloading(true)
         try {
           while (savingRef.current) {
             await savingRef.current.settled
             if (!isCurrentReload()) return
           }
-        } finally {
-          if (reloadWaitingRef.current === read) reloadWaitingRef.current = null
-        }
-        if (!isCurrentReload()) return
-        reloadReadRef.current = read
-        forceReloadRef.current = true
-        // The host owns the unsaved-changes confirmation and the reload itself.
-        // Delegating avoids overwriting the draft when the user cancels the
-        // host's "discard changes?" prompt. Conflict/banner state is cleared
-        // only when an adopt actually occurs, so a cancelled prompt keeps the
-        // conflict explanation and keeps saving blocked.
-        if (typeof onReload === 'function') {
-          onReload()
-          return
-        }
-        return readNotebook(ctx, path, scope).then((data) => {
-          // Newer reloads, edits and saves all supersede this fallback read.
+          if (!isCurrentReload()) return
+          if ((dirtyRef.current || runningRef.current || conflict) &&
+            (typeof window === 'undefined' || !window.confirm || !window.confirm(t('reloadConfirm')))) return
+          const data = await readNotebook(ctx, path, scope, read.controller?.signal)
           if (isCurrentReload()) adopt(data)
-          else if (reloadReadRef.current === read) reloadReadRef.current = null
-        }).catch(() => {})
-      }, [ctx, path, scope, onReload, adopt])
+        } catch (error) {
+          if (error?.name !== 'AbortError' && isCurrentReload()) {
+            setBanner({ kind: 'error', key: 'loadError', text: error && error.message })
+          }
+        } finally {
+          if (reloadWaitingRef.current === read) {
+            reloadWaitingRef.current = null
+            setReloading(false)
+          }
+        }
+      }, [ctx, path, scope, conflict, adopt])
 
       const openAsEmpty = useCallback(() => {
         invalidateDocumentWork()
@@ -2142,6 +2235,7 @@ window.__ModuleLoader__.load({
         setRunAllRunning(false)
         setSaveState('idle')
         setCapacityBlocked(false)
+        setReloading(false)
         const nextNotebook = emptyNotebook()
         notebookRef.current = nextNotebook
         setNotebook(nextNotebook)
@@ -2210,7 +2304,6 @@ window.__ModuleLoader__.load({
         // A read already in flight predates this write, even if the snapshot
         // was not edited again. Its eventual response must not be adopted.
         reloadRequestRef.current += 1
-        forceReloadRef.current = false
         const isCurrentSave = () => savingRef.current === request && !isStaleSaveResponse(documentSeqRef.current, seq)
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
         setSaveState('saving')
@@ -2360,13 +2453,14 @@ window.__ModuleLoader__.load({
       }, [refreshKernel, visible, loadStatus])
 
       useEffect(() => {
+        if (reloading) return undefined
         const changedSinceFailure = failedSnapshotRef.current === null || notebook !== failedSnapshotRef.current
         if (!shouldScheduleAutosave({ loadStatus, dirty, conflict, autosaveBlocked, capacityBlocked, runningCell, saveState, notebookChangedSinceFailure: changedSinceFailure })) return undefined
         const timer = setTimeout(() => {
           void saveRef.current()
         }, autosaveDelay)
         return () => clearTimeout(timer)
-      }, [dirty, notebook, conflict, autosaveBlocked, capacityBlocked, saveState, loadStatus, runningCell, autosaveDelay])
+      }, [dirty, notebook, conflict, autosaveBlocked, capacityBlocked, saveState, loadStatus, runningCell, autosaveDelay, reloading])
 
       // Only committed output snapshots can trigger a notice. Replayed or
       // discarded React updaters must not leave a stale truncation flag.
@@ -2442,10 +2536,12 @@ window.__ModuleLoader__.load({
       const handleEvent = useCallback((run, event) => {
         if (activeRunRef.current !== run || isStaleSaveResponse(documentSeqRef.current, run.seq)) return
         const { seq, cellId } = run
+        const ownsKernel = run.actionId === kernelActionRef.current
         if (!event || typeof event.type !== 'string') return
         if (!shouldHandleCellEvent(cellId, event)) return
         if (event.type === 'ping') return
         if (event.type === 'status') {
+          if (!ownsKernel) return
           // Stream status is authoritative for the run: any /status GET issued
           // before it belongs to an older generation.
           bumpKernelEpoch()
@@ -2467,12 +2563,15 @@ window.__ModuleLoader__.load({
           if (executeReplyFailed(event)) run.failed = true
           if (kernelRestartedReply(event)) {
             run.failed = true
-            setBanner({ kind: 'error', key: 'kernelRestarted' })
+            if (ownsKernel) setBanner({ kind: 'error', key: 'kernelRestarted' })
           }
           if (typeof event.execution_count === 'number') {
             updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
-          markDirty()
+          markDirty(true)
+          // A newer control operation owns the toolbar, while this run still
+          // owns its output/reply bookkeeping until the stream has settled.
+          if (!ownsKernel) return
           // The terminal reply defines the post-run generation (a synthetic
           // reply after kernel_died keeps the kernel off).
           bumpKernelEpoch()
@@ -2487,6 +2586,7 @@ window.__ModuleLoader__.load({
         if (event.type === 'kernel_died') {
           run.died = true
           run.failed = true
+          if (!ownsKernel) return
           bumpKernelEpoch()
           setBanner({ kind: 'error', ...(event.message ? { text: event.message } : { key: 'kernelDied' }) })
           setKernel((previous) => ({ ...previous, running: false, ready: false, busy: false, executionState: 'none' }))
@@ -2494,6 +2594,7 @@ window.__ModuleLoader__.load({
         }
         if (event.type === 'fatal') {
           run.failed = true
+          if (!ownsKernel) return
           // A fatal stream error ends this execution generation even though
           // the final state is set by runCell's catch/handling below.
           bumpKernelEpoch()
@@ -2506,14 +2607,24 @@ window.__ModuleLoader__.load({
         const current = notebookRef.current
         const cell = current && current.cells.find((entry) => entry.id === cellId)
         if (!cell || cell.cell_type !== 'code') return false
+        if (reloadWaitingRef.current) {
+          // Starting new work supersedes an earlier confirmed reload just as
+          // a new edit does; its eventual read must not discard this run.
+          reloadWaitingRef.current.controller?.abort()
+          notebookEditRevisionRef.current += 1
+          reloadRequestRef.current += 1
+          reloadWaitingRef.current = null
+          setReloading(false)
+        }
         // Snapshot the displayed outputs so a run that never reaches an
         // execute_reply (fatal / kernel_died / truncated stream / abort) can
         // restore them instead of leaving the cell wiped.
         const previousOutputs = Array.isArray(cell.outputs) ? cell.outputs : []
         const previousExecutionCount = typeof cell.execution_count === 'number' ? cell.execution_count : null
         const controller = typeof AbortController === 'function' ? new AbortController() : null
-        const run = { seq: documentSeqRef.current, cellId, replySeen: false, failed: false, displayOrigins: new WeakMap() }
+        const run = { seq: documentSeqRef.current, actionId: ++kernelActionRef.current, cellId, replySeen: false, failed: false, displayOrigins: new WeakMap() }
         const isCurrentRun = () => activeRunRef.current === run && !isStaleSaveResponse(documentSeqRef.current, run.seq)
+        const ownsKernel = () => isCurrentRun() && run.actionId === kernelActionRef.current
         activeRunRef.current = run
         abortRef.current = controller
         activeCellRef.current = cellId
@@ -2566,26 +2677,28 @@ window.__ModuleLoader__.load({
           // a saved result, nor restore a snapshot over a reloaded document.
           if (shouldRestoreOutputsAfterRun(run.replySeen)) {
             restorePreRunOutputs()
-            if (!run.failed) setBanner({ kind: 'error', key: 'streamIncomplete' })
+            if (!run.failed && ownsKernel()) setBanner({ kind: 'error', key: 'streamIncomplete' })
             run.failed = true
           }
-          return !run.failed
+          return !run.failed && ownsKernel()
         } catch (error) {
           if (!isCurrentRun()) return false
           if (error && error.name === 'AbortError') {
             if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
             return false
           }
-          const code = error && error.code
-          if (code === 'kernel-unavailable' || code === 'interpreter-unknown') {
-            setBanner({ kind: 'error', key: 'kernelUnavailable', textKey: 'installHint', separator: ' ' })
-          } else {
-            setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
+          if (ownsKernel()) {
+            const code = error && error.code
+            if (code === 'kernel-unavailable' || code === 'interpreter-unknown') {
+              setBanner({ kind: 'error', key: 'kernelUnavailable', textKey: 'installHint', separator: ' ' })
+            } else {
+              setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
+            }
+            // A failed current transport supersedes earlier status reads, but
+            // a superseded run cannot overwrite its newer control operation.
+            bumpKernelEpoch()
+            setKernel((previous) => ({ ...previous, busy: false, executionState: previous.running ? 'idle' : 'none' }))
           }
-          // The failed transport is a terminal transition too: an older
-          // status response must not restore the pre-run busy/ready state.
-          bumpKernelEpoch()
-          setKernel((previous) => ({ ...previous, busy: false, executionState: previous.running ? 'idle' : 'none' }))
           if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
           return false
         } finally {
@@ -2634,6 +2747,9 @@ window.__ModuleLoader__.load({
       const restart = useCallback(async (nextPython) => {
         // The kernel identity is about to change: GETs issued before the
         // restart cannot describe the replacement kernel.
+        const seq = documentSeqRef.current
+        const actionId = ++kernelActionRef.current
+        const isCurrentRestart = () => documentSeqRef.current === seq && kernelActionRef.current === actionId
         bumpKernelEpoch()
         try {
           const value = await postJson(ctx, 'restart', {
@@ -2641,36 +2757,43 @@ window.__ModuleLoader__.load({
             path,
             python: resolveRestartPython(nextPython, pythonRef.current),
           })
+          if (!isCurrentRestart()) return
           // GETs issued while the restart was in flight may still carry the
           // old kernel's state; the completed restart supersedes them.
           bumpKernelEpoch()
           setBanner({ kind: 'info', key: 'kernel', text: value.python || pythonRef.current || '' })
           await refreshKernel()
         } catch (error) {
+          if (!isCurrentRestart()) return
           setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
         }
       }, [ctx, path, scope, refreshKernel, bumpKernelEpoch])
 
       const shutdown = useCallback(async () => {
         const seq = documentSeqRef.current
+        const actionId = ++kernelActionRef.current
         bumpKernelEpoch()
-        const epoch = kernelEpochRef.current
-        const isCurrentShutdown = () => documentSeqRef.current === seq && kernelEpochRef.current === epoch
+        const isCurrentShutdown = () => documentSeqRef.current === seq && kernelActionRef.current === actionId
         try {
           await postJson(ctx, 'shutdown', { sessionId: scope && scope.sessionId, path })
-          // The response is authoritative only if no newer run/reload/restart
-          // changed the document or kernel generation while it was in flight.
+          // Only a newer user action supersedes this response. The old run's
+          // terminal messages belong to this shutdown and must not hide it.
           if (!isCurrentShutdown()) return
           bumpKernelEpoch()
           setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
+          setBanner((current) => current?.reason === 'shutdown-failed' ? null : current)
         } catch (error) {
           if (!isCurrentShutdown()) return
-          if (error && error.code === 'kernel-unavailable') {
-            bumpKernelEpoch()
-            setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
+          bumpKernelEpoch()
+          setBanner({ kind: 'error', reason: 'shutdown-failed', key: 'shutdownFailed', text: error && error.message })
+          if (error?.details?.state === 'stopping') {
+            setKernel((previous) => ({ ...previous, running: true, ready: false, busy: false, executionState: 'stopping', lastError: error.message }))
           }
+          // A 503 does not prove the process exited. Keep the last known state
+          // until an authoritative status response confirms whether it is off.
+          await refreshKernel()
         }
-      }, [ctx, path, scope, bumpKernelEpoch])
+      }, [ctx, path, scope, bumpKernelEpoch, refreshKernel])
 
       const changePython = useCallback(async (next) => {
         if (!next || next === pythonRef.current) return
@@ -2700,8 +2823,7 @@ window.__ModuleLoader__.load({
         // sensible target even after focus moved to the toolbar.
         activeCellRef.current = cellId
         setNotebook((previous) => updateCell(previous, cellId, (cell) => ({ ...cell, source: value })))
-        // A cancelled host reload leaves forceReloadRef set; new edits must not
-        // be replaced by a later customData adoption.
+        // A new edit supersedes any pending confirmed read.
         markDirty()
       }, [markDirty])
 
@@ -3307,6 +3429,7 @@ window.__ModuleLoader__.load({
       shouldRestoreOutputsAfterRun,
       emptyNotebook,
       readNotebook,
+      postJson,
       normalizePosix,
       dirnamePosix,
       isAbsoluteLocalPath,

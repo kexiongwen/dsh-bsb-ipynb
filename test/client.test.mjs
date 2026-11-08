@@ -88,7 +88,7 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
   assert.ok(registered.en && registered.zh, 'both locale dictionaries are registered')
   const enKeys = Object.keys(registered.en).sort()
   assert.deepEqual(Object.keys(registered.zh).sort(), enKeys, 'both locales expose the same string keys')
-  assert.equal(enKeys.length, 57, 'the audited client dictionary exposes 57 translation keys')
+  assert.equal(enKeys.length, 60, 'the audited client dictionary exposes 60 translation keys')
   for (const key of enKeys) {
     assert.equal(typeof registered.en[key], 'string', `en.${key} must be a translated string`)
     assert.ok(registered.en[key].length > 0, `en.${key} must not be empty`)

@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import { measureJsonBytes } from '../lib/json-budget.js'
 import {
   JSON_DEPTH_LIMIT, JSON_NODE_LIMIT, NOTEBOOK_DEPTH_LIMIT, NOTEBOOK_NODE_LIMIT,
-  NOTEBOOK_CAP_BYTES, serializeNotebook, saveNotebookFile, sha256,
+  NOTEBOOK_CAP_BYTES, parseNotebookBytes, readNotebookFile, serializeNotebook, saveNotebookFile, sha256,
 } from '../lib/notebook.js'
 import { loadClient } from './client-harness.mjs'
 import { tempDir } from './python-helper.mjs'
@@ -67,7 +67,7 @@ test('client preflight covers JSON MIME output and attachments at the exact stru
 test('client aggregate budget spans otherwise valid cells and JSON MIME values', async () => {
   const { exports } = await loadClient()
   const { notebookCapacity } = exports.__test
-  const value = new Array(JSON_NODE_LIMIT - 1).fill(null)
+  const value = new Array(9_999).fill(null)
   const result = notebook(value)
   result.cells = Array.from({ length: 100 }, (_, index) => ({ ...result.cells[0], id: 'cell-' + index }))
   assert.equal(notebookCapacity({ ...result, cells: result.cells.slice(0, 99) }).ok, true)
@@ -87,6 +87,101 @@ test('normal JSON values keep host/client disk byte parity and round-trip withou
       assert.equal(notebookCapacity(result).bytes, Buffer.byteLength(hostText))
     }
   }
+})
+
+for (const points of [4_997, 5_000, 50_000]) {
+  test('Plotly scatter with ' + points + ' points remains readable, saveable and usable as live output', async (t) => {
+    const { exports } = await loadClient()
+    const { notebookCapacity, reduceOutputs, renderJsonOutput } = exports.__test
+    const mime = 'application/vnd.plotly.v1+json'
+    const payload = {
+      data: [{
+        type: 'scatter', mode: 'markers',
+        x: Array.from({ length: points }, (_, index) => index),
+        y: Array.from({ length: points }, (_, index) => 2 * index),
+      }],
+      layout: { title: { text: 'Scatter 数据' } },
+      config: { responsive: true },
+    }
+    const input = notebook(payload, false, mime)
+    const compact = Buffer.from(JSON.stringify(input))
+    const parsed = parseNotebookBytes(compact)
+    assert.equal(parsed.status, 'ok', 'ordinary chart JSON must not make the whole notebook invalid')
+    assert.deepEqual(parsed.notebook.cells[0].outputs[0].data[mime], payload)
+    const preflight = notebookCapacity(parsed.notebook)
+    assert.equal(preflight.ok, true)
+    assert.equal(preflight.bytes, Buffer.byteLength(serializeNotebook(parsed.notebook)))
+    const live = reduceOutputs([], { type: 'display_data', data: { [mime]: payload }, metadata: {} })
+    assert.equal(live[0].output_type, 'display_data')
+    assert.deepEqual(live[0].data[mime], payload)
+    assert.equal(renderJsonOutput(payload), JSON.stringify(payload, null, 2))
+
+    const dir = await tempDir(t)
+    const file = path.join(dir, 'scatter.ipynb')
+    await writeFile(file, compact)
+    const loaded = await readNotebookFile(file)
+    assert.equal(loaded.status, 'ok')
+    const saved = await saveNotebookFile(file, loaded.notebook, loaded.version)
+    const disk = await readFile(file)
+    assert.equal(saved.version, sha256(disk))
+    assert.equal(saved.size, disk.length)
+    assert.equal(saved.size, preflight.bytes)
+    const reread = await readNotebookFile(file)
+    assert.equal(reread.status, 'ok')
+    assert.deepEqual(reread.notebook.cells[0].outputs[0].data[mime], payload,
+      'read/save must preserve every coordinate and chart option')
+  })
+}
+
+test('valid notebook serialization preserves a fixed pre-budget byte golden', async () => {
+  // Captured from db5ee8444b51fc4dd29cd9adf1fd72a06ef9d872, before JSON
+  // budgets were added. Keep this literal independent of the serializers.
+  const golden = String.raw`{
+  "cells": [
+    {
+      "cell_type": "code",
+      "execution_count": 1,
+      "id": "golden-cell",
+      "metadata": {},
+      "outputs": [
+        {
+          "output_type": "display_data",
+          "data": {
+            "application/json": {
+              "title": "中文😀",
+              "values": [
+                null,
+                true,
+                1.25
+              ],
+              "text": "line\n\"quote\"\\"
+            }
+          },
+          "metadata": {}
+        }
+      ],
+      "source": [
+        "print(\"中文😀\")\n",
+        "1 + 1"
+      ]
+    }
+  ],
+  "metadata": {
+    "custom": {
+      "enabled": true
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}` + '\n'
+  const { exports } = await loadClient()
+  const input = JSON.parse(golden)
+  assert.equal(serializeNotebook(input), golden)
+  assert.equal(exports.__test.serializeNotebook(input), golden)
+  const parsed = parseNotebookBytes(Buffer.from(golden))
+  assert.equal(parsed.status, 'ok')
+  assert.equal(serializeNotebook(parsed.notebook), golden)
+  assert.equal(exports.__test.notebookCapacity(parsed.notebook).bytes, Buffer.byteLength(golden))
 })
 
 test('client preflight measures without whole-document serialization or encoding', async () => {
