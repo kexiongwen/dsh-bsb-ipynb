@@ -71,6 +71,8 @@ python -m pip install jupyter_client ipykernel    # Windows (or: py -3 -m pip ..
 Run (`Cmd/Ctrl + Enter`) and save (`Cmd/Ctrl + S`) shortcuts also work in reading mode while the notebook view is visible: the target is the focused cell, otherwise the cell you last edited or ran, and `Cmd/Ctrl + S` is intercepted so the browser's save dialog does not open. While editing, Tab inserts four spaces and Shift+Tab removes one indent unit. Every action is also available from the toolbar (interpreter, Run all, interrupt, restart, save, reload, shut down kernel).
 
 - Autosave pauses while a cell or Run all is running, so transiently cleared or partial outputs never reach disk.
+- Reload waits for an in-flight save before reading the file. Edits or saves made while a reload is pending supersede its older response; cancelling the host confirmation leaves the draft editable.
+- A display handle can update matching outputs in other cells (`display(..., display_id=...)` / `handle.update(...)`); updated results are included in the next save.
 - Switching interpreters restarts the kernel; an active run asks for confirmation first.
 - A file changed on disk produces a 409 conflict that can only be resolved by reloading — external edits are never overwritten.
 - The notebook is measured in its on-disk form before upload; above 32 MiB the UI asks you to clear outputs or trim content instead of failing with a 413 after the fact.
@@ -97,14 +99,15 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 
 ## 🛡️ Reliability
 
-- **Serialized saves** — within the process, concurrent saves to the same canonical notebook path run in order; only the first succeeds and the rest return `write-conflict` (409). Hard-link aliases of the same inode are treated as different paths and are not serialized with each other.
+- **Serialized notebook I/O** — within the process, reads and saves queued for the same canonical notebook path run in order. A reload waits for an earlier queued save even if its client disconnected; concurrent saves using the same base version still return `write-conflict` (409) after the first succeeds. Hard-link aliases of the same inode are treated as different paths and are not serialized with each other. This does not acknowledge requests that have not yet reached the file queue after a network failure.
 - **Blocked saves** — a read-only notebook, or one held open by another program (common on Windows), returns `write-blocked` (409) with a fixable message instead of an internal error; autosave backs off up to 30 s and the response never embeds local paths or temp-file names.
 - **Capacity-blocked saves** — if client-side preflight blocks a notebook for exceeding 32 MiB, deleting cells or shortening source to bring it back under the limit does not resume autosave; click **Save** once manually. Existing recovery actions such as clearing outputs or reloading are unaffected.
 - **Safe writes** — write a temp file in the same directory, check the version again, then rename it into place; this narrows the external-write race window (extreme interleavings remain a known race). If a crash leaves a `.dsh-bsb-ipynb-*.tmp` behind, the next save sweeps stale ones older than an hour.
 - **No stalled streams** — restart/shutdown, kernel death or `os._exit()` always ends the NDJSON stream with a terminal failure event.
 - **Complete output** — after the kernel replies, the bridge waits for the matching IOPub idle; after 10 s it reports a failure and warns that output may be incomplete.
 - **Resource limits** — 32 MiB of client-side output per cell, a 64 MiB server-side NDJSON queue and a 64 MiB cap per kernel output line; exceeding a limit cancels the run and interrupts the kernel.
-- **Kernel cleanup** — idle kernels are swept after 30 minutes (`DSH_IPYNB_KERNEL_IDLE_MS`); ready timeout is 30 s; shutdown waits 2 s, sends SIGTERM, then SIGKILL 2 s later.
+- **Kernel lifecycle** — starts, restarts and interpreter switches are serialized per notebook, with busy state checked against the current kernel. Shutdown cancels pending starts/switches immediately; restart responses report the interpreter actually started.
+- **Kernel cleanup** — idle kernels are swept after 30 minutes (`DSH_IPYNB_KERNEL_IDLE_MS`); ready timeout is 30 s. Shutdown waits 2 s, sends SIGTERM, then SIGKILL 2 s later and allows 500 ms for exit confirmation. If the process still has not exited, the request fails and the stopping entry remains managed; no replacement is started on that path until exit is confirmed. Disposal failures are logged instead of becoming unhandled errors.
 - **Process cleanup** — the kernel connection file is removed on every exit path (the host owns its path, so a hard-killed bridge leaves nothing behind); on Windows a kill-on-close job object reaps the kernel and any subprocess a cell spawned.
 - **Restart resilience** — a failed kernel restart reports `kernel_died` and tears the bridge down instead of busy-looping; restarts run off the control loop, so status/interrupt/shutdown stay responsive during a slow restart.
 
@@ -171,7 +174,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Pending NDJSON queue / single kernel output line | 64 MiB / 64 MiB |
 | Metadata nesting / node limit | 100 levels / 10,000 nodes |
 | Autosave / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
-| Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s / 3 s |
+| Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s + 500 ms exit confirmation / 3 s |
 | Execute stream drain timeout | 10 s (a client that stops reading is disconnected) |
 | Kernel idle sweep | 30 minutes by default; `DSH_IPYNB_KERNEL_IDLE_MS` changes it (`0` disables the sweep) |
 

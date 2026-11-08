@@ -1739,6 +1739,8 @@ window.__ModuleLoader__.load({
       const pythonRef = useRef('')
       const forceReloadRef = useRef(false)
       const reloadRequestRef = useRef(0)
+      const reloadWaitingRef = useRef(null)
+      const reloadReadRef = useRef(null)
       const saveTimerRef = useRef(null)
       const stopRef = useRef(false)
       const runAllRef = useRef(null)
@@ -1797,6 +1799,9 @@ window.__ModuleLoader__.load({
         bumpKernelEpoch()
         documentSeqRef.current += 1
         notebookRevisionRef.current += 1
+        reloadRequestRef.current += 1
+        reloadWaitingRef.current = null
+        reloadReadRef.current = null
         // A replaced document has no "recently edited cell" yet.
         activeCellRef.current = null
         savingRef.current = null
@@ -1863,12 +1868,44 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (customData === customRef.current) return
         customRef.current = customData
+        const read = reloadReadRef.current
+        if (read) {
+          reloadReadRef.current = null
+          // A later edit/save supersedes this read even if saving has already
+          // made the draft clean again. Never roll its version back on arrival.
+          if (read.id !== reloadRequestRef.current || read.seq !== documentSeqRef.current || read.revision !== notebookRevisionRef.current) {
+            forceReloadRef.current = false
+            return
+          }
+        }
         if (dirtyRef.current && !forceReloadRef.current) return
         forceReloadRef.current = false
         adopt(customData)
       }, [customData, adopt])
 
-      const reload = useCallback(() => {
+      const reload = useCallback(async () => {
+        const read = {
+          id: ++reloadRequestRef.current,
+          seq: documentSeqRef.current,
+          revision: notebookRevisionRef.current,
+        }
+        const isCurrentReload = () => read.id === reloadRequestRef.current &&
+          read.seq === documentSeqRef.current && read.revision === notebookRevisionRef.current
+        // Ignoring/aborting a save response cannot undo a server-side commit.
+        // Wait for it before asking either the host or the fallback to read.
+        // Only this short wait blocks new saves: a cancelled host prompt does
+        // not report completion and must not leave the editor locked.
+        reloadWaitingRef.current = read
+        try {
+          while (savingRef.current) {
+            await savingRef.current.settled
+            if (!isCurrentReload()) return
+          }
+        } finally {
+          if (reloadWaitingRef.current === read) reloadWaitingRef.current = null
+        }
+        if (!isCurrentReload()) return
+        reloadReadRef.current = read
         forceReloadRef.current = true
         // The host owns the unsaved-changes confirmation and the reload itself.
         // Delegating avoids overwriting the draft when the user cancels the
@@ -1879,11 +1916,10 @@ window.__ModuleLoader__.load({
           onReload()
           return
         }
-        const requestId = ++reloadRequestRef.current
-        readNotebook(ctx, path, scope).then((data) => {
-          // Only the latest fallback request may replace the current document;
-          // an older success or error must not win by arriving last.
-          if (requestId === reloadRequestRef.current) adopt(data)
+        return readNotebook(ctx, path, scope).then((data) => {
+          // Newer reloads, edits and saves all supersede this fallback read.
+          if (isCurrentReload()) adopt(data)
+          else if (reloadReadRef.current === read) reloadReadRef.current = null
         }).catch(() => {})
       }, [ctx, path, scope, onReload, adopt])
 
@@ -1915,7 +1951,7 @@ window.__ModuleLoader__.load({
       const save = useCallback(async () => {
         // All entry points (including Ctrl+S and an already queued autosave)
         // must avoid persisting the transient, cleared outputs of a running cell.
-        if (runningRef.current || runAllRef.current || savingRef.current || !notebookRef.current || loadStatus !== 'ok') return
+        if (runningRef.current || runAllRef.current || savingRef.current || reloadWaitingRef.current || !notebookRef.current || loadStatus !== 'ok') return
         if (conflict) {
           // A 409 blocks saving until the user reloads; surface that instead of
           // silently ignoring the click or Ctrl+S.
@@ -1955,8 +1991,13 @@ window.__ModuleLoader__.load({
         setCapacityBlocked(false)
         const seq = documentSeqRef.current
         const revision = notebookRevisionRef.current
-        const request = { seq }
+        let settleSave
+        const request = { seq, settled: new Promise((resolve) => { settleSave = resolve }) }
         savingRef.current = request
+        // A read already in flight predates this write, even if the snapshot
+        // was not edited again. Its eventual response must not be adopted.
+        reloadRequestRef.current += 1
+        forceReloadRef.current = false
         const isCurrentSave = () => savingRef.current === request && !isStaleSaveResponse(documentSeqRef.current, seq)
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
         setSaveState('saving')
@@ -2016,6 +2057,7 @@ window.__ModuleLoader__.load({
           }
         } finally {
           if (isCurrentSave()) savingRef.current = null
+          settleSave()
         }
       }, [ctx, path, scope, loadStatus, conflict])
 
@@ -2148,7 +2190,36 @@ window.__ModuleLoader__.load({
           : updateCell(previous, cellId, (cell) => cell.cell_type === 'code' ? updater(cell) : cell))
       }, [])
 
-      const updateRunOutputs = useCallback((seq, cellId, event) => {
+      const updateRunOutputs = useCallback((run, event) => {
+        const { seq, cellId } = run
+        if (event.type === 'update_display_data' && event.display_id) {
+          // A display handle belongs to the notebook, not to the cell that
+          // happens to call update(). Keep this in one ordered React update so
+          // displays created earlier in the same batch are also visible here.
+          setNotebook((previous) => {
+            if (!previous || isStaleSaveResponse(documentSeqRef.current, seq)) return previous
+            let changed = false
+            const cells = previous.cells.map((cell) => {
+              if (cell.cell_type !== 'code') return cell
+              // The active cell still consumes its deferred clear, even for
+              // an unmatched ID. Other cells only receive matching updates;
+              // unrelated deferred clears must remain pending.
+              if (cell.id !== cellId && !cell.outputs?.some((output) => output.display_id === event.display_id)) return cell
+              const outputs = reduceOutputs(cell.outputs, event)
+              if (outputs === cell.outputs) return cell
+              if (cell.id !== cellId) {
+                // Cache rollback provenance on the immutable result, just like
+                // output budgets. Replayed/discarded updaters cannot change the
+                // provenance of the snapshot that React eventually commits.
+                run.displayOrigins.set(outputs, run.displayOrigins.get(cell.outputs) || cell.outputs)
+              }
+              changed = true
+              return { ...cell, outputs }
+            })
+            return changed ? { ...previous, cells } : previous
+          })
+          return
+        }
         updateRunCell(seq, cellId, (cell) => {
           const outputs = reduceOutputs(cell.outputs, event)
           return outputs === cell.outputs ? cell : { ...cell, outputs }
@@ -2170,7 +2241,7 @@ window.__ModuleLoader__.load({
           return
         }
         if (OUTPUT_EVENTS.has(event.type)) {
-          updateRunOutputs(seq, cellId, event)
+          updateRunOutputs(run, event)
           if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) {
             updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
@@ -2228,7 +2299,7 @@ window.__ModuleLoader__.load({
         const previousOutputs = Array.isArray(cell.outputs) ? cell.outputs : []
         const previousExecutionCount = typeof cell.execution_count === 'number' ? cell.execution_count : null
         const controller = typeof AbortController === 'function' ? new AbortController() : null
-        const run = { seq: documentSeqRef.current, cellId, replySeen: false, failed: false }
+        const run = { seq: documentSeqRef.current, cellId, replySeen: false, failed: false, displayOrigins: new WeakMap() }
         const isCurrentRun = () => activeRunRef.current === run && !isStaleSaveResponse(documentSeqRef.current, run.seq)
         activeRunRef.current = run
         abortRef.current = controller
@@ -2250,6 +2321,19 @@ window.__ModuleLoader__.load({
           // No save can start during execution. Restore only the outputs and
           // preserve dirty/source edits (including a pre-run save completing).
           updateRunCell(run.seq, cellId, (entry) => ({ ...entry, outputs: previousOutputs, execution_count: previousExecutionCount }))
+          setNotebook((previous) => {
+            if (!previous || isStaleSaveResponse(documentSeqRef.current, run.seq)) return previous
+            let changed = false
+            const cells = previous.cells.map((entry) => {
+              const outputs = entry.cell_type === 'code' && entry.id !== cellId
+                ? run.displayOrigins.get(entry.outputs)
+                : undefined
+              if (!outputs) return entry
+              changed = true
+              return { ...entry, outputs }
+            })
+            return changed ? { ...previous, cells } : previous
+          })
         }
         try {
           await streamExecute(

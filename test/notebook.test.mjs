@@ -211,6 +211,122 @@ test('concurrent saves with the same baseVersion conflict instead of overwriting
   assert.deepEqual(entries, ['demo.ipynb'])
 })
 
+function deferred() {
+  let resolve
+  const promise = new Promise((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+for (const fails of [false, true]) {
+  test(`reads wait for an accepted save to ${fails ? 'fail' : 'commit'} without blocking another notebook`, { timeout: 5000 }, async (t) => {
+    const dir = await tempDir(t)
+    const file = path.join(dir, 'saving.ipynb')
+    const otherFile = path.join(dir, 'other.ipynb')
+    const original = serializeNotebook(emptyNotebook())
+    await writeFile(file, original)
+    await writeFile(otherFile, original)
+    const originalVersion = sha256(Buffer.from(original))
+    const next = emptyNotebook()
+    next.cells[0].source = 'ACCEPTED SAVE'
+    const reachedRename = deferred()
+    const releaseRename = deferred()
+    const originalRename = fs.promises.rename
+    const originalStat = fs.promises.stat
+    let reading = false
+    let readStarted = false
+    let save, read
+    fs.promises.rename = async (from, to) => {
+      if (String(to) === file) {
+        reachedRename.resolve()
+        await releaseRename.promise
+        if (fails) throw Object.assign(new Error('controlled locked target'), { code: 'EBUSY' })
+      }
+      return originalRename(from, to)
+    }
+    fs.promises.stat = async (target, ...args) => {
+      if (reading && String(target) === file) readStarted = true
+      return originalStat(target, ...args)
+    }
+    try {
+      // The browser may already have lost its response. The accepted server
+      // write still owns the path until rename succeeds or fails.
+      save = saveNotebookFile(file, next, originalVersion)
+      const checkedSave = fails
+        ? assert.rejects(save, (error) => error.code === 'write-blocked')
+        : save
+      await reachedRename.promise
+      reading = true
+      read = readNotebookFile(file)
+      const other = await readNotebookFile(otherFile)
+      assert.equal(other.version, originalVersion)
+      assert.equal(readStarted, false, 'the queued read cannot inspect a file whose save is still active')
+      assert.equal(await readFile(file, 'utf8'), original, 'the suspended save has not committed yet')
+      reading = false
+      releaseRename.resolve()
+      const saved = await checkedSave
+      const loaded = await read
+      assert.equal(loaded.version, fails ? originalVersion : saved.version)
+      assert.equal(loaded.notebook.cells[0].source, fails ? '' : 'ACCEPTED SAVE')
+      assert.equal(loaded.version, sha256(await readFile(file)))
+    } finally {
+      reading = false
+      releaseRename.resolve()
+      await Promise.allSettled([save, read])
+      fs.promises.rename = originalRename
+      fs.promises.stat = originalStat
+    }
+    // A failed write must not poison the operation queue or its cleanup.
+    const current = await readNotebookFile(file)
+    next.cells[0].source = 'NEXT SAVE'
+    const saved = await saveNotebookFile(file, next, current.version)
+    assert.equal((await readNotebookFile(file)).version, saved.version)
+  })
+}
+
+test('a read queued between saves observes the first commit before the second write', { timeout: 5000 }, async (t) => {
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'demo.ipynb')
+  const original = serializeNotebook(emptyNotebook())
+  await writeFile(file, original)
+  const first = emptyNotebook()
+  first.cells[0].source = 'FIRST'
+  const firstVersion = sha256(Buffer.from(serializeNotebook(first)))
+  const second = emptyNotebook()
+  second.cells[0].source = 'SECOND'
+  const reachedRename = deferred()
+  const releaseRename = deferred()
+  const originalRename = fs.promises.rename
+  let held = false
+  let savingFirst, reading, savingSecond
+  fs.promises.rename = async (from, to) => {
+    if (!held && String(to) === file) {
+      held = true
+      reachedRename.resolve()
+      await releaseRename.promise
+    }
+    return originalRename(from, to)
+  }
+  try {
+    savingFirst = saveNotebookFile(file, first, sha256(Buffer.from(original)))
+    await reachedRename.promise
+    reading = readNotebookFile(file)
+    savingSecond = saveNotebookFile(file, second, firstVersion)
+    releaseRename.resolve()
+    await savingFirst
+    const between = await reading
+    assert.equal(between.notebook.cells[0].source, 'FIRST')
+    assert.equal(between.version, firstVersion)
+    const savedSecond = await savingSecond
+    const final = await readNotebookFile(file)
+    assert.equal(final.notebook.cells[0].source, 'SECOND')
+    assert.equal(final.version, savedSecond.version)
+  } finally {
+    releaseRename.resolve()
+    await Promise.allSettled([savingFirst, reading, savingSecond])
+    fs.promises.rename = originalRename
+  }
+})
+
 test('save rechecks the version after the temporary write and preserves external edits', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')

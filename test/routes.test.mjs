@@ -119,9 +119,11 @@ function makeKernels() {
     status() {
       return { running: true, ready: true, busy: false, python: entry.python, executionState: 'idle', lastError: null }
     },
-    async getOrStart(target, python, onEvent) {
+    async getOrStart(target, python, options = {}) {
       calls.push({ target, python })
-      if (onEvent) onEvent({ type: 'status', phase: 'starting' })
+      const preserve = options.prepareReplacement?.()
+      entry.python = python
+      preserve?.(entry)
       return entry
     },
     peek() {
@@ -134,8 +136,9 @@ function makeKernels() {
       calls.push({ shutdown: true, target })
       return true
     },
-    async restart(target) {
+    async restart(target, python, options = {}) {
       calls.push({ restart: true, target })
+      return this.getOrStart(target, python, options)
     },
   }
 }
@@ -798,6 +801,36 @@ test('restart still starts a kernel for an existing notebook', async (t) => {
     kernels.calls.some((call) => call.python),
     'restart must start the kernel for an existing notebook',
   )
+})
+
+test('restart delegates interpreter changes atomically and reports the actual resulting interpreter', async (t) => {
+  const discovered = await discoverInterpreters()
+  assert.ok(discovered.default, 'the controlled interpreter probe supplies a usable candidate')
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const kernels = makeKernels()
+  let restarted = false
+  kernels.shutdown = () => { throw new Error('The route must not split shutdown from interpreter replacement') }
+  kernels.getOrStart = () => { throw new Error('Restart must be one manager operation') }
+  kernels.restart = async (target, python, options) => {
+    restarted = true
+    assert.equal(target, path.join(await realpath(dir), 'demo.ipynb'))
+    assert.equal(python, discovered.default)
+    assert.equal(options.allowStart, true)
+    assert.equal(typeof options.prepareReplacement, 'function')
+    const preserve = options.prepareReplacement()
+    const actual = { ...kernels.entry, python: '/actual/manager-result' }
+    kernels.peek = () => actual
+    preserve(actual)
+    return actual
+  }
+  const { state, json } = await invoke(makeCtx({ cwd: dir }), kernels, makeReq({
+    method: 'POST', url: '/ipynb/restart',
+    body: { sessionId: 's1', path: 'demo.ipynb', python: discovered.default },
+  }))
+  assert.equal(restarted, true)
+  assert.equal(state.status, 200)
+  assert.equal(json.value.python, '/actual/manager-result', 'the response cannot merely echo the requested path')
 })
 
 test('save rejects a notebook that grew past the cap on disk', async (t) => {

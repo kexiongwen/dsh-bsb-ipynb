@@ -15,6 +15,8 @@ export function apply(ctx) {
   const kernels = new KernelManager(ctx, bridgePath)
   ctx.effect(() => registerIpynbRoutes(ctx, kernels))
   ctx.effect(() => () => {
-    void kernels.disposeAll()
+    return kernels.disposeAll().catch((error) => {
+      console.error('[dsh-bsb-ipynb] kernel disposal failed:', error)
+    })
   })
 }

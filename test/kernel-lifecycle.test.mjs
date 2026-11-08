@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from 'node:module'
 import { StringDecoder } from 'node:string_decoder'
 import { test } from 'node:test'
 import { KernelManager } from '../lib/kernel.js'
+import { KernelPaths } from '../lib/gate.js'
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 
@@ -646,7 +647,7 @@ for (const phase of ['starting', 'executing']) {
   })
 }
 
-test('an older shutdown or idle-sweep completion cannot delete a replacement entry created during its exit', async (t) => {
+test('shutdown and idle cleanup finish before starting a replacement requested during exit', async (t) => {
   const h = harness(t)
   for (const mode of ['shutdown', 'idle sweep']) {
     await h.reset()
@@ -654,11 +655,10 @@ test('an older shutdown or idle-sweep completion cannot delete a replacement ent
     const first = await h.startReady()
     let replacement
     first.proc.once('exit', () => {
-      // The old entry's exit handler has run, but its async shutdown has not
-      // resumed yet. A new execute may create an entry in this interval.
-      replacement = h.start()
+      // A new execute can arrive during exit, but its start must queue behind
+      // completion of the old shutdown rather than creating overlapping entries.
+      replacement = { started: h.manager.getOrStart(h.target, '/controlled/python') }
       observe(replacement.started)
-      replacement.proc.event({ type: 'ready' })
     })
     if (mode === 'shutdown') {
       await h.manager.shutdown(h.target)
@@ -666,7 +666,11 @@ test('an older shutdown or idle-sweep completion cannot delete a replacement ent
       first.entry.lastActivity = 0
       await h.manager.sweepIdle()
     }
-    assert.ok(replacement, `${where}: a replacement entry was created during the old exit`)
+    assert.ok(replacement, `${where}: a replacement was requested during the old exit`)
+    await flush()
+    replacement.entry = h.manager.peek(h.target)
+    replacement.proc = h.processes.at(-1)
+    replacement.proc.event({ type: 'ready' })
     await replacement.started
     assert.equal(h.manager.peek(h.target), replacement.entry, `${where}: old cleanup must not delete the new map entry`)
     assert.equal(replacement.entry.proc, replacement.proc, `${where}: the replacement keeps its own process handle`)
@@ -1226,4 +1230,144 @@ test('concurrent getOrStart creates only one kernel entry and serves the shared 
   reply(proc, command)
   assert.equal((await run).ok, true, 'the shared entry executes the run')
   assert.ok(events.some((event) => event.type === 'stream' && event.text.includes('shared')), 'the shared run receives its stream output')
+})
+
+test('concurrent interpreter switches serialize shutdown/start and transfer every observed alias', async (t) => {
+  const h = harness(t)
+  const first = await h.startReady()
+  const paths = new KernelPaths({}, h.manager)
+  const resolved = { target: h.target, key: 'requested', nodes: [], known: true }
+  paths.remember({ ...resolved, key: 'deleted-alias' }, first.entry)
+  const captured = []
+  const options = {
+    allowStart: true,
+    prepareReplacement() {
+      captured.push(h.manager.peek(h.target)?.python)
+      return paths.prepareReplacement(resolved)
+    },
+  }
+  first.proc.stdin.write = (line) => { first.proc.commands.push(JSON.parse(line)); return true }
+  const toB = h.manager.restart(h.target, '/python-B', options)
+  const toC = h.manager.restart(h.target, '/python-C', options)
+  const cState = observe(toC)
+  assert.equal(first.proc.commands.filter((command) => command.op === 'shutdown').length, 1)
+  assert.equal(h.processes.length, 1, 'a pending shutdown still owns the notebook')
+  first.proc.exit()
+  await flush()
+  const procB = h.processes.at(-1)
+  assert.notEqual(procB, first.proc)
+  assert.equal(h.manager.peek(h.target).python, '/python-B')
+  procB.event({ type: 'ready' })
+  assert.equal((await toB).python, '/python-B')
+  await flush()
+  const procC = h.processes.at(-1)
+  assert.notEqual(procC, procB)
+  assert.equal(procB.exitCode, 0, 'B exits before C can be created')
+  assert.equal(cState.status, 'pending')
+  procC.event({ type: 'ready' })
+  const current = await toC
+  assert.equal(current.python, '/python-C')
+  assert.equal(h.manager.peek(h.target), current)
+  assert.deepEqual(captured, ['/controlled/python', '/python-B'], 'alias snapshots are captured inside each operation')
+  assert.equal(paths.aliases.get('deleted-alias').entry.deref(), current, 'an untouched deleted-path alias follows both replacements')
+  assert.equal(paths.aliases.get('requested').entry.deref(), current)
+})
+
+test('an execution acquiring the kernel takes its busy slot before a queued interpreter switch', async (t) => {
+  const h = harness(t)
+  const { proc } = await h.startReady()
+  const running = h.manager.getOrStart(h.target, '/controlled/python').then((entry) => entry.run('cell', 'work'))
+  const switching = h.manager.restart(h.target, '/other-python', { allowStart: true })
+  await assert.rejects(switching, (error) => error.code === 'kernel-busy')
+  assert.equal(h.processes.length, 1)
+  assert.equal(proc.commands.some((command) => command.op === 'shutdown'), false)
+  reply(proc, proc.commands.at(-1))
+  assert.equal((await running).ok, true)
+})
+
+for (const phase of ['startup', 'restart']) {
+  test(`manager shutdown interrupts ${phase} immediately without waiting for its ready timeout`, async (t) => {
+    const h = harness(t)
+    let pending, proc
+    if (phase === 'startup') {
+      const start = h.start()
+      pending = start.started
+      proc = start.proc
+    } else {
+      ;({ proc } = await h.startReady())
+      pending = h.manager.restart(h.target)
+      assert.equal(h.manager.peek(h.target).ready, false, 'an idle queue starts restart synchronously')
+    }
+    const state = observe(pending)
+    await h.manager.shutdown(h.target)
+    await flush()
+    assert.equal(state.status, 'rejected')
+    assert.equal(proc.commands.filter((command) => command.op === 'shutdown').length, 1)
+    assert.equal(h.manager.peek(h.target), null)
+    assert.equal(h.activeReadyTimers().length, 0)
+    assert.equal((await h.startReady()).entry.ready, true, 'a later explicit start still works')
+  })
+}
+
+test('shutdown cancels active and queued interpreter switches without a late replacement spawn', async (t) => {
+  const h = harness(t)
+  const { proc } = await h.startReady()
+  proc.stdin.write = (line) => { proc.commands.push(JSON.parse(line)); return true }
+  const b = observe(h.manager.restart(h.target, '/python-B', { allowStart: true }))
+  const c = observe(h.manager.restart(h.target, '/python-C', { allowStart: true }))
+  const closing = h.manager.shutdown(h.target)
+  proc.exit()
+  await closing
+  await flush()
+  assert.equal(b.status, 'rejected')
+  assert.equal(c.status, 'rejected')
+  assert.equal(h.processes.length, 1)
+  assert.equal(h.manager.peek(h.target), null)
+})
+
+test('a failed switch releases its queue and other notebook lifecycles remain independent', async (t) => {
+  const h = harness(t)
+  const { proc } = await h.startReady()
+  const switching = observe(h.manager.restart(h.target, '/python-B', { allowStart: true }))
+  await flush()
+  const procB = h.processes.at(-1)
+  const otherTarget = '/controlled/other.ipynb'
+  const other = h.manager.getOrStart(otherTarget, '/other-python')
+  const otherProc = h.processes.at(-1)
+  otherProc.event({ type: 'ready' })
+  assert.equal((await other).ready, true)
+  assert.equal(switching.status, 'pending', 'B remains unready without blocking another notebook')
+  procB.exit(1)
+  await flush()
+  assert.equal(switching.status, 'rejected')
+  const recovered = h.manager.restart(h.target, '/python-C', { allowStart: true })
+  const procC = h.processes.at(-1)
+  assert.notEqual(procC, proc)
+  procC.event({ type: 'ready' })
+  assert.equal((await recovered).python, '/python-C')
+})
+
+test('a restart of a deleted notebook rechecks the live entry when its queued turn starts', async (t) => {
+  const h = harness(t)
+  const { proc } = await h.startReady()
+  proc.stdin.write = (line) => { proc.commands.push(JSON.parse(line)); return true }
+  const closing = h.manager.shutdown(h.target)
+  const restarting = h.manager.restart(h.target, '/controlled/python', { allowStart: false })
+  const rejected = assert.rejects(restarting, (error) => error.code === 'not-found')
+  proc.exit()
+  await closing
+  await rejected
+  assert.equal(h.processes.length, 1)
+})
+
+test('a queued idle sweep rechecks activity after a preceding kernel acquisition', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  entry.lastActivity = 0
+  const acquired = h.manager.getOrStart(h.target, '/controlled/python')
+  const swept = h.manager.sweepIdle()
+  await acquired
+  await swept
+  assert.equal(h.manager.peek(h.target), entry)
+  assert.equal(proc.commands.some((command) => command.op === 'shutdown'), false)
 })

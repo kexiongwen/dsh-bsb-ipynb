@@ -475,41 +475,155 @@ for (const staleOutcome of ['success', 'error']) {
   })
 }
 
-for (const outcome of ['conflict', 'failure', 'success']) {
-  test(`late save ${outcome} cannot change a reloaded document or unlock its active save`, async (t) => {
-    const app = mountNotebook(t)
+for (const hostReload of [true, false]) {
+  for (const outcome of ['conflict', 'failure', 'success']) {
+    test(`${hostReload ? 'host' : 'fallback'} reload waits for an in-flight save ${outcome} before reading the disk`, async (t) => {
+      const app = mountNotebook(t, { hostReload })
+      await app.settle()
+      app.edit('old draft')
+      const oldSave = app.save()
+      app.toolbar.onReload()
+      await app.settle()
+      assert.equal(app.reloadCount, 0, 'the host must not read while the save can still commit')
+      assert.equal(app.requests('read').length, 0, 'the fallback must not read while the save can still commit')
+      app.save()
+      assert.equal(app.requests('save').length, 1, 'waiting for reload does not start another save')
+
+      // Successful/conflict responses follow the server write. The failure case
+      // separately checks that a rejected transport releases the reload wait;
+      // server-side ordering of an unfinished write is covered by I/O tests.
+      const disk = notebookData('LATEST DISK', 'v2')
+      disk.notebook.cells[0].source = outcome === 'success' ? 'old draft' : 'external draft'
+      if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', message: 'CONFLICT', details: { version: 'v2' } } }, 409))
+      else if (outcome === 'failure') oldSave.reject(new Error('NETWORK FAILURE'))
+      else oldSave.resolve(response({ ok: true, value: { version: 'v2' } }))
+      await app.settle()
+      if (hostReload) {
+        assert.equal(app.reloadCount, 1)
+        app.receive(disk)
+      } else {
+        assert.equal(app.requests('read').length, 1)
+        app.requests('read')[0].resolve(response({ ok: true, value: disk }))
+      }
+      await app.settle()
+      assert.equal(app.cell.cell.source, disk.notebook.cells[0].source)
+      assert.equal(app.cell.cell.outputs[0].text, 'LATEST DISK')
+      assert.equal(app.toolbar.dirty, false)
+      assert.equal(app.toolbar.conflict, null)
+      assert.equal(app.banner, null)
+      app.edit('next draft')
+      const nextSave = app.save()
+      assert.equal(nextSave.body.baseVersion, 'v2', 'the next save uses the actual latest disk version')
+      nextSave.resolve(response({ ok: true, value: { version: 'v3' } }))
+      await app.settle()
+    })
+  }
+
+  test(`${hostReload ? 'host' : 'fallback'} reload cannot replace edits saved while its read was in flight`, async (t) => {
+    const app = mountNotebook(t, { hostReload })
     await app.settle()
-    app.edit('old draft')
-    const oldSave = app.save()
-    app.reload()
+    app.toolbar.onReload()
+    app.edit('newer draft')
+    const save = app.save()
+    save.resolve(response({ ok: true, value: { version: 'v2' } }))
+    await app.settle()
+    assert.equal(app.toolbar.dirty, false)
+    if (hostReload) app.receive(notebookData('STALE', 'v1'))
+    else app.requests('read')[0].resolve(response({ ok: true, value: notebookData('STALE', 'v1') }))
+    await app.settle()
+    assert.equal(app.cell.cell.source, 'newer draft', 'even a now-clean draft must survive the older read')
+    app.edit('next draft')
+    assert.equal(app.save().body.baseVersion, 'v2')
+  })
+}
+
+test('only the latest queued reload runs after saving, and cancellation does not lock the editor', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('saved draft')
+  const save = app.save()
+  app.toolbar.onReload()
+  app.toolbar.onReload()
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
+  assert.equal(app.reloadCount, 1, 'superseded clicks do not open multiple host prompts')
+  // No customData arrives when the user cancels the host confirmation.
+  app.edit('unsaved draft')
+  assert.equal(app.cell.cell.source, 'unsaved draft')
+  assert.equal(app.toolbar.dirty, true)
+  const nextSave = app.save()
+  assert.equal(app.requests('save').length, 2, 'cancellation must not retain a save lock')
+  assert.equal(nextSave.body.baseVersion, 'v2')
+  assert.equal(nextSave.body.notebook.cells[0].source, 'unsaved draft')
+})
+
+test('editing while reload waits for a save cancels that reload and keeps autosave available', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('saved draft')
+  const save = app.save()
+  app.toolbar.onReload()
+  app.edit('newer draft')
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
+  assert.equal(app.reloadCount, 0)
+  assert.equal(app.cell.cell.source, 'newer draft')
+  assert.equal(app.toolbar.dirty, true)
+  app.fireTimer(1500)
+  assert.equal(app.requests('save').length, 2)
+  assert.equal(app.requests('save')[1].body.baseVersion, 'v2')
+})
+
+test('unmount cancels a reload waiting for a save without aborting the write', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit()
+  const save = app.save()
+  app.toolbar.onReload()
+  app.unmount()
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await settleWithoutCommit()
+  assert.equal(app.reloadCount, 0, 'a disposed viewer must not invoke its old host reload callback')
+  assert.equal(app.requests('read').length, 0)
+})
+
+test('fallback reload preserves edits made after its read started', async (t) => {
+  const app = mountNotebook(t, { hostReload: false })
+  await app.settle()
+  app.toolbar.onReload()
+  app.edit('keep this draft')
+  app.requests('read')[0].resolve(response({ ok: true, value: notebookData('STALE', 'v1') }))
+  await app.settle()
+  assert.equal(app.cell.cell.source, 'keep this draft')
+  assert.equal(app.toolbar.dirty, true)
+})
+
+for (const outcome of ['success', 'conflict', 'failure']) {
+  test(`a late save ${outcome} cannot replace an externally adopted version or release its newer save`, async (t) => {
+    const app = mountNotebook(t, { visible: true })
+    await app.settle()
+    // Ctrl+S is allowed on a clean document. An independent host snapshot can
+    // replace that document while its write is still in flight.
+    app.dispatchKey({ key: 's', ctrlKey: true, target: fakeTarget('BODY') })
+    const oldSave = app.requests('save')[0]
+    app.receive(notebookData('FRESH', 'v2'))
     app.edit('fresh draft')
-    const newSave = app.save()
-    assert.equal(app.requests('save').length, 2, 'a superseded request cannot block saving the adopted document')
-    assert.equal(newSave.body.baseVersion, 'v2')
-    assert.equal(newSave.body.notebook.cells[0].outputs[0].text, 'FRESH')
-    if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', message: 'STALE', details: { version: 'v2' } } }, 409))
-    else if (outcome === 'failure') oldSave.reject(new Error('STALE NETWORK FAILURE'))
-    else oldSave.resolve(response({ ok: true, value: { version: 'STALE VERSION' } }))
+    const currentSave = app.save()
+    assert.equal(currentSave.body.baseVersion, 'v2')
+    if (outcome === 'success') oldSave.resolve(response({ ok: true, value: { version: 'STALE' } }))
+    else if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', details: { version: 'STALE' } } }, 409))
+    else oldSave.reject(new Error('STALE ERROR'))
     await app.settle()
     assert.equal(app.cell.cell.source, 'fresh draft')
     assert.equal(app.cell.cell.outputs[0].text, 'FRESH')
-    assert.equal(app.toolbar.dirty, true)
     assert.equal(app.toolbar.conflict, null)
-    assert.equal(app.banner, null)
     assert.equal(app.toolbar.saveState, 'saving')
     app.save()
-    app.cell.onSave()
+    assert.equal(app.requests('save').length, 2, 'the old finally cannot release the newer request lock')
+    currentSave.resolve(response({ ok: true, value: { version: 'v3' } }))
     await app.settle()
-    assert.equal(app.requests('save').length, 2, 'the stale finally must not release the newer save lock')
-    newSave.resolve(response({ ok: true, value: { version: 'v3' } }))
-    await app.settle()
-    assert.equal(app.toolbar.dirty, false)
-    assert.equal(app.toolbar.saveState, 'saved')
     app.edit('next draft')
-    const nextSave = app.save()
-    assert.equal(nextSave.body.baseVersion, 'v3', 'the accepted save, not the stale response, owns the version')
-    nextSave.resolve(response({ ok: true, value: { version: 'v4' } }))
-    await app.settle()
+    assert.equal(app.save().body.baseVersion, 'v3')
   })
 }
 
@@ -1692,4 +1806,174 @@ test('a hidden notebook refreshes the kernel when it becomes visible again', asy
   await app.settle()
   assert.equal(app.toolbar.kernel.running, true)
   assert.equal(app.toolbar.kernel.busy, false)
+})
+
+function displayNotebookData(count = 3) {
+  const data = notebookData()
+  data.notebook.cells = Array.from({ length: count }, (_, index) => ({
+    id: `cell-${index + 1}`, cell_type: 'code', source: 'display handle', metadata: {},
+    execution_count: null, outputs: [],
+  }))
+  return data
+}
+
+async function startDisplayCellRun(app, cellId) {
+  await app.settle()
+  app.components('CellView').find((entry) => entry.props.cell.id === cellId).props.onRun(cellId)
+  app.flush()
+  const stream = executionStream()
+  app.requests('execute').at(-1).resolve(stream.response)
+  await app.settle()
+  return {
+    emit(event) { stream.emit({ cell_id: cellId, ...event }) },
+    async send(event) { stream.emit({ cell_id: cellId, ...event }); await app.settle() },
+    async finish(count = 1) {
+      stream.emit({ type: 'execute_reply', cell_id: cellId, ok: true, execution_count: count })
+      stream.end()
+      await app.settle()
+    },
+    end() { stream.end() },
+  }
+}
+
+const sharedDisplay = (text = 'OLD', type = 'display_data', displayId = 'shared') => ({
+  type, display_id: displayId, data: { 'text/plain': text }, metadata: {},
+})
+const displayCells = (app) => app.components('CellView').map((entry) => entry.props.cell)
+
+test('cross-cell display updates replace every live matching slot in event order and save the updated data', async (t) => {
+  const app = mountNotebook(t, { customData: displayNotebookData() })
+  const first = await startDisplayCellRun(app, 'cell-1')
+  await first.send(sharedDisplay())
+  await first.send(sharedDisplay())
+  await first.send(sharedDisplay('UNRELATED', 'display_data', 'other'))
+  await first.finish(1)
+  const second = await startDisplayCellRun(app, 'cell-2')
+  await second.send(sharedDisplay())
+  await second.finish(2)
+  const third = await startDisplayCellRun(app, 'cell-3')
+  third.emit(sharedDisplay('IGNORED', 'update_display_data', 'missing'))
+  third.emit(sharedDisplay('ACTIVE'))
+  third.emit(sharedDisplay('NEW', 'update_display_data'))
+  third.emit(sharedDisplay('LATEST', 'update_display_data'))
+  third.emit({ type: 'execute_reply', ok: true, execution_count: 3 })
+  third.end()
+  await settleWithoutCommit()
+  app.flush()
+  const cells = displayCells(app)
+  assert.deepEqual(cells.map((cell) => cell.execution_count), [1, 2, 3], 'updating another cell does not change its execution count')
+  assert.deepEqual(cells.map((cell) => [...cell.outputs].map((output) => output.data['text/plain'])), [
+    ['LATEST', 'LATEST', 'UNRELATED'], ['LATEST'], ['LATEST'],
+  ])
+  assert.equal(app.toolbar.dirty, true)
+  const save = app.save()
+  assert.deepEqual(save.body.notebook.cells.map((cell) => cell.outputs.map((output) => output.data['text/plain'])), [
+    ['LATEST', 'LATEST', 'UNRELATED'], ['LATEST'], ['LATEST'],
+  ])
+  assert.ok(save.body.notebook.cells.every((cell) => cell.outputs.every((output) => !Object.hasOwn(output, 'display_id'))))
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
+})
+
+test('cross-cell display updates enforce each cell budget independently and cannot revive truncated displays', async (t) => {
+  const app = mountNotebook(t, { customData: displayNotebookData() })
+  const first = await startDisplayCellRun(app, 'cell-1')
+  await first.send(sharedDisplay())
+  await first.send(sharedDisplay())
+  await first.finish()
+  const second = await startDisplayCellRun(app, 'cell-2')
+  await second.send(sharedDisplay())
+  await second.finish()
+  const third = await startDisplayCellRun(app, 'cell-3')
+  await third.send(sharedDisplay('x'.repeat(17 * MiB), 'update_display_data'))
+  const marker = assertOutputLimit(app)
+  let cells = displayCells(app)
+  assert.equal(cells[1].outputs[0].data['text/plain'].length, 17 * MiB, 'one slot fits while two slots exceed the other cell budget')
+  assert.ok(outputBytes(cells[1].outputs) < OUTPUT_CAP_BYTES)
+  assert.equal(cells[2].outputs.length, 0, 'an update adds no slot to the cell that emitted it')
+  await third.send(sharedDisplay('SMALL', 'update_display_data'))
+  await third.send({ type: 'stream', text: 'ACTIVE OUTPUT' })
+  cells = displayCells(app)
+  assert.equal(JSON.stringify(cells[0].outputs), marker, 'a later smaller update does not bypass truncation')
+  assert.equal(cells[1].outputs[0].data['text/plain'], 'SMALL')
+  assert.equal(cells[2].outputs[0].text, 'ACTIVE OUTPUT')
+  await third.finish()
+})
+
+test('cross-cell display updates consume matching deferred clears but leave unrelated cells pending', async (t) => {
+  const app = mountNotebook(t, { customData: displayNotebookData() })
+  const first = await startDisplayCellRun(app, 'cell-1')
+  await first.send(sharedDisplay())
+  await first.send({ type: 'clear_output', wait: true })
+  await first.finish()
+  const second = await startDisplayCellRun(app, 'cell-2')
+  await second.send(sharedDisplay('OTHER', 'display_data', 'other'))
+  await second.send({ type: 'clear_output', wait: true })
+  await second.finish()
+  const third = await startDisplayCellRun(app, 'cell-3')
+  third.emit({ type: 'stream', text: 'ACTIVE' })
+  third.emit({ type: 'clear_output', wait: true })
+  third.emit(sharedDisplay('UPDATE', 'update_display_data'))
+  await settleWithoutCommit()
+  app.flush()
+  let cells = displayCells(app)
+  assert.equal(cells[0].outputs.length, 0, 'the matching display consumes its pending clear')
+  assert.equal(cells[1].outputs[0].data['text/plain'], 'OTHER', 'an unrelated update leaves this deferred clear untouched')
+  assert.equal(cells[2].outputs.length, 0, 'the active cell consumes its pending clear even without a matching slot')
+  await third.send(sharedDisplay('UPDATE OTHER', 'update_display_data', 'other'))
+  cells = displayCells(app)
+  assert.equal(cells[1].outputs.length, 0, 'the untouched pending clear is consumed by its own matching update')
+  await third.finish()
+})
+
+for (const editDuringRun of [false, true]) {
+  test(`an incomplete cross-cell display update restores previous outputs and preserves user edits=${editDuringRun}`, async (t) => {
+    const app = mountNotebook(t, { customData: displayNotebookData() })
+    for (const cellId of ['cell-1', 'cell-2']) {
+      const seed = await startDisplayCellRun(app, cellId)
+      await seed.send(sharedDisplay())
+      await seed.finish()
+    }
+    app.save().resolve(response({ ok: true, value: { version: 'v2' } }))
+    await app.settle()
+    assert.equal(app.toolbar.dirty, false)
+    const third = await startDisplayCellRun(app, 'cell-3')
+    third.emit(sharedDisplay('NEW', 'update_display_data'))
+    third.emit(sharedDisplay('NEWER', 'update_display_data'))
+    await settleWithoutCommit()
+    app.flush()
+    assert.equal(displayCells(app)[0].outputs[0].data['text/plain'], 'NEWER')
+    if (editDuringRun) {
+      app.edit('USER EDIT')
+      app.cell.onClearOutputs('cell-2')
+      app.flush()
+    }
+    third.end()
+    await app.settle()
+    const cells = displayCells(app)
+    assert.equal(cells[0].outputs[0].data['text/plain'], 'OLD', 'all updates from the incomplete run are rolled back')
+    if (editDuringRun) {
+      assert.equal(cells[0].source, 'USER EDIT')
+      assert.equal(cells[1].outputs.length, 0, 'rollback does not undo a manual clear')
+    } else {
+      assert.equal(cells[1].outputs[0].data['text/plain'], 'OLD')
+    }
+    assert.equal(app.toolbar.dirty, editDuringRun)
+  })
+}
+
+test('a stale cross-cell display update cannot change newly created displays after reload', async (t) => {
+  const app = mountNotebook(t, { customData: displayNotebookData() })
+  const first = await startDisplayCellRun(app, 'cell-1')
+  await first.send(sharedDisplay())
+  await first.finish()
+  const old = await startDisplayCellRun(app, 'cell-2')
+  app.reload(displayNotebookData())
+  const fresh = await startDisplayCellRun(app, 'cell-1')
+  await fresh.send(sharedDisplay('NEW DOCUMENT'))
+  old.emit(sharedDisplay('STALE', 'update_display_data'))
+  old.end()
+  await app.settle()
+  assert.equal(displayCells(app)[0].outputs[0].data['text/plain'], 'NEW DOCUMENT')
+  await fresh.finish()
 })

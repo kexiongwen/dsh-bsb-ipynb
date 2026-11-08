@@ -110,18 +110,32 @@ async function setup(t, kind, {
       return { running: entries.has(entryTarget), ready: entries.has(entryTarget), busy: false }
     },
     peek(entryTarget) { return entries.get(entryTarget) || null },
-    async getOrStart(entryTarget, python) {
+    async getOrStart(entryTarget, python, options = {}) {
       calls.push({ operation: 'getOrStart', target: entryTarget })
+      const preserveAliases = options.prepareReplacement?.()
+      const entry = entries.get(entryTarget)
+      if (entry && entry.python !== python) {
+        assert.equal(entry.busy, false, 'a busy kernel cannot switch interpreters')
+        await this.shutdown(entryTarget)
+      }
       if (!entries.has(entryTarget)) {
         calls.push({ operation: 'create', target: entryTarget })
         entries.set(entryTarget, makeEntry(entryTarget, python))
       }
-      return entries.get(entryTarget)
+      const started = entries.get(entryTarget)
+      preserveAliases?.(started)
+      return started
     },
-    async restart(entryTarget) {
+    async restart(entryTarget, python, options = {}) {
       calls.push({ operation: 'restart', target: entryTarget })
-      assert.ok(entries.has(entryTarget), 'restart must address an existing exact kernel key')
-      return entries.get(entryTarget)
+      const entry = entries.get(entryTarget)
+      assert.ok(entry || options.allowStart, 'a missing notebook cannot start a new kernel')
+      const preserveAliases = options.prepareReplacement?.()
+      const restarted = !entry || (python && entry.python !== python)
+        ? await this.getOrStart(entryTarget, python)
+        : entry
+      preserveAliases?.(restarted)
+      return restarted
     },
     async shutdown(entryTarget) {
       calls.push({ operation: 'shutdown', target: entryTarget })
