@@ -1,7 +1,7 @@
 # dsh-bsb-ipynb 代码审核报告（macOS + Windows 快照，仅未修复项）
 
 > **审核快照**：2026-11-07，macOS APFS 与 Windows 11 实机各一轮。**本文件只保留仍未修复或只修复了一部分的问题**；已经完全修复的条目已删除，修复记录与回归测试见 `git log`（2026-11-07 的系列提交）与 `test/`。
-> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取）也已完成（+5 回归）。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **398 tests / 354 pass / 44 skip / 0 fail**（Windows 11，约 44.3s）。
+> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取，+5 回归）与 L-23（Windows 大小写 alias 回退，+3 回归）也已完成。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **402 tests / 358 pass / 44 skip / 0 fail**（Windows 11，约 44.8s）。
 > **环境**：
 
 | 平台 | 环境 |
@@ -9,7 +9,7 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **398 tests / 354 pass / 44 skip / 0 fail**（2026-11-08）。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **402 tests / 358 pass / 44 skip / 0 fail**（2026-11-08）。
 > **增量复核**：独立审查新增问题编号为 **M-13～M-16**（其中 M-16 已修复）；此前及后续已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
@@ -20,7 +20,7 @@
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
 | Medium | 8 | M-2、M-4、M-6、M-7、M-8、M-11、M-13、M-14 |
-| Low | 5 | L-5、L-12、L-13、L-22、L-23 |
+| Low | 4 | L-5、L-12、L-13、L-22 |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
 | 测试缺口 | 5 | T-1、T-3、T-5、T-6、T-8 |
 
@@ -43,7 +43,7 @@
 
 ---
 
-## 2. Low（5 项，未修复）
+## 2. Low（4 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题 | 建议 |
 | --- | --- | --- | --- | --- |
@@ -51,7 +51,6 @@
 | L-12 | 全平台 | `client.js:183-220`（`cleanNode`，递归点 195-201）、`222-233`（`sanitizeHtml`） | HTML 清洗器仍为「unwrap 后递归重启父遍历」实现：O(n²)；规模再大时整段 HTML 输出降级为转义文本。try/catch 只防止异常逃逸，未降低复杂度；真实白名单分支无行为测试（T-1）。【已验证】最小 DOM 替身中 500/1000/2000/4000 个未知兄弟标签约 **17.8/55.5/165.0/653.4ms**，符合二次增长（非浏览器耗时）。 | 改显式栈/游标，从替换位置继续，并设节点/深度预算；用最小 DOM 或 jsdom 补白名单及操作计数回归。 |
 | L-13 | POSIX（Windows 不成立） | `lib/env.js:159-206,274-286,42-45` | 探测超时只发 SIGTERM、不升级 SIGKILL：忽略 SIGTERM 的候选（wrapper shell、`SIG_IGN` 的 sitecustomize）使 `execFile` 永不 settle → `discoverInterpreters()` 永久 pending、`inflight` 永不清空、`resetInterpreterCache()` 无效 → `/interpreters`、`/execute`、`/restart` 永久挂起。Windows 上 kill=TerminateProcess，不成立。 | 自行 spawn，超时后 SIGTERM→短宽限→SIGKILL，并等待 close 后 settle；整轮 discovery 加总超时/watchdog。reset 可中止当前 probe，但不能只 `Promise.race` 返回而遗留子进程。 |
 | **L-22** | Windows 形态 | `lib/gate.js:91-150`（`walkTarget`）、`214-233`（`KernelPaths`） | 通过 junction 访问 notebook，先删除其目标目录（junction 悬空后 Node 视为 ENOENT）再调用控制端点：控制路径退化为「请求拼写路径」，与内核 canonical 键不一致 → 活内核不可达（`/status` running:false、interrupt 503）。属于**安全失败方向**，不会控制错内核。 | 可不改；若要修，需要显式处理悬空 reparse point 并保留授权时观察到的 identity。 |
-| **L-23** | Windows 形态 | `lib/gate.js:194-233`（`samePathIdentity`、alias key） | NTFS 大小写不敏感：文件删除后，若某大小写拼写从未在文件存在时被观察过，经该拼写调用控制端点无法匹配按 canonical 路径登记的活内核（`/status` running:false、interrupt 503）。 | 安全方向安全；可对 win32 的未存在段做 `toLowerCase()` 作为 alias key，或文档说明拼写需一致。 |
 
 ---
 
@@ -89,9 +88,10 @@
 
 ## 6. 平台差异与验证补充
 
-- **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-22/L-23 的平台语境，不代表相应逻辑已加固。
+- **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-22 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；M-11 的修复在 Windows 上应依赖显式 shutdown 协议与进程树回收，而不是信号升级。
-- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **398 / 354 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
+- **Windows 大小写回退边界（2026-11-08 修复 L-23 的已知范围）**：回退仅在 win32 启用、仅对已删除/missing 路径、仅匹配同 session + 同 realpath workspace，且多候选歧义一律 fail-closed；但 Windows per-directory case-sensitive NTFS 下缺失组件无法用 inode 校验，单 live 变体时 case 变体缺失拼写可能命中同 session/workspace 的该内核（无越权，默认 NTFS 不成立）。macOS APFS 默认大小写不敏感，但本回退未覆盖 macOS（原条目平台标注为 Windows 形态）。
+- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **402 / 358 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
 
 ---
 
@@ -100,7 +100,7 @@
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
 | 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
-| 全量测试（当前工作区） | `npm test`（Windows） | **398 tests / 354 pass / 44 skip / 0 fail**（约 44.3s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
+| 全量测试（当前工作区） | `npm test`（Windows） | **402 tests / 358 pass / 44 skip / 0 fail**（约 44.8s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |
@@ -110,7 +110,7 @@
 | M-13 | 当前客户端 mountNotebook 时序复现 + 服务端 read/save 调用顺序核对（脚本未随仓库提供） | 已丢弃草稿晚到为 v3，UI 仍显示 Reload 文档且 next baseVersion=v1；下一次保存模拟 409 conflict=v3 |
 | M-14 | 受控解释器 probe 与并发 `/restart`（脚本未随仓库提供） | `shutdown:A, shutdown:A, start:B, restart:B`；两个请求均 200，C 响应为 C，最终 current=B |
 | L-12 | 当前源码最小 DOM 替身微基准 | 500/1000/2000/4000 标签约 17.8/55.5/165.0/653.4ms |
-| L-22 / L-23 | Windows 真实 junction/大小写实验 | 悬空 junction 控制路径退化为请求拼写；`NB.IPYNB` 删除后不匹配活内核，`nb.ipynb` 可匹配 |
+| L-22 | Windows 真实 junction 实验 | 悬空 junction 控制路径退化为请求拼写（L-23 大小写拼写回退已修复，2026-11-08） |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |
 
 **未核实事项**：① junction 的 Node 可见性存在环境差异（完整访问权限下 `lstat` 视为 symlink、`readlink` 返回目标绝对路径；Low IL 沙箱会话中不可见，`readlink→EINVAL`）——安全结论不依赖该差异，但 M-6 修复不建议依赖 `lstat/readlink` 识别 reparse point；② 无真实浏览器 headless（L-12 的浏览器栈/渲染耗时、L-16 修复后的真实浏览器图片加载与远程外联、L-15/L-24 的浏览器表现未做视觉复核）；③ linked worktree 未在真实 DSH 会话端到端复现；④ UNC 作为 workspace、icacls 拒绝、AV/索引器锁导致的 `.tmp` 残留、64MiB 读峰值未逐项实测；⑤ better-sidebar 0.28.x + DSH 0.2.1 组合未安装验证；⑥ DSH 宿主是否给插件 viewer 包 error boundary 未确认（影响 L-12 的影响范围）；⑦ DSH host 日志缺失，无法确认插件 boot 后的运行期错误。

@@ -254,3 +254,97 @@ test('control resolution retries a transient file change instead of failing', as
   assert.equal(resolved.target, path.join(await realpath(dir), 'a.ipynb'))
   assert.equal(linkServed, true, 'the first attempt observed the transient change')
 })
+
+test('a Windows control path with an unobserved case spelling still reaches its live kernel', {
+  skip: process.platform !== 'win32' && 'the case-insensitive alias fallback is Windows-only',
+}, async (t) => {
+  const { dir } = await workspace(t)
+  const file = path.join(dir, 'Actual.ipynb')
+  await writeFile(file, '{}')
+  const cwd = await realpath(dir)
+  const canonical = await realpath(file)
+  const entry = {}
+  const kernels = { peek: (target) => (target === canonical ? entry : null) }
+  const paths = new KernelPaths(ctxFor(dir), kernels)
+  // Only the canonical spelling is observed while the file exists.
+  assert.equal((await paths.resolve('s1', 'Actual.ipynb', true)).target, canonical)
+  // Alias history stays scoped to the session that observed it.
+  const sessions = new Map([
+    ['s1', { header: { cwd: dir } }],
+    ['s2', { header: { cwd: dir } }],
+  ])
+  const otherPaths = new KernelPaths({ sessions: { get: (id) => sessions.get(id) } }, kernels)
+  assert.equal((await otherPaths.resolve('s1', 'Actual.ipynb', true)).target, canonical)
+  await rm(file)
+  const otherSession = await otherPaths.resolve('s2', 'actual.ipynb', true)
+  assert.equal(otherSession.target, path.join(cwd, 'actual.ipynb'), 'another session cannot borrow the spelling history')
+  assert.equal(otherSession.known, false)
+  const recovered = await paths.resolve('s1', 'actual.ipynb', true)
+  assert.equal(recovered.target, canonical, 'an unobserved case spelling recovers the canonical kernel key')
+  assert.equal(recovered.known, true)
+})
+
+test('an observed spelling recovers the canonical kernel key after deletion', async (t) => {
+  const { dir } = await workspace(t)
+  const file = path.join(dir, 'a.ipynb')
+  const cwd = await realpath(dir)
+  const canonical = await realpath(file)
+  const entry = {}
+  const kernels = { peek: (target) => (target === canonical ? entry : null) }
+  const paths = new KernelPaths(ctxFor(dir), kernels)
+  assert.equal((await paths.resolve('s1', 'a.ipynb', true)).target, canonical)
+  await rm(file)
+  const recovered = await paths.resolve('s1', 'a.ipynb', true)
+  assert.equal(recovered.target, canonical)
+  assert.equal(recovered.known, true)
+})
+
+test('ambiguous case-variant aliases fail closed instead of selecting a kernel', {
+  skip: process.platform !== 'win32' && 'the case-insensitive alias fallback is Windows-only',
+}, async (t) => {
+  const { dir } = await workspace(t)
+  const cwd = await realpath(dir)
+  const observedFile = path.join(dir, 'alpha.ipynb')
+  await writeFile(observedFile, '{}')
+  const canonical = await realpath(observedFile)
+  const entry = {}
+  const otherEntry = {}
+  const otherTarget = path.join(cwd, 'other.ipynb')
+  const entries = new Map([[canonical, entry], [otherTarget, otherEntry]])
+  const kernels = { peek: (target) => entries.get(target) || null }
+  const paths = new KernelPaths(ctxFor(dir), kernels)
+  const observed = await paths.resolve('s1', 'alpha.ipynb', true)
+  assert.equal(observed.target, canonical)
+  const saved = paths.aliases.get(observed.key)
+  assert.ok(saved, 'the observed spelling registered an alias')
+  // A second case-variant alias that points at a different live kernel target.
+  paths.aliases.set(JSON.stringify(['s1', cwd, path.join(cwd, 'ALPHA.ipynb')]), {
+    target: otherTarget,
+    nodes: saved.nodes,
+    entry: new WeakRef(otherEntry),
+  })
+  await rm(observedFile)
+  const ambiguous = await paths.resolve('s1', 'Alpha.ipynb', true)
+  assert.equal(ambiguous.known, false, 'an ambiguous case match must not guess a kernel')
+  assert.equal(ambiguous.target, path.join(cwd, 'Alpha.ipynb'))
+})
+
+test('a dead kernel entry is never revived by the case-insensitive fallback', {
+  skip: process.platform !== 'win32' && 'the case-insensitive alias fallback is Windows-only',
+}, async (t) => {
+  const { dir } = await workspace(t)
+  const cwd = await realpath(dir)
+  const file = path.join(dir, 'Actual.ipynb')
+  await writeFile(file, '{}')
+  const canonical = await realpath(file)
+  const entry = {}
+  const entries = new Map([[canonical, entry]])
+  const kernels = { peek: (target) => entries.get(target) || null }
+  const paths = new KernelPaths(ctxFor(dir), kernels)
+  assert.equal((await paths.resolve('s1', 'Actual.ipynb', true)).target, canonical)
+  await rm(file)
+  entries.delete(canonical)
+  const recovered = await paths.resolve('s1', 'actual.ipynb', true)
+  assert.equal(recovered.known, false)
+  assert.equal(recovered.target, path.join(cwd, 'actual.ipynb'))
+})
