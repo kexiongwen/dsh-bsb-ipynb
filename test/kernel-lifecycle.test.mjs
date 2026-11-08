@@ -3,6 +3,7 @@ import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { promises as fsp } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
+import { StringDecoder } from 'node:string_decoder'
 import { test } from 'node:test'
 import { KernelManager } from '../lib/kernel.js'
 
@@ -816,4 +817,356 @@ test('the idle sweep skips entries that are already shutting down', async (t) =>
   assert.equal(entry.proc, proc)
   assert.deepEqual(proc.kills, [])
   entry.stopping = false
+})
+
+// ---------------------------------------------------------------------------
+// M-10: a stdout frame that breaks the bridge protocol must settle the active
+// run and recycle the bridge instead of leaving currentRun pending forever.
+// ---------------------------------------------------------------------------
+
+const protocolFaults = {
+  'unparseable JSON': () => 'NOT-JSON\n',
+  'non-object JSON': () => '42\n',
+  'no type': () => `${JSON.stringify({ cell_id: 'cell', exec_id: 'exec', text: 'x' })}\n`,
+  'no exec_id': (command) =>
+    `${JSON.stringify({ type: 'execute_reply', cell_id: command ? command.cell_id : 'cell', ok: true })}\n`,
+  'no cell_id': (command) =>
+    `${JSON.stringify({ type: 'stream', exec_id: command ? command.exec_id : 'exec', name: 'stdout', text: 'x' })}\n`,
+}
+
+for (const phase of ['starting', 'idle', 'running']) {
+  for (const [name, buildFrame] of Object.entries(protocolFaults)) {
+    test(`a frame with ${name} while ${phase} fails the run and recycles the bridge`, async (t) => {
+      const h = harness(t)
+      let entry
+      let proc
+      let startup
+      let run
+      let runState
+      let command
+      const events = []
+      if (phase === 'starting') {
+        const started = h.start()
+        entry = started.entry
+        proc = started.proc
+        startup = observe(started.started)
+      } else {
+        const ready = await h.startReady()
+        entry = ready.entry
+        proc = ready.proc
+      }
+      if (phase === 'running') {
+        run = entry.run('live-cell', 'work', (event) => events.push(event))
+        runState = observe(run)
+        command = proc.commands.at(-1)
+        assert.equal(command.op, 'execute')
+      }
+      proc.stdout.emit('data', buildFrame(command))
+      // The cause is recorded and the slot released before the exit arrives.
+      assert.match(entry.lastError, /Unreadable kernel event|Invalid kernel event/)
+      assert.equal(entry.ready, false)
+      assert.equal(entry.busy, false)
+      // A second corrupted frame of the same burst must not tear down twice.
+      proc.stdout.emit('data', 'SECOND-BAD-FRAME\n')
+      assert.equal(proc.kills.filter((signal) => signal === 'SIGTERM').length, 1)
+      if (phase === 'running') {
+        const replyValue = await run
+        assert.equal(replyValue.ok, false)
+        assert.match(replyValue.error, /Unreadable kernel event|Invalid kernel event/)
+        assert.equal(runState.status, 'fulfilled')
+        const fatal = events.filter((event) => event.type === 'fatal')
+        assert.equal(fatal.length, 1, 'the active run receives exactly one scoped fatal event')
+        assert.equal(fatal[0].code, 'protocol-error')
+        assert.equal(fatal[0].cell_id, command.cell_id)
+        assert.equal(fatal[0].exec_id, command.exec_id)
+        assert.ok(events.some((event) => event.type === 'error'))
+      }
+      await flush()
+      // The bridge is reclaimed: killed, forgotten and no longer reporting.
+      assert.ok(proc.kills.includes('SIGTERM'))
+      assert.equal(proc.stdin.destroyed, true, 'the failing bridge has been terminated')
+      assert.equal(h.manager.peek(h.target), null)
+      assert.equal(h.manager.kernelCount, 0)
+      assert.equal(h.manager.status(h.target).running, false)
+      assert.match(
+        entry.lastError,
+        /Unreadable kernel event|Invalid kernel event/,
+        'the protocol cause survives the exit event',
+      )
+      assert.match(entry.lastError, /Kernel process exited/)
+      if (phase === 'starting') {
+        assert.equal(startup.status, 'rejected')
+        assert.equal(startup.error.code, 'kernel-unavailable')
+        assert.match(startup.error.message, /Unreadable kernel event|Invalid kernel event/)
+      }
+      // The next execute recovers on a fresh bridge.
+      const recovered = await h.startReady()
+      assert.notEqual(recovered.proc, proc)
+      const nextEvents = []
+      const nextRun = recovered.entry.run('recovered-cell', 'print(1)', (event) => nextEvents.push(event))
+      reply(recovered.proc, recovered.proc.commands.at(-1))
+      assert.equal((await nextRun).ok, true)
+      assert.ok(nextEvents.some((event) => event.type === 'execute_reply' && event.ok === true))
+      assert.deepEqual(recovered.proc.kills, [])
+    })
+  }
+}
+
+test('late but well-formed events from a settled execution are ignored, not treated as protocol errors', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const events = []
+  const first = entry.run('shared-cell', 'first', (event) => events.push(event))
+  const firstCommand = proc.commands.at(-1)
+  reply(proc, firstCommand)
+  assert.equal((await first).ok, true)
+  const second = entry.run('shared-cell', 'second', (event) => events.push(event))
+  const secondCommand = proc.commands.at(-1)
+  const state = observe(second)
+  assert.notEqual(secondCommand.exec_id, firstCommand.exec_id)
+  // A bridge can still deliver output and replies for the previous exec_id.
+  // Those frames are well-formed and must simply be dropped.
+  proc.event({ type: 'stream', cell_id: firstCommand.cell_id, exec_id: firstCommand.exec_id, name: 'stdout', text: 'LATE OUTPUT' })
+  proc.event({ type: 'status', execution_state: 'idle', cell_id: firstCommand.cell_id, exec_id: firstCommand.exec_id })
+  proc.event({ type: 'execute_reply', cell_id: firstCommand.cell_id, exec_id: firstCommand.exec_id, ok: true })
+  await flush()
+  assert.deepEqual(proc.kills, [])
+  assert.equal(entry.lastError, null)
+  assert.equal(entry.ready, true)
+  assert.equal(entry.busy, true, 'the current run keeps the execution slot')
+  assert.equal(state.status, 'pending')
+  assert.ok(!events.some((event) => event.type === 'stream'), 'stale output must not reach the current listener')
+  reply(proc, secondCommand)
+  assert.equal((await second).ok, true)
+})
+
+test('a malformed stdout chunk during a restart is ignored instead of recycling the bridge', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const cause = 'Kernel output line exceeded 64 MiB; execution aborted and kernel restarted'
+  entry.lastError = cause
+  const restarting = entry.restart()
+  // While the restart tears the kernel down, the buffer can still hold the tail
+  // of the oversized line that caused it; that must not be a new protocol fault.
+  proc.stdout.emit('data', 'TAIL-OF-GIANT-LINE-NOT-JSON\n')
+  assert.equal(entry.lastError, cause)
+  assert.deepEqual(proc.kills, [])
+  assert.equal(entry.protocolFailure, null)
+  restartReady(proc)
+  await restarting
+  assert.equal(entry.lastError, null)
+  assert.equal(entry.ready, true)
+})
+
+test('protocol faults while shutting down are ignored', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  entry.stopping = true
+  const before = entry.status()
+  proc.stdout.emit('data', 'NOT-JSON\n')
+  proc.stdout.emit('data', '42\n')
+  assert.deepEqual(entry.status(), before)
+  assert.deepEqual(proc.kills, [])
+  entry.stopping = false
+})
+
+test('a malformed frame from an already dying bridge does not replace the death cause', async (t) => {
+  const h = harness(t, { exitOnKill: false })
+  const { entry, proc } = await h.startReady()
+  const run = entry.run('cell', 'work')
+  const command = proc.commands.at(-1)
+  proc.event({
+    type: 'kernel_died',
+    cell_id: command.cell_id,
+    exec_id: command.exec_id,
+    message: 'kernel crashed',
+  })
+  assert.equal((await run).ok, false)
+  assert.equal(entry.lastError, 'kernel crashed')
+  assert.equal(proc.kills.filter((signal) => signal === 'SIGTERM').length, 1)
+  // The bridge is already being torn down; its dying stdout is not a new fault.
+  proc.stdout.emit('data', 'GARBAGE-AFTER-KERNEL-DEATH\n')
+  assert.equal(entry.lastError, 'kernel crashed')
+  assert.equal(proc.kills.filter((signal) => signal === 'SIGTERM').length, 1, 'no second teardown')
+})
+
+// ---------------------------------------------------------------------------
+// M-16: stdout framing must dispatch complete lines before applying the 64 MiB
+// cap, while still rejecting a single frame that is over the cap.
+// ---------------------------------------------------------------------------
+
+const MAX_LINE_BYTES = 64 * 1024 * 1024
+
+// Build a valid stream frame whose UTF-8 line length is exactly targetBytes.
+// Multi-byte text keeps the UTF-16 length smaller than the byte length, which
+// also proves the cap is measured on the wire.
+function exactLengthStreamLine(command, targetBytes) {
+  const prefix = `{"type":"stream","cell_id":${JSON.stringify(command.cell_id)},"exec_id":${JSON.stringify(command.exec_id)},"name":"stdout","text":"`
+  const suffix = '"}'
+  const remaining = targetBytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix)
+  assert.ok(remaining > 0, 'the frame needs room for its text')
+  const wide = '中'.repeat(Math.floor(remaining / 3))
+  const narrow = 'x'.repeat(remaining - Buffer.byteLength(wide))
+  const text = wide + narrow
+  const line = prefix + text + suffix
+  assert.equal(Buffer.byteLength(line), targetBytes)
+  assert.ok(line.length < targetBytes, 'UTF-16 length is smaller than the encoded bytes')
+  return { line, text }
+}
+
+test('a frame of exactly 64 MiB is accepted when the next chunk adds its newline and the next frame', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const events = []
+  const run = entry.run('big-cell', 'work', (event) => events.push(event))
+  const command = proc.commands.at(-1)
+  const { line, text } = exactLengthStreamLine(command, MAX_LINE_BYTES)
+  // The complete frame reaches the cap one byte before its newline arrives;
+  // that unterminated tail is still legal.
+  const firstChunk = line.slice(0, line.length - 1)
+  proc.stdout.emit('data', firstChunk)
+  assert.equal(entry.stdoutBuffer.length, firstChunk.length)
+  assert.equal(entry.stdoutBytes, MAX_LINE_BYTES - 1)
+  assert.equal(entry.lastError, null)
+  assert.equal(entry.ready, true)
+  // The terminating newline arrives together with the next frame. The complete
+  // line must be dispatched before any accumulated-byte cap check runs.
+  const nextFrame = JSON.stringify({
+    type: 'execute_reply',
+    cell_id: command.cell_id,
+    exec_id: command.exec_id,
+    ok: true,
+    execution_count: 1,
+  })
+  proc.stdout.emit('data', `${line.slice(line.length - 1)}\n${nextFrame}\n`)
+  const replyValue = await run
+  assert.equal(replyValue.ok, true)
+  assert.deepEqual(proc.kills, [])
+  assert.equal(proc.commands.some((item) => item.op === 'restart'), false, 'a legal frame must not restart the kernel')
+  assert.equal(entry.lastError, null)
+  assert.equal(entry.ready, true)
+  assert.equal(entry.busy, false)
+  assert.equal(entry.stdoutBuffer, '')
+  assert.equal(entry.stdoutBytes, 0)
+  const streams = events.filter((event) => event.type === 'stream')
+  assert.equal(streams.length, 1)
+  assert.equal(streams[0].text, text, 'the full frame text survives the boundary')
+  assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
+})
+
+test('a complete line above the cap is rejected and restarts the kernel only once', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const events = []
+  const run = entry.run('big-cell', 'work', (event) => events.push(event))
+  // The unterminated tail may sit exactly at the cap...
+  proc.stdout.emit('data', 'x'.repeat(MAX_LINE_BYTES))
+  assert.equal(entry.stdoutBytes, MAX_LINE_BYTES)
+  assert.equal(entry.lastError, null, 'an unterminated tail of exactly 64 MiB is not over the cap')
+  // ...but the completed line is one byte over: it must be rejected before parsing.
+  proc.stdout.emit('data', 'x\n')
+  assert.match(entry.lastError, /exceeded 64 MiB/)
+  const replyValue = await run
+  assert.equal(replyValue.ok, false)
+  assert.equal(events.filter((event) => event.type === 'fatal' && event.code === 'too-large').length, 1)
+  const restartCommands = () => proc.commands.filter((item) => item.op === 'restart')
+  assert.equal(restartCommands().length, 1)
+  // More chunks of the same flood arrive while the restart is already in flight.
+  entry.stdoutBytes = MAX_LINE_BYTES
+  entry.handleStdout('y')
+  assert.equal(restartCommands().length, 1, 'the flood restarts the kernel only once')
+  const restarting = entry.restartPromise
+  restartReady(proc)
+  await restarting
+  assert.equal(entry.ready, true)
+  const next = entry.run('after', 'print(1)')
+  reply(proc, proc.commands.at(-1))
+  assert.equal((await next).ok, true)
+})
+
+test('the 64 MiB cap counts UTF-8 bytes rather than UTF-16 code units', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const events = []
+  const run = entry.run('utf8-cell', 'work', (event) => events.push(event))
+  // 22.4M three-byte characters: over the byte cap yet far below it in code units.
+  const wide = '中'.repeat(Math.ceil((MAX_LINE_BYTES + 1) / 3))
+  assert.ok(Buffer.byteLength(wide) > MAX_LINE_BYTES)
+  assert.ok(wide.length < MAX_LINE_BYTES)
+  proc.stdout.emit('data', `${wide}\n`)
+  assert.match(entry.lastError, /exceeded 64 MiB/)
+  assert.equal((await run).ok, false)
+  assert.ok(events.some((event) => event.type === 'fatal' && event.code === 'too-large'))
+  const restarting = entry.restartPromise
+  restartReady(proc)
+  await restarting
+  assert.equal(entry.ready, true)
+  const next = entry.run('after', 'print(1)')
+  reply(proc, proc.commands.at(-1))
+  assert.equal((await next).ok, true)
+})
+
+test('a multi-byte frame split across stream chunks is reassembled byte-exactly', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const events = []
+  const run = entry.run('utf8-cell', 'work', (event) => events.push(event))
+  const command = proc.commands.at(-1)
+  const line = JSON.stringify({
+    type: 'stream',
+    cell_id: command.cell_id,
+    exec_id: command.exec_id,
+    name: 'stdout',
+    text: '中文😀done',
+  })
+  const bytes = Buffer.from(`${line}\n`, 'utf8')
+  const emojiStart = bytes.indexOf(Buffer.from('😀', 'utf8'))
+  assert.ok(emojiStart > 0)
+  // Split inside the four UTF-8 bytes of 😀: the decoder must hold the partial
+  // character and byte accounting must not count it twice.
+  const decoder = new StringDecoder('utf8')
+  const firstChunk = decoder.write(bytes.subarray(0, emojiStart + 2))
+  const secondChunk = decoder.write(bytes.subarray(emojiStart + 2))
+  proc.stdout.emit('data', firstChunk)
+  assert.equal(entry.stdoutBuffer, firstChunk)
+  assert.equal(entry.stdoutBytes, Buffer.byteLength(firstChunk))
+  assert.deepEqual(events, [], 'an unterminated frame is not dispatched')
+  proc.stdout.emit('data', secondChunk)
+  const stream = events.find((event) => event.type === 'stream')
+  assert.equal(stream.text, '中文😀done')
+  assert.equal(entry.stdoutBytes, 0)
+  assert.equal(entry.stdoutBuffer, '')
+  assert.deepEqual(proc.kills, [])
+  reply(proc, command)
+  assert.equal((await run).ok, true)
+})
+
+test('a frame accumulated across several chunks is dispatched only once its newline arrives', async (t) => {
+  const h = harness(t)
+  const { entry, proc } = await h.startReady()
+  const events = []
+  const run = entry.run('cell', 'work', (event) => events.push(event))
+  const command = proc.commands.at(-1)
+  const line = JSON.stringify({
+    type: 'stream',
+    cell_id: command.cell_id,
+    exec_id: command.exec_id,
+    name: 'stdout',
+    text: 'partial output',
+  })
+  const parts = [line.slice(0, 10), line.slice(10, 30), line.slice(30)]
+  proc.stdout.emit('data', parts[0])
+  assert.equal(entry.stdoutBuffer, parts[0])
+  assert.equal(entry.stdoutBytes, Buffer.byteLength(parts[0]))
+  assert.deepEqual(events, [])
+  proc.stdout.emit('data', parts[1])
+  assert.deepEqual(events, [])
+  assert.equal(entry.stdoutBytes, Buffer.byteLength(parts[0]) + Buffer.byteLength(parts[1]))
+  proc.stdout.emit('data', `${parts[2]}\n`)
+  assert.equal(entry.stdoutBytes, 0)
+  assert.equal(entry.stdoutBuffer, '')
+  assert.equal(events.filter((event) => event.type === 'stream').length, 1)
+  assert.equal(events.find((event) => event.type === 'stream').text, 'partial output')
+  reply(proc, command)
+  assert.equal((await run).ok, true)
 })

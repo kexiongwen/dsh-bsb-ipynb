@@ -20,11 +20,22 @@ let loadCount = 0
  */
 export async function loadClient(reactOverrides = {}) {
   let options = null
+  const listeners = new Map()
+  // The viewer installs a window keydown listener for its lifetime; keep the
+  // minimal browser surface complete so a mounted component never trips over a
+  // missing method. Lifecycle tests dispatch through their own harness.
   globalThis.window = {
     __ModuleLoader__: {
       load(value) {
         options = value
       },
+    },
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(listener)
+    },
+    removeEventListener(type, listener) {
+      if (listeners.has(type)) listeners.get(type).delete(listener)
     },
   }
   const styles = []

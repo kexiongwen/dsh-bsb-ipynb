@@ -82,6 +82,9 @@ function mountNotebook(t, options = {}) {
   const slots = []
   const timers = new Map()
   const requests = []
+  // window.addEventListener stub: the viewer installs one keydown listener for
+  // its lifetime; tests dispatch synthetic events through this set.
+  const windowListeners = new Map()
   let cursor = 0, nextTimer = 0, needsRender = true, mounted = true
   let pendingEffects = [], pendingState = [], tree, moduleOptions, moduleExports, hostReloads = 0
   // Optional Host locale face: when requested, apply() binds the plugin's
@@ -111,8 +114,9 @@ function mountNotebook(t, options = {}) {
       betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route },
       ...(localeFace ? { get: (name) => (name === 'locale' ? localeFace : undefined) } : {}),
     },
-    scope: { sessionId: 'session-1' }, path: '/workspace/demo.ipynb', visible: false,
-    customData: notebookData(), onReload() { hostReloads += 1 },
+    scope: { sessionId: 'session-1' }, path: '/workspace/demo.ipynb',
+    visible: options.visible === undefined ? false : options.visible,
+    customData: options.customData || notebookData(), onReload() { hostReloads += 1 },
   }
   const sameDeps = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => Object.is(value, b[index]))
   const memo = (factory, deps) => {
@@ -174,7 +178,9 @@ function mountNotebook(t, options = {}) {
   const fetch = (url, init = {}) => {
     const route = new URL(url).pathname.split('/').pop()
     if (route === 'interpreters') return Promise.resolve(response({ ok: true, value: { interpreters: [{ ok: true, path: '/python' }], default: '/python' } }))
-    if (route === 'status') return Promise.resolve(response({ ok: true, value: { running: false, ready: false, busy: false, python: null, executionState: 'none' } }))
+    if (route === 'status' && !options.deferStatus) {
+      return Promise.resolve(response({ ok: true, value: { running: false, ready: false, busy: false, python: null, executionState: 'none' } }))
+    }
     const result = deferred()
     // Deliberately allow responses after abort: a queued response or transport
     // that already completed must still be rejected by the document generation.
@@ -185,6 +191,13 @@ function mountNotebook(t, options = {}) {
     window: {
       __ModuleLoader__: { load(options) { moduleOptions = options } },
       localStorage: { getItem() { return null }, setItem() {} }, confirm() { return true },
+      addEventListener(type, listener) {
+        if (!windowListeners.has(type)) windowListeners.set(type, new Set())
+        windowListeners.get(type).add(listener)
+      },
+      removeEventListener(type, listener) {
+        windowListeners.get(type)?.delete(listener)
+      },
     },
     navigator: { language: 'en-US' },
     URLSearchParams, TextDecoder, TextEncoder, AbortController, fetch,
@@ -281,6 +294,33 @@ function mountNotebook(t, options = {}) {
     saveButton() {
       const toolbar = component('Toolbar')
       return findElement(toolbar.type(toolbar.props), (value) => value.props?.title === 'Save').props
+    },
+    setVisible(value) {
+      props = { ...props, visible: value }
+      needsRender = true
+      flush()
+    },
+    dispatchKey(event = {}) {
+      if (typeof event.preventDefault !== 'function') {
+        event.defaultPrevented = Boolean(event.defaultPrevented)
+        event.preventDefault = function preventDefault() {
+          this.defaultPrevented = true
+        }
+      }
+      for (const listener of [...(windowListeners.get('keydown') || [])]) listener(event)
+      return event
+    },
+    get keyListenerCount() {
+      return (windowListeners.get('keydown') || new Set()).size
+    },
+    unmount() {
+      mounted = false
+      for (const slot of slots) {
+        slot?.cleanup?.()
+        slot.cleanup = null
+        slot?.unsubscribe?.()
+        slot.unsubscribe = null
+      }
     },
     setLocale(active) {
       localeState.active = active
@@ -1215,4 +1255,308 @@ test('the mounted viewer follows Host locale switches without a reload', async (
   assert.equal(saveTitle(), '保存')
   app.setLocale('en')
   assert.equal(saveTitle(), 'Save')
+})
+
+// ---------------------------------------------------------------------------
+// Reading-mode keyboard shortcuts (L-21)
+// ---------------------------------------------------------------------------
+
+const OFF_KERNEL = { running: false, ready: false, busy: false, python: null, executionState: 'none' }
+
+function fakeTarget(tagName, cellId = null, extra = {}) {
+  const container = cellId
+    ? { getAttribute: (name) => (name === 'data-cell-id' ? cellId : null), parentNode: null }
+    : null
+  return { tagName, getAttribute: () => null, parentNode: container, ...extra }
+}
+
+test('reading-mode Ctrl+Enter runs the focused cell from the window listener', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  assert.equal(app.keyListenerCount, 1, 'one global keydown listener while the viewer is mounted')
+  const event = app.dispatchKey({ key: 'Enter', ctrlKey: true, target: fakeTarget('PRE', 'cell-1') })
+  app.flush()
+  assert.equal(event.defaultPrevented, true)
+  const request = app.requests('execute').at(-1)
+  assert.ok(request, 'a focused cell runs without entering edit mode')
+  assert.equal(request.body.cellId, 'cell-1')
+})
+
+test('reading-mode Cmd+Enter falls back to the most recently edited or run cell', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  app.edit('print("edited")')
+  const event = app.dispatchKey({ key: 'Enter', metaKey: true, target: fakeTarget('BODY') })
+  app.flush()
+  assert.equal(event.defaultPrevented, true)
+  const request = app.requests('execute').at(-1)
+  assert.ok(request, 'the recently edited cell is the target when focus is not inside a cell')
+  assert.equal(request.body.cellId, 'cell-1')
+})
+
+test('reading-mode shortcuts never guess a cell to run', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  const event = app.dispatchKey({ key: 'Enter', ctrlKey: true, target: fakeTarget('BODY') })
+  app.flush()
+  assert.equal(app.requests('execute').length, 0, 'no focused or recently used cell means no run')
+  assert.equal(event.defaultPrevented, false, 'an unhandled key leaves the browser default alone')
+})
+
+test('reading-mode Ctrl+S saves and prevents the browser save dialog', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  // CapsLock case: the browser reports event.key === 'S'.
+  const event = app.dispatchKey({ key: 'S', ctrlKey: true, target: fakeTarget('BODY') })
+  app.flush()
+  assert.equal(event.defaultPrevented, true, 'the browser save dialog must be blocked')
+  assert.equal(app.requests('save').length, 1)
+})
+
+test('reading-mode Ctrl+S is prevented but does not save an unusable notebook', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
+  await app.settle()
+  const event = app.dispatchKey({ key: 's', ctrlKey: true, target: fakeTarget('BODY') })
+  assert.equal(event.defaultPrevented, true, 'the browser save dialog is blocked even on the error card')
+  assert.equal(app.requests('save').length, 0, 'nothing is saved when there is no usable notebook')
+})
+
+test('reading-mode shortcuts ignore IME composition and already handled events', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  const ime = app.dispatchKey({ key: 's', ctrlKey: true, isComposing: true, target: fakeTarget('BODY') })
+  assert.equal(ime.defaultPrevented, false)
+  assert.equal(app.requests('save').length, 0)
+
+  const handled = app.dispatchKey({ key: 'Enter', ctrlKey: true, defaultPrevented: true, target: fakeTarget('PRE', 'cell-1') })
+  app.flush()
+  assert.equal(app.requests('execute').length, 0, 'the cell editor already handled the event')
+  assert.equal(handled.defaultPrevented, true)
+
+  const editing = app.dispatchKey({ key: 'Enter', ctrlKey: true, target: fakeTarget('TEXTAREA') })
+  app.flush()
+  assert.equal(app.requests('execute').length, 0, 'editing targets keep their own textarea handler')
+  assert.equal(editing.defaultPrevented, false)
+})
+
+test('editing shortcuts do not fire twice through the window listener', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  app.cell.onEdit('cell-1')
+  app.flush()
+  const editor = () => {
+    const view = app.component('CellView')
+    return findElement(view.type(view.props), (value) => value.type === 'textarea')
+  }
+  const makeEvent = (key, extra = {}) => ({
+    key,
+    target: { tagName: 'TEXTAREA' },
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true
+    },
+    ...extra,
+  })
+
+  const saveEvent = makeEvent('s', { ctrlKey: true })
+  editor().props.onKeyDown(saveEvent)
+  app.flush()
+  assert.equal(saveEvent.defaultPrevented, true, 'the textarea handler handles and prevents Ctrl+S')
+  assert.equal(app.requests('save').length, 1)
+  app.dispatchKey(saveEvent)
+  app.flush()
+  assert.equal(app.requests('save').length, 1, 'the window listener skips the already-handled save')
+
+  const runEvent = makeEvent('Enter', { ctrlKey: true })
+  editor().props.onKeyDown(runEvent)
+  app.flush()
+  assert.equal(runEvent.defaultPrevented, true)
+  assert.equal(app.requests('execute').length, 1)
+  app.dispatchKey(runEvent)
+  app.flush()
+  assert.equal(app.requests('execute').length, 1, 'the window listener skips the already-handled run')
+})
+
+test('the window keydown listener is removed on unmount', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  assert.equal(app.keyListenerCount, 1)
+  app.unmount()
+  assert.equal(app.keyListenerCount, 0, 'unmount removes the global listener')
+  const event = app.dispatchKey({ key: 's', ctrlKey: true, target: fakeTarget('BODY') })
+  assert.equal(event.defaultPrevented, false)
+  assert.equal(app.requests('save').length, 0)
+})
+
+test('a hidden viewer does not handle window shortcuts', async (t) => {
+  const app = mountNotebook(t) // mountNotebook defaults to visible: false
+  await app.settle()
+  assert.equal(app.keyListenerCount, 1, 'the listener is still mounted for the lifetime of the viewer')
+  const save = app.dispatchKey({ key: 's', ctrlKey: true, target: fakeTarget('BODY') })
+  assert.equal(save.defaultPrevented, false, 'a hidden viewer must not block the host/browser save')
+  assert.equal(app.requests('save').length, 0)
+  const run = app.dispatchKey({ key: 'Enter', ctrlKey: true, target: fakeTarget('PRE', 'cell-1') })
+  app.flush()
+  assert.equal(run.defaultPrevented, false)
+  assert.equal(app.requests('execute').length, 0)
+})
+
+test('shortcuts become active when the viewer turns visible', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const hidden = app.dispatchKey({ key: 'S', ctrlKey: true, target: fakeTarget('BODY') })
+  assert.equal(hidden.defaultPrevented, false)
+  assert.equal(app.requests('save').length, 0)
+  app.setVisible(true)
+  await app.settle()
+  const shown = app.dispatchKey({ key: 'S', ctrlKey: true, target: fakeTarget('BODY') })
+  app.flush()
+  assert.equal(shown.defaultPrevented, true, 'the now-active viewer handles the shortcut again')
+  assert.equal(app.requests('save').length, 1)
+})
+
+test('auto-repeat keydown does not trigger shortcuts again', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  const save = app.dispatchKey({ key: 's', ctrlKey: true, repeat: true, target: fakeTarget('BODY') })
+  app.flush()
+  assert.equal(save.defaultPrevented, false, 'a held key is not a new shortcut')
+  assert.equal(app.requests('save').length, 0)
+  const run = app.dispatchKey({ key: 'Enter', ctrlKey: true, repeat: true, target: fakeTarget('PRE', 'cell-1') })
+  app.flush()
+  assert.equal(run.defaultPrevented, false)
+  assert.equal(app.requests('execute').length, 0)
+  const firstPress = app.dispatchKey({ key: 's', ctrlKey: true, repeat: false, target: fakeTarget('BODY') })
+  app.flush()
+  assert.equal(firstPress.defaultPrevented, true, 'the initial non-repeat press still works')
+  assert.equal(app.requests('save').length, 1)
+})
+
+// ---------------------------------------------------------------------------
+// Kernel status generation / late GET handling (M-12)
+// ---------------------------------------------------------------------------
+
+test('a late /status response cannot overwrite a kernel death and its terminal reply', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const stale = app.requests('status').at(-1)
+  assert.ok(stale, 'the initial status GET is deferred')
+  const request = app.run()
+  const stream = executionStream()
+  request.resolve(stream.response)
+  await app.settle()
+  assert.equal(stale.init.signal.aborted, true, 'starting a run invalidates the pre-run status GET')
+  stream.emit({ type: 'kernel_died', message: 'kernel crashed' })
+  await app.settle()
+  stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: false, status: 'error' })
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false)
+  assert.equal(app.toolbar.kernel.busy, false)
+  stale.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'a pre-death status cannot revive the kernel')
+  assert.equal(app.toolbar.kernel.busy, false)
+  assert.equal(app.toolbar.kernel.executionState, 'none')
+  stream.end()
+  await app.settle()
+})
+
+test('a fatal stream error also advances the kernel generation', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const stale = app.requests('status').at(-1)
+  const request = app.run()
+  const stream = executionStream()
+  request.resolve(stream.response)
+  await app.settle()
+  stream.emit({ type: 'fatal', message: 'connection lost' })
+  await app.settle()
+  stale.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'a pre-fatal status GET is ignored')
+  stream.end()
+  await app.settle()
+})
+
+test('a status response that raced shutdown cannot revive the kernel', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const stale = app.requests('status').at(-1)
+  app.toolbar.onShutdown()
+  await app.settle()
+  assert.equal(stale.init.signal.aborted, true, 'shutdown invalidates the in-flight status GET')
+  app.requests('shutdown').at(-1).resolve(response({ ok: true, value: {} }))
+  await app.settle()
+  stale.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'shutdown keeps the authoritative off state')
+  assert.equal(app.toolbar.kernel.busy, false)
+})
+
+test('restart advances the kernel generation and refreshes with the replacement state', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const stale = app.requests('status').at(-1)
+  app.toolbar.onRestart()
+  await app.settle()
+  app.requests('restart').at(-1).resolve(response({ ok: true, value: { python: '/python2' } }))
+  await app.settle()
+  const fresh = app.requests('status').at(-1)
+  assert.notEqual(fresh, stale, 'the completed restart issues its own status GET')
+  stale.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'the pre-restart status is ignored')
+  fresh.resolve(response({ ok: true, value: { running: true, ready: true, busy: false, executionState: 'idle', python: '/python2' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.python, '/python2', 'the replacement kernel state is committed')
+  assert.equal(app.toolbar.kernel.busy, false)
+})
+
+test('concurrent status GETs only commit the latest response', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const first = app.requests('status').at(-1)
+  app.setVisible(true)
+  await app.settle()
+  assert.equal(app.requests('status').length, 2, 'returning to a visible notebook refreshes the kernel')
+  const second = app.requests('status').at(-1)
+  assert.notEqual(second, first)
+  assert.equal(first.init.signal.aborted, true, 'the newer refresh aborts the in-flight GET')
+  second.resolve(response({ ok: true, value: OFF_KERNEL }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false)
+  first.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'the older concurrent GET loses to the latest one')
+  assert.equal(app.toolbar.kernel.busy, false)
+})
+
+test('reload advances the kernel generation and ignores a status GET from the old document', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const stale = app.requests('status').at(-1)
+  app.reload()
+  await app.settle()
+  assert.equal(stale.init.signal.aborted, true, 'adopting a document invalidates its status GET')
+  stale.resolve(response({ ok: true, value: { running: true, ready: true, busy: true, executionState: 'busy', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false, 'the reloaded document never shows the stale running state')
+})
+
+test('a hidden notebook refreshes the kernel when it becomes visible again', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  const initial = app.requests('status').at(-1)
+  initial.resolve(response({ ok: true, value: OFF_KERNEL }))
+  await app.settle()
+  assert.equal(app.requests('status').length, 1, 'a hidden notebook does not poll')
+  app.setVisible(true)
+  await app.settle()
+  assert.equal(app.requests('status').length, 2, 'becoming visible refreshes the kernel once')
+  app.requests('status').at(-1).resolve(response({ ok: true, value: { running: true, ready: true, busy: false, executionState: 'idle', python: '/python' } }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, true)
+  assert.equal(app.toolbar.kernel.busy, false)
 })

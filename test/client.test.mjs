@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT, NOTEBOOK_CAP_BYTES } from '../lib/notebook.js'
+import { installDomParser } from './client-dom-stub.mjs'
 import { loadClient } from './client-harness.mjs'
 
 test('registers a custom ipynb file viewer through betterSidebar', async () => {
@@ -446,6 +447,173 @@ test('html sanitizer degrades to escaped text when DOM cleaning throws', async (
     if (original === undefined) delete globalThis.DOMParser
     else globalThis.DOMParser = original
   }
+})
+
+test('html sanitizer resolves attachment and local images through the image resolver', async () => {
+  const restore = installDomParser()
+  try {
+    const { exports } = await loadClient()
+    const { sanitizeHtml } = exports.__test
+    const resolved = []
+    const html = sanitizeHtml(
+      '<p><img src="attachment:plot.png" alt="plot">' +
+        '<img src="images/local.png" alt="local">' +
+        '<img src="https://example.test/remote.png" alt="remote">' +
+        '<img src="C:\\pics\\a.png" alt="win">' +
+        '<img src="\\\\server\\share\\a.png" alt="unc"></p>',
+      {
+        resolveImage(src) {
+          resolved.push(src)
+          return 'http://host/sidebar/file?path=' + encodeURIComponent(src)
+        },
+      },
+    )
+    assert.deepEqual(resolved, [
+      'attachment:plot.png',
+      'images/local.png',
+      'https://example.test/remote.png',
+      'C:\\pics\\a.png',
+      '\\\\server\\share\\a.png',
+    ], 'every whitelisted image source is offered to the resolver unchanged')
+    assert.equal(
+      html,
+      '<p><img src="http://host/sidebar/file?path=attachment%3Aplot.png" alt="plot">' +
+        '<img src="http://host/sidebar/file?path=images%2Flocal.png" alt="local">' +
+        '<img src="http://host/sidebar/file?path=https%3A%2F%2Fexample.test%2Fremote.png" alt="remote">' +
+        '<img src="http://host/sidebar/file?path=C%3A%5Cpics%5Ca.png" alt="win">' +
+        '<img src="http://host/sidebar/file?path=%5C%5Cserver%5Cshare%5Ca.png" alt="unc"></p>',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('html sanitizer keeps the URL policy and only resolves safe image sources', async () => {
+  const restore = installDomParser()
+  try {
+    const { exports } = await loadClient()
+    const { sanitizeHtml } = exports.__test
+    const resolved = []
+    const html = sanitizeHtml(
+      '<img src="javascript:alert(1)"><img src="//evil.example/pixel.png">' +
+        '<img src="file:///C:/pics/a.png"><img src="data:text/html;base64,AAAA">' +
+        '<img src="data:image/png;base64,AAAA">',
+      {
+        resolveImage(src) {
+          resolved.push(src)
+          return src
+        },
+      },
+    )
+    assert.deepEqual(resolved, ['data:image/png;base64,AAAA'], 'unsafe sources are dropped before resolution')
+    assert.doesNotMatch(html, /javascript:/)
+    assert.doesNotMatch(html, /evil\.example/)
+    assert.doesNotMatch(html, /file:\/\//)
+    assert.doesNotMatch(html, /data:text\/html/)
+    assert.match(html, /data:image\/png;base64,AAAA/)
+  } finally {
+    restore()
+  }
+})
+
+test('html sanitizer degrades unresolvable images to the missing-image marker', async () => {
+  const restore = installDomParser()
+  try {
+    const { exports } = await loadClient()
+    const { sanitizeHtml } = exports.__test
+    const html = sanitizeHtml('<p>before <img src="attachment:missing.png" alt="gone"> after</p>', { resolveImage: () => null })
+    assert.equal(html, '<p>before <span class="dsh-bsb-ipynb-missing-image">gone</span> after</p>')
+    const thrown = sanitizeHtml('<p><img src="attachment:bad.png" alt="bad">x</p>', {
+      resolveImage() {
+        throw new Error('boom')
+      },
+    })
+    assert.equal(thrown, '<p><span class="dsh-bsb-ipynb-missing-image">bad</span>x</p>',
+      'a failing resolver only degrades its image, not the whole output')
+  } finally {
+    restore()
+  }
+})
+
+test('html sanitizer fallback ignores the image resolver and still escapes markup', async () => {
+  const { exports } = await loadClient()
+  const { sanitizeHtml } = exports.__test
+  assert.equal(typeof globalThis.DOMParser, 'undefined', 'this environment has no DOMParser')
+  const resolved = []
+  const html = sanitizeHtml('<img src="attachment:plot.png"><script>alert(1)</script>', {
+    resolveImage(src) {
+      resolved.push(src)
+      return 'http://host/file'
+    },
+  })
+  assert.deepEqual(resolved, [], 'there is no DOM to rewrite in the fallback path')
+  assert.doesNotMatch(html, /<img|<script/)
+  assert.match(html, /&lt;img src=&quot;attachment:plot\.png&quot;&gt;/)
+})
+
+test('html output images are rewritten before rendering', async () => {
+  const restore = installDomParser()
+  try {
+    const { exports } = await loadClient()
+    const { OutputView } = exports.__test
+    const tree = OutputView({
+      output: { output_type: 'display_data', data: { 'text/html': '<div><img src="attachment:plot.png" alt="plot"></div>' } },
+      resolveImage: (src) => '/sidebar/file?path=' + encodeURIComponent(src),
+    })
+    assert.equal(tree.type, 'div')
+    assert.match(tree.props.className, /dsh-bsb-ipynb-html/)
+    assert.equal(
+      tree.props.dangerouslySetInnerHTML.__html,
+      '<div><img src="/sidebar/file?path=attachment%3Aplot.png" alt="plot"></div>',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('reading-mode shortcut resolver handles modifiers, IME and already-handled events', async () => {
+  const { exports } = await loadClient()
+  const { resolveReadingShortcut } = exports.__test
+  const context = { targetCellId: 'cell-1', activeCellId: 'cell-9' }
+  assert.deepEqual(resolveReadingShortcut({ key: 'Enter', ctrlKey: true }, context), { action: 'run', cellId: 'cell-1' })
+  assert.deepEqual(resolveReadingShortcut({ key: 'Enter', metaKey: true }, context), { action: 'run', cellId: 'cell-1' })
+  assert.deepEqual(
+    resolveReadingShortcut({ key: 'Enter', ctrlKey: true }, { activeCellId: 'cell-9' }),
+    { action: 'run', cellId: 'cell-9' },
+    'the focused cell wins, then the most recently edited/run cell',
+  )
+  assert.equal(resolveReadingShortcut({ key: 'Enter', ctrlKey: true }, {}), null, 'never runs a cell by guessing')
+  assert.equal(resolveReadingShortcut({ key: 'Enter' }, context), null, 'plain Enter is not a shortcut')
+  assert.deepEqual(resolveReadingShortcut({ key: 's', ctrlKey: true }, context), { action: 'save', cellId: null })
+  assert.deepEqual(resolveReadingShortcut({ key: 'S', ctrlKey: true }, context), { action: 'save', cellId: null }, 'CapsLock')
+  assert.deepEqual(resolveReadingShortcut({ code: 'KeyS', key: 'Unidentified', metaKey: true }, context), { action: 'save', cellId: null })
+  assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, isComposing: true }, context), null, 'IME composition')
+  assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, keyCode: 229 }, context), null, 'IME keyCode 229')
+  assert.equal(
+    resolveReadingShortcut({ key: 's', ctrlKey: true, defaultPrevented: true }, context),
+    null,
+    'the cell editor already handled the event',
+  )
+  assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, repeat: true }, context), null, 'held Ctrl+S auto-repeat')
+  assert.equal(resolveReadingShortcut({ key: 'Enter', ctrlKey: true, repeat: true }, context), null, 'held Ctrl+Enter auto-repeat')
+  assert.deepEqual(
+    resolveReadingShortcut({ key: 's', ctrlKey: true, repeat: false }, context),
+    { action: 'save', cellId: null },
+    'the initial press is still handled',
+  )
+  assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, target: { tagName: 'TEXTAREA' } }, context), null)
+  assert.equal(resolveReadingShortcut({ key: 'Enter', ctrlKey: true, target: { tagName: 'TEXTAREA' } }, context), null)
+  assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, target: { isContentEditable: true } }, context), null)
+})
+
+test('cell target lookup walks the DOM ancestors to the data-cell-id container', async () => {
+  const { exports } = await loadClient()
+  const { cellIdFromEventTarget } = exports.__test
+  const cellContainer = { getAttribute: (name) => (name === 'data-cell-id' ? 'cell-7' : null), parentNode: null }
+  const pre = { getAttribute: () => null, parentNode: { getAttribute: () => null, parentNode: cellContainer } }
+  assert.equal(cellIdFromEventTarget(pre), 'cell-7')
+  assert.equal(cellIdFromEventTarget({ getAttribute: () => null, parentNode: null }), null)
+  assert.equal(cellIdFromEventTarget(null), null)
 })
 
 test('ansi output keeps colors and strips other control sequences', async () => {

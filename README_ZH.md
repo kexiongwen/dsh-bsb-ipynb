@@ -29,7 +29,7 @@
 
 ## ✨ 特性
 
-- **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。
+- **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。Markdown 与 `text/html` 输出中的图片按同一规则解析：`attachment:`、相对路径与 Windows 盘符/UNC 路径经宿主文件路由加载，`http(s)` 与 `data:image` 保持原地址直连（远程图片由源站加载）。
 - **编辑**：点击单元格进入编辑；插入/删除、上移/下移、切换类型、Markdown 预览、清空单个或全部输出。
 - **执行**：每个 notebook 一个按文件路径共享的常驻内核，变量跨单元格保留；支持全部运行、中断、重启与关闭。
 - **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后 1.5 秒自动保存。
@@ -68,7 +68,7 @@ python -m pip install jupyter_client ipykernel    # Windows（或：py -3 -m pip
 | 反缩进当前行 | `Shift + Tab` |
 | 退出编辑 | `Esc` |
 
-快捷键在编辑单元格时生效；Tab 插入 4 个空格，Shift+Tab 删除一个缩进单位。所有操作也可通过工具栏完成（解释器选择、全部运行、中断、重启、保存、重新加载、关闭内核）。
+运行（`Cmd/Ctrl + Enter`）与保存（`Cmd/Ctrl + S`）快捷键在阅读态也生效（notebook 视图可见时）：目标为获得焦点的单元格，否则为最近编辑或运行的单元格；`Cmd/Ctrl + S` 会被拦截，不再弹出浏览器「保存网页」。编辑时 Tab 插入 4 个空格，Shift+Tab 删除一个缩进单位。所有操作也可通过工具栏完成（解释器选择、全部运行、中断、重启、保存、重新加载、关闭内核）。
 
 - 执行单元格或全部运行期间自动保存暂停，临时清空或未完成的输出不会写入磁盘。
 - 切换解释器会重启内核；有执行任务时会先确认。
@@ -158,7 +158,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 - 暂无「新建 notebook」向导：可在文件树中新建空 `.ipynb`，或直接打开已有文件。
 - 工作区边界基于会话 cwd 校验；会话活动根为 linked git worktree 时可能返回 403（暂不支持）。
 - **路径错误信息侧信道**：工作区外已存在且可访问的目标通常返回 403，不存在或不可访问的目标返回 404（可能附 reason）。已通过准入校验的同用户客户端可借此探测宿主路径的存在性/可访问性；该行为不会放开工作区外的读取或写入。
-- **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409），被独占锁定的文件读取返回 `read-blocked`（409）；`text/html` 输出中的图片不会经过相对路径解析。
+- **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409），被独占锁定的文件读取返回 `read-blocked`（409）。
 - 输出特别大时会拖慢浏览器渲染，建议及时清空输出或分段执行。
 
 ## 📊 内部限制与环境变量
@@ -182,7 +182,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 当前 344 个测试
+npm test          # 当前 393 个测试
 ```
 
 主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。

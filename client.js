@@ -215,7 +215,14 @@ window.__ModuleLoader__.load({
       'target', 'rel', 'start', 'type',
     ])
 
-    function cleanNode(node) {
+    function elementAttribute(element, name) {
+      for (const attribute of Array.from(element.attributes || [])) {
+        if (String(attribute.name).toLowerCase() === name) return attribute.value
+      }
+      return ''
+    }
+
+    function cleanNode(node, resolveImage) {
       for (const child of Array.from(node.childNodes || [])) {
         if (child.nodeType === 3) continue
         if (child.nodeType !== 1) {
@@ -231,9 +238,10 @@ window.__ModuleLoader__.load({
           const fragment = node.ownerDocument.createDocumentFragment()
           while (child.firstChild) fragment.appendChild(child.firstChild)
           child.replaceWith(fragment)
-          cleanNode(node)
+          cleanNode(node, resolveImage)
           continue
         }
+        let imageSrc = null
         for (const attribute of Array.from(child.attributes)) {
           const name = attribute.name.toLowerCase()
           if (name.startsWith('on') || !ALLOWED_ATTRS.has(name)) {
@@ -242,23 +250,54 @@ window.__ModuleLoader__.load({
           }
           if (name === 'href' || name === 'src') {
             const safe = sanitizeUrl(attribute.value, { image: name === 'src' })
-            if (safe) child.setAttribute(name, safe)
-            else child.removeAttribute(name)
+            if (safe) {
+              child.setAttribute(name, safe)
+              if (name === 'src' && tag === 'img') imageSrc = safe
+            } else child.removeAttribute(name)
+          }
+        }
+        if (tag === 'img' && imageSrc !== null && typeof resolveImage === 'function') {
+          // sanitizeUrl keeps attachment:/relative image sources (and Windows
+          // drive/UNC paths) because a notebook-local image is legitimate.
+          // They only become renderable after the local image resolver maps
+          // them to the host file route, exactly like markdown images. A
+          // resolver failure degrades that one image instead of escaping the
+          // whole HTML output.
+          let resolved = null
+          try {
+            resolved = resolveImage(imageSrc)
+          } catch {
+            resolved = null
+          }
+          if (resolved) {
+            child.setAttribute('src', resolved)
+          } else {
+            // Unresolvable references (e.g. a missing attachment) degrade to
+            // the same marker the markdown renderer uses instead of a broken
+            // image every time the output renders.
+            const document = node.ownerDocument
+            const marker = document.createElement('span')
+            marker.setAttribute('class', 'dsh-bsb-ipynb-missing-image')
+            marker.textContent = elementAttribute(child, 'alt')
+            child.replaceWith(marker)
+            continue
           }
         }
         if (tag === 'a') {
           child.setAttribute('target', '_blank')
           child.setAttribute('rel', 'noreferrer noopener')
         }
-        cleanNode(child)
+        cleanNode(child, resolveImage)
       }
     }
 
-    function sanitizeHtml(html) {
+    function sanitizeHtml(html, options) {
+      // Without DOMParser the whole fragment is shown as escaped text; there is
+      // no element to rewrite, so the image resolver cannot apply.
       if (typeof DOMParser === 'undefined') return escapeHtml(html)
       try {
         const document = new DOMParser().parseFromString(String(html ?? ''), 'text/html')
-        cleanNode(document.body)
+        cleanNode(document.body, options && options.resolveImage)
         return document.body.innerHTML
       } catch {
         // Pathological markup (deeply nested or very wide tag soup) must never
@@ -696,10 +735,10 @@ window.__ModuleLoader__.load({
       return readResponse(response)
     }
 
-    async function getJson(ctx, method, query) {
+    async function getJson(ctx, method, query, signal) {
       const params = new URLSearchParams(query || {})
       const suffix = params.toString() ? '?' + params.toString() : ''
-      const response = await fetch(routeUrl(ctx, method) + suffix, { method: 'GET' })
+      const response = await fetch(routeUrl(ctx, method) + suffix, { method: 'GET', signal })
       return readResponse(response)
     }
 
@@ -803,6 +842,56 @@ window.__ModuleLoader__.load({
       if (!event || isImeKeyEvent(event) || !(event.metaKey || event.ctrlKey)) return false
       if (event.code === 'KeyS') return true
       return typeof event.key === 'string' && event.key.toLowerCase() === 's'
+    }
+
+    // The cell editor owns its keydown handler (and prevents the browser
+    // default itself); the window-level listener must not act a second time.
+    function isEditingKeyTarget(target) {
+      if (!target || typeof target !== 'object') return false
+      const tag = typeof target.tagName === 'string' ? target.tagName.toLowerCase() : ''
+      if (tag === 'textarea' || tag === 'input') return true
+      return target.isContentEditable === true
+    }
+
+    // Walk the DOM ancestors of a keydown target to the nearest cell container
+    // (every rendered cell carries data-cell-id). Walking the tree instead of
+    // tracking hover keeps "the cell I am looking at" honest even when focus
+    // sits on a cell action button or one of its outputs.
+    function cellIdFromEventTarget(target) {
+      let node = target
+      for (let depth = 0; node && depth < 64; depth += 1) {
+        if (typeof node.getAttribute === 'function') {
+          const cellId = node.getAttribute('data-cell-id')
+          if (typeof cellId === 'string' && cellId) return cellId
+        }
+        node = node.parentNode || null
+      }
+      return null
+    }
+
+    // Pure resolver for the window-level keydown listener. Moving the decision
+    // out of the component makes the IME/CapsLock/modifier semantics testable
+    // without a DOM: the caller only resolves the target cell and performs the
+    // returned action (and always calls preventDefault for a handled shortcut,
+    // so Ctrl/Cmd+S cannot open the browser's "save page" dialog in reading
+    // mode). Events already handled by the cell editor are refused, which is
+    // what keeps Ctrl+Enter/Ctrl+S from firing twice while editing.
+    function resolveReadingShortcut(event, context) {
+      if (!event || typeof event !== 'object') return null
+      if (event.defaultPrevented) return null
+      // Auto-repeat from a held key must not queue repeated saves/runs.
+      if (event.repeat === true) return null
+      if (isImeKeyEvent(event)) return null
+      if (isEditingKeyTarget(event.target)) return null
+      if (!(event.metaKey || event.ctrlKey)) return null
+      if (isSaveShortcut(event)) return { action: 'save', cellId: null }
+      if (event.key !== 'Enter') return null
+      const options = context || {}
+      // Never guess a cell: without a focused cell or a recent edit/run the
+      // shortcut is a no-op instead of running the first cell by accident.
+      const cellId = options.targetCellId || options.activeCellId || null
+      if (!cellId) return null
+      return { action: 'run', cellId }
     }
 
     // A blocked save (read-only or locked file) must not retry every autosave
@@ -1309,7 +1398,10 @@ window.__ModuleLoader__.load({
       if (html !== null) {
         return h('div', {
           className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-html',
-          dangerouslySetInnerHTML: { __html: sanitizeHtml(html) },
+          // HTML outputs can embed the same attachment:/relative image sources
+          // as markdown; route them through the local image resolver after
+          // sanitizing so the whitelist and URL policy stay in force.
+          dangerouslySetInnerHTML: { __html: sanitizeHtml(html, { resolveImage }) },
         })
       }
       if (data['image/svg+xml'] != null) {
@@ -1428,7 +1520,12 @@ window.__ModuleLoader__.load({
       const markdown = cell.cell_type === 'markdown'
       return h(
         'div',
-        { className: 'dsh-bsb-ipynb-cell dsh-bsb-ipynb-cell-' + cell.cell_type + (running ? ' dsh-bsb-ipynb-cell-running' : '') },
+        {
+          className: 'dsh-bsb-ipynb-cell dsh-bsb-ipynb-cell-' + cell.cell_type + (running ? ' dsh-bsb-ipynb-cell-running' : ''),
+          // Reading-mode keyboard shortcuts resolve their target cell by walking
+          // up from the event target to this container.
+          'data-cell-id': cell.id,
+        },
         h(
           'div',
           { className: 'dsh-bsb-ipynb-cell-head' },
@@ -1645,11 +1742,30 @@ window.__ModuleLoader__.load({
       const documentSeqRef = useRef(0)
       const notebookRevisionRef = useRef(0)
       const notifiedTruncationsRef = useRef(new WeakSet())
+      // Reading-mode shortcuts: the focused cell wins, then the most recently
+      // edited or run cell. These refs let the single window listener commit to
+      // an action without re-subscribing on every render.
+      const activeCellRef = useRef(null)
+      const runCellRef = useRef(null)
+      const loadStatusRef = useRef(loadStatus)
+      // The host may keep an inactive viewer mounted. Window shortcuts belong
+      // to the visible instance only; `false` gates them, `undefined` (older
+      // hosts that do not pass the prop) keeps the pre-gating behavior.
+      const visibleRef = useRef(visible)
+      // Kernel generation: every authoritative transition (run start/end,
+      // kernel_died/fatal, restart/shutdown, reload/adopt) advances the epoch so
+      // a /status response captured before it can never overwrite the newer
+      // state. The request id orders concurrent GETs: only the latest commits.
+      const kernelEpochRef = useRef(0)
+      const kernelRequestRef = useRef(0)
+      const kernelAbortRef = useRef(null)
 
       dirtyRef.current = dirty
       notebookRef.current = notebook
       versionRef.current = version
       pythonRef.current = python
+      loadStatusRef.current = loadStatus
+      visibleRef.current = visible
 
       const markDirty = useCallback(() => {
         forceReloadRef.current = false
@@ -1658,10 +1774,25 @@ window.__ModuleLoader__.load({
         setDirty(true)
       }, [])
 
+      // The generation of the kernel state only moves forward. Aborting an
+      // in-flight status GET is an optimization: the epoch/request checks in
+      // refreshKernel still reject a transport that already completed.
+      const bumpKernelEpoch = useCallback(() => {
+        kernelEpochRef.current += 1
+        if (kernelAbortRef.current) {
+          kernelAbortRef.current.abort()
+          kernelAbortRef.current = null
+        }
+      }, [])
+
       const invalidateDocumentWork = useCallback(() => {
         // Invalidate first: aborting the old stream can immediately reject it.
+        // A different document also means a different kernel generation.
+        bumpKernelEpoch()
         documentSeqRef.current += 1
         notebookRevisionRef.current += 1
+        // A replaced document has no "recently edited cell" yet.
+        activeCellRef.current = null
         savingRef.current = null
         activeRunRef.current = null
         runningRef.current = null
@@ -1672,7 +1803,7 @@ window.__ModuleLoader__.load({
         saveTimerRef.current = null
         if (abortRef.current) abortRef.current.abort()
         abortRef.current = null
-      }, [])
+      }, [bumpKernelEpoch])
 
       const adopt = useCallback((data) => {
         // A confirmed reload replaces the document; a cancelled prompt never
@@ -1867,11 +1998,25 @@ window.__ModuleLoader__.load({
       saveRef.current = save
 
       const refreshKernel = useCallback(async () => {
+        // Capture the generation and request id before the request leaves.
+        // A kernel death, restart, shutdown or reload can advance the epoch
+        // while the GET is in flight; a newer GET (poll or visible resume)
+        // supersedes this one. Only a response that still owns both may
+        // commit, so a late `{running:true,busy:true}` can never resurrect a
+        // terminal toolbar state.
+        const epoch = kernelEpochRef.current
+        const requestId = ++kernelRequestRef.current
+        const controller = typeof AbortController === 'function' ? new AbortController() : null
+        if (kernelAbortRef.current) kernelAbortRef.current.abort()
+        kernelAbortRef.current = controller
         try {
-          const value = await getJson(ctx, 'status', { sessionId: scope && scope.sessionId, path })
+          const value = await getJson(ctx, 'status', { sessionId: scope && scope.sessionId, path }, controller ? controller.signal : undefined)
+          if (epoch !== kernelEpochRef.current || requestId !== kernelRequestRef.current) return
           setKernel(value)
         } catch {
-          /* ignore */
+          /* ignore: aborted, superseded and failed refreshes keep the last state */
+        } finally {
+          if (kernelAbortRef.current === controller) kernelAbortRef.current = null
         }
       }, [ctx, path, scope])
 
@@ -1993,6 +2138,9 @@ window.__ModuleLoader__.load({
         if (!shouldHandleCellEvent(cellId, event)) return
         if (event.type === 'ping') return
         if (event.type === 'status') {
+          // Stream status is authoritative for the run: any /status GET issued
+          // before it belongs to an older generation.
+          bumpKernelEpoch()
           const state = event.execution_state || 'idle'
           setKernel((previous) => ({ ...previous, running: true, ready: true, executionState: state, busy: state === 'busy' }))
           return
@@ -2017,6 +2165,9 @@ window.__ModuleLoader__.load({
             updateRunCell(seq, cellId, (cell) => ({ ...cell, execution_count: event.execution_count }))
           }
           markDirty()
+          // The terminal reply defines the post-run generation (a synthetic
+          // reply after kernel_died keeps the kernel off).
+          bumpKernelEpoch()
           setKernel((previous) => ({
             ...previous,
             running: !run.died,
@@ -2028,15 +2179,19 @@ window.__ModuleLoader__.load({
         if (event.type === 'kernel_died') {
           run.died = true
           run.failed = true
+          bumpKernelEpoch()
           setBanner({ kind: 'error', ...(event.message ? { text: event.message } : { key: 'kernelDied' }) })
           setKernel((previous) => ({ ...previous, running: false, ready: false, busy: false, executionState: 'none' }))
           return
         }
         if (event.type === 'fatal') {
           run.failed = true
+          // A fatal stream error ends this execution generation even though
+          // the final state is set by runCell's catch/handling below.
+          bumpKernelEpoch()
           setBanner({ kind: 'error', ...(event.message ? { text: event.message } : { key: 'loadError' }) })
         }
-      }, [updateRunOutputs, updateRunCell, markDirty])
+      }, [updateRunOutputs, updateRunCell, markDirty, bumpKernelEpoch])
 
       const runCell = useCallback(async (cellId) => {
         if (runningRef.current || conflict || loadStatus !== 'ok') return false
@@ -2053,9 +2208,13 @@ window.__ModuleLoader__.load({
         const isCurrentRun = () => activeRunRef.current === run && !isStaleSaveResponse(documentSeqRef.current, run.seq)
         activeRunRef.current = run
         abortRef.current = controller
+        activeCellRef.current = cellId
         // A save started before execution must not clear dirty using a ref
         // that React has not yet updated with this run's queued changes.
         notebookRevisionRef.current += 1
+        // Starting a run is an authoritative kernel transition: drop a
+        // /status GET captured before the kernel became busy.
+        bumpKernelEpoch()
         setEditingCell(null)
         setCapacityBlocked(false)
         runningRef.current = cellId
@@ -2102,6 +2261,9 @@ window.__ModuleLoader__.load({
           } else {
             setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
           }
+          // The failed transport is a terminal transition too: an older
+          // status response must not restore the pre-run busy/ready state.
+          bumpKernelEpoch()
           setKernel((previous) => ({ ...previous, busy: false, executionState: previous.running ? 'idle' : 'none' }))
           if (shouldRestoreOutputsAfterRun(run.replySeen)) restorePreRunOutputs()
           return false
@@ -2113,7 +2275,9 @@ window.__ModuleLoader__.load({
             setRunningCell(null)
           }
         }
-      }, [ctx, path, scope, conflict, loadStatus, handleEvent, updateRunCell])
+      }, [ctx, path, scope, conflict, loadStatus, handleEvent, updateRunCell, bumpKernelEpoch])
+
+      runCellRef.current = runCell
 
       const runAll = useCallback(async () => {
         if (runAllRef.current || conflict) return
@@ -2147,27 +2311,40 @@ window.__ModuleLoader__.load({
       }, [ctx, path, scope])
 
       const restart = useCallback(async (nextPython) => {
+        // The kernel identity is about to change: GETs issued before the
+        // restart cannot describe the replacement kernel.
+        bumpKernelEpoch()
         try {
           const value = await postJson(ctx, 'restart', {
             sessionId: scope && scope.sessionId,
             path,
             python: resolveRestartPython(nextPython, pythonRef.current),
           })
+          // GETs issued while the restart was in flight may still carry the
+          // old kernel's state; the completed restart supersedes them.
+          bumpKernelEpoch()
           setBanner({ kind: 'info', key: 'kernel', text: value.python || pythonRef.current || '' })
           await refreshKernel()
         } catch (error) {
           setBanner({ kind: 'error', ...(error && error.message ? { text: error.message } : { key: 'kernelDied' }) })
         }
-      }, [ctx, path, scope, refreshKernel])
+      }, [ctx, path, scope, refreshKernel, bumpKernelEpoch])
 
       const shutdown = useCallback(async () => {
+        bumpKernelEpoch()
         try {
           await postJson(ctx, 'shutdown', { sessionId: scope && scope.sessionId, path })
+          // A status GET that raced the shutdown request must not repaint the
+          // kernel as running after the authoritative off state is committed.
+          bumpKernelEpoch()
           setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
         } catch (error) {
-          if (error && error.code === 'kernel-unavailable') setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
+          if (error && error.code === 'kernel-unavailable') {
+            bumpKernelEpoch()
+            setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
+          }
         }
-      }, [ctx, path, scope])
+      }, [ctx, path, scope, bumpKernelEpoch])
 
       const changePython = useCallback(async (next) => {
         if (!next || next === pythonRef.current) return
@@ -2193,6 +2370,9 @@ window.__ModuleLoader__.load({
       }, [kernel.running, path, restart])
 
       const setSource = useCallback((cellId, value) => {
+        // Remember where the user last worked so reading-mode shortcuts have a
+        // sensible target even after focus moved to the toolbar.
+        activeCellRef.current = cellId
         setNotebook((previous) => updateCell(previous, cellId, (cell) => ({ ...cell, source: value })))
         // A cancelled host reload leaves forceReloadRef set; new edits must not
         // be replaced by a later customData adoption.
@@ -2252,6 +2432,7 @@ window.__ModuleLoader__.load({
         if (typeof window === 'undefined' || !window.confirm || !window.confirm(t('deleteCellConfirm'))) return
         setNotebook((previous) => (previous ? { ...previous, cells: previous.cells.filter((cell) => cell.id !== cellId) } : previous))
         setEditingCell((current) => (current === cellId ? null : current))
+        if (activeCellRef.current === cellId) activeCellRef.current = null
         markDirty()
       }, [markDirty])
 
@@ -2291,6 +2472,7 @@ window.__ModuleLoader__.load({
           return { ...previous, cells }
         })
         markDirty()
+        activeCellRef.current = cell.id
         setEditingCell(cell.id)
         return cell.id
       }, [])
@@ -2300,7 +2482,41 @@ window.__ModuleLoader__.load({
         if (!current) return
         const index = current.cells.findIndex((cell) => cell.id === cellId)
         const next = current.cells.slice(index + 1).find((cell) => cell.cell_type === 'code')
-        if (next) setEditingCell(next.id)
+        if (next) {
+          activeCellRef.current = next.id
+          setEditingCell(next.id)
+        }
+      }, [])
+
+      // Reading-mode shortcuts live on the window for as long as the viewer is
+      // mounted; the cell editor keeps its own onKeyDown. defaultPrevented
+      // (set by that handler) plus the editing-target guard keep the two from
+      // both firing, and the cleanup removes the listener on unmount.
+      useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+        const onKeyDown = (event) => {
+          // A mounted-but-hidden viewer must not steal host shortcuts: return
+          // before preventDefault so the browser/host default stays intact.
+          if (visibleRef.current === false) return
+          const shortcut = resolveReadingShortcut(event, {
+            targetCellId: cellIdFromEventTarget(event && event.target),
+            activeCellId: activeCellRef.current,
+          })
+          if (!shortcut) return
+          // Ctrl/Cmd+S is prevented even when there is nothing to save: the
+          // browser's own "save page" dialog must never appear in reading mode.
+          event.preventDefault()
+          if (loadStatusRef.current !== 'ok') return
+          if (shortcut.action === 'run') {
+            if (typeof runCellRef.current === 'function') void runCellRef.current(shortcut.cellId)
+            return
+          }
+          if (typeof saveRef.current === 'function') void saveRef.current()
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => {
+          window.removeEventListener('keydown', onKeyDown)
+        }
       }, [])
 
       if (loadStatus !== 'ok' || !notebook) {
@@ -2362,7 +2578,10 @@ window.__ModuleLoader__.load({
               editing: editingCell === cell.id,
               running: runningCell === cell.id,
               busy: Boolean(runningCell) || runAllRunning,
-              onEdit: (cellId) => setEditingCell(cellId),
+              onEdit: (cellId) => {
+                activeCellRef.current = cellId
+                setEditingCell(cellId)
+              },
               onDone: () => setEditingCell(null),
               onSource: setSource,
               onRun: (cellId) => void runCell(cellId),
@@ -2723,6 +2942,9 @@ window.__ModuleLoader__.load({
       sanitizeUrl,
       sanitizeHtml,
       ALLOWED_ATTRS,
+      isEditingKeyTarget,
+      cellIdFromEventTarget,
+      resolveReadingShortcut,
       renderMarkdown,
       renderMarkdownWithImages,
       renderInline,

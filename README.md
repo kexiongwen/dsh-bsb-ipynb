@@ -29,7 +29,7 @@
 
 ## ✨ Features
 
-- **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks.
+- **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks. Images in Markdown and `text/html` outputs resolve the same way: `attachment:`, relative and Windows drive/UNC paths go through the host file route, while `http(s)` and `data:image` sources load as-is (remote images are fetched from their origin).
 - **Cell editing** — click a cell to edit it; insert or delete cells, move them up/down, switch cell types, preview Markdown, and clear one cell's or all outputs.
 - **Execution** — one persistent kernel per notebook, keyed by file path, keeps variables alive across cells; Run all, interrupt, restart and shut down.
 - **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits.
@@ -68,7 +68,7 @@ python -m pip install jupyter_client ipykernel    # Windows (or: py -3 -m pip ..
 | Outdent the current line | `Shift + Tab` |
 | Leave edit mode | `Esc` |
 
-Shortcuts work while a cell is being edited; Tab inserts four spaces and Shift+Tab removes one indent unit. Every action is also available from the toolbar (interpreter, Run all, interrupt, restart, save, reload, shut down kernel).
+Run (`Cmd/Ctrl + Enter`) and save (`Cmd/Ctrl + S`) shortcuts also work in reading mode while the notebook view is visible: the target is the focused cell, otherwise the cell you last edited or ran, and `Cmd/Ctrl + S` is intercepted so the browser's save dialog does not open. While editing, Tab inserts four spaces and Shift+Tab removes one indent unit. Every action is also available from the toolbar (interpreter, Run all, interrupt, restart, save, reload, shut down kernel).
 
 - Autosave pauses while a cell or Run all is running, so transiently cleared or partial outputs never reach disk.
 - Switching interpreters restarts the kernel; an active run asks for confirmation first.
@@ -158,7 +158,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 - No "new notebook" wizard yet: create an empty `.ipynb` in the file tree or open an existing file.
 - Workspace containment uses the session cwd; when the active root is a linked git worktree, requests may return 403 (not supported yet).
 - **Path-error side channel** — for a path outside the session workspace, an existing and accessible target generally returns 403, while a missing or inaccessible target returns 404 (possibly with a reason). An already-admitted same-user client can use this distinction to probe host path existence or accessibility; it does not allow reading or writing outside the workspace.
-- **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409) and locked files fail reads with `read-blocked` (409); images inside `text/html` output are not re-resolved.
+- **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409) and locked files fail reads with `read-blocked` (409).
 - Very large outputs make browser rendering slow; clear outputs or run in smaller chunks.
 
 ## 📊 Internal Limits and Environment Variables
@@ -182,7 +182,7 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 344 tests at the time of writing
+npm test          # 393 tests at the time of writing
 ```
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
