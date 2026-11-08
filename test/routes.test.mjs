@@ -655,7 +655,7 @@ test('execute destroys a backpressured real HTTP response and socket', { timeout
     }
     onEvent({ type: 'execute_reply', cell_id: cellId, ok: true, execution_count: 1 })
   }
-  registerIpynbRoutes(ctx, kernels)
+  registerIpynbRoutes(ctx, kernels, { drainTimeoutMs: 250 })
   const handler = ctx.registered[0].handler
   const sockets = new Set()
   let response
@@ -698,7 +698,21 @@ test('execute destroys a backpressured real HTTP response and socket', { timeout
   assert.ok(response)
   assert.ok(serverSocket)
 
-  await new Promise((resolve) => setTimeout(resolve, 11_000))
+  // The injected 250 ms drain timeout forces the close; wait for the real
+  // socket close events instead of sleeping for the production 10 s default.
+  await new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => reject(new Error('the response was not force-closed')), 10_000)
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve()
+    }
+    if (response.destroyed || response.closed) return done()
+    response.once('close', done)
+    serverSocket.once('close', done)
+  })
   assert.equal(response.destroyed || response.closed, true, 'the HTTP response must be forcibly closed')
   assert.equal(serverSocket.destroyed, true, 'the backpressured server socket must be destroyed')
 })

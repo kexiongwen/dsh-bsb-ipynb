@@ -86,6 +86,10 @@ function startBridge(cwd, connectionFile) {
 }
 
 async function shutdown(proc) {
+  // The test body may already have observed the exit (some call sites wait for
+  // the bridge to die first); process events are not replayed, so waiting for
+  // another 'exit' would burn the full timeout fallback.
+  if (proc.exitCode !== null || proc.signalCode !== null) return
   proc.kill('SIGTERM')
   await new Promise((resolve) => {
     const timer = setTimeout(resolve, 3000)
@@ -106,6 +110,7 @@ function isAlive(pid) {
 }
 
 async function waitForExit(proc, timeoutMs = 5_000) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return
   await new Promise((resolve) => {
     const timer = setTimeout(resolve, timeoutMs)
     proc.once('exit', () => {

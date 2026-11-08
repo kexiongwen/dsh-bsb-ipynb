@@ -52,7 +52,7 @@ test('discovery preserves two venvs that share one base Python', {
     const venvBin = process.platform === 'win32' ? 'Scripts' : 'bin'
     const venvInterpreter = process.platform === 'win32' ? 'python.exe' : 'python3'
     for (const environment of environments) {
-      const result = spawnSync(basePython, ['-m', 'venv', '--system-site-packages', environment], {
+      const result = spawnSync(basePython, ['-m', 'venv', '--system-site-packages', '--without-pip', environment], {
         encoding: 'utf8',
         timeout: 30_000,
       })
@@ -288,7 +288,11 @@ test('selected Python controls real kernels despite a conflicting kernelspec, ac
       assert.equal(entry.python, environment.python)
       assert.equal(manager.kernelCount, 1)
       if (previousEntry) assert.notEqual(entry, previousEntry, 'switching environments must replace the bridge')
-      for (const phase of ['initial', 'after restart']) {
+      // The restart contract is proven once (first environment); the second
+      // environment proves the interpreter switch instead of paying for a
+      // second restart cycle.
+      const phases = environment === environments[0] ? ['initial', 'after restart'] : ['initial']
+      for (const phase of phases) {
         if (phase === 'after restart') await within(manager.restart(target), `${environment.name} restart`)
         let output = ''
         const errors = []

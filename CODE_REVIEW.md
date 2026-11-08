@@ -1,7 +1,7 @@
 # dsh-bsb-ipynb 代码审核报告（macOS + Windows 快照，仅未修复项）
 
 > **审核快照**：2026-11-07，macOS APFS 与 Windows 11 实机各一轮。**本文件只保留仍未修复或只修复了一部分的问题**；已经完全修复的条目已删除，修复记录与回归测试见 `git log`（2026-11-07 的系列提交）与 `test/`。
-> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取，+5 回归）与 L-23（Windows 大小写 alias 回退，+3 回归）也已完成。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **402 tests / 358 pass / 44 skip / 0 fail**（Windows 11，约 44.8s）。
+> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取，+5 回归）与 L-23（Windows 大小写 alias 回退，+3 回归）也已完成。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **402 tests / 358 pass / 44 skip / 0 fail**（Windows 11，约 25.3s）。
 > **环境**：
 
 | 平台 | 环境 |
@@ -100,7 +100,7 @@
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
 | 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
-| 全量测试（当前工作区） | `npm test`（Windows） | **402 tests / 358 pass / 44 skip / 0 fail**（约 44.8s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
+| 全量测试（当前工作区） | `npm test`（Windows） | **402 tests / 358 pass / 44 skip / 0 fail**（约 25.3s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |

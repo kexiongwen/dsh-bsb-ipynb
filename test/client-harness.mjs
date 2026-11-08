@@ -11,12 +11,14 @@ Object.defineProperty(globalThis, 'navigator', {
 })
 
 const clientPath = fileURLToPath(new URL('../client.js', import.meta.url))
+let cachedFactory = null
 let loadCount = 0
 
 /**
  * Load the client artifact in a minimal fake browser: capture the injected
  * stylesheet, expose the plugin exports, and stub React with plain objects.
- * Each call re-imports the module with a fresh cache-busting query.
+ * The artifact is imported once; every call re-runs its factory so the tests
+ * still get fresh module state (all plugin state lives inside the factory).
  */
 export async function loadClient(reactOverrides = {}) {
   let options = null
@@ -65,10 +67,13 @@ export async function loadClient(reactOverrides = {}) {
     useSyncExternalStore() {},
     ...reactOverrides,
   }
-  await import(pathToFileURL(clientPath).href + '?test=' + Date.now() + '-' + (++loadCount))
-  assert.ok(options, 'client artifact registers a module')
-  assert.equal(options.id, 'dsh-bsb-ipynb')
-  const exports = options.factory((id) => {
+  if (!cachedFactory) {
+    await import(pathToFileURL(clientPath).href + '?test=' + Date.now() + '-' + (++loadCount))
+    assert.ok(options, 'client artifact registers a module')
+    assert.equal(options.id, 'dsh-bsb-ipynb')
+    cachedFactory = options.factory
+  }
+  const exports = cachedFactory((id) => {
     if (id === 'react') return react
     throw new Error('unexpected module: ' + id)
   })
