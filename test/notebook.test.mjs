@@ -858,6 +858,36 @@ test('notebooks saved with a byte-order mark are decoded instead of rejected', (
   assert.equal(parseNotebookBytes(broken).status, 'invalid')
 })
 
+test('invalid notebook text encodings return invalid without replacing bytes or throwing', async (t) => {
+  const notebook = emptyNotebook()
+  notebook.cells[0].source = 'ZZINVALIDZZ'
+  const utf8 = Buffer.from(JSON.stringify(notebook))
+  utf8[utf8.indexOf(Buffer.from('ZZINVALIDZZ'))] = 0xff
+  const fixtures = {
+    'utf-8': utf8,
+    'utf-8 bom': Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), utf8]),
+    'utf-16le odd byte': Buffer.from([0xff, 0xfe, 0x7b]),
+    'utf-16be odd byte': Buffer.from([0xfe, 0xff, 0x7b]),
+    'utf-16le unpaired surrogate': Buffer.from([0xff, 0xfe, 0x00, 0xd8]),
+    'utf-16be unpaired surrogate': Buffer.from([0xfe, 0xff, 0xd8, 0x00]),
+  }
+  for (const [name, buffer] of Object.entries(fixtures)) {
+    let parsed
+    assert.doesNotThrow(() => { parsed = parseNotebookBytes(buffer) }, name)
+    assert.equal(parsed.status, 'invalid', name)
+    assert.match(parsed.error, /encoding/i, name)
+    assert.equal(parsed.version, sha256(buffer), `${name} keeps the raw-byte version`)
+    assert.equal(parsed.size, buffer.length, name)
+  }
+
+  const dir = await tempDir(t)
+  const file = path.join(dir, 'odd.ipynb')
+  await writeFile(file, fixtures['utf-16be odd byte'])
+  const read = await readNotebookFile(file)
+  assert.equal(read.status, 'invalid', 'a decoding failure must not become a 404')
+  assert.match(read.error, /encoding/i)
+})
+
 test('read failure reasons classify locked and inaccessible files', () => {
   assert.equal(readFailureReason({ code: 'EBUSY' }), 'locked')
   assert.equal(readFailureReason({ code: 'EPERM' }), 'blocked')

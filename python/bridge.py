@@ -435,26 +435,25 @@ class Bridge:
                 if kc is not self.kc or self.restarting:
                     finish("interrupted", "kernel changed before the cell finished")
                     return
+                # ipykernel's interrupt handling is a no-op on Windows
+                # ("Interrupt message not supported on Windows"), so a running
+                # cell may never answer an interrupt. Check the deadline on
+                # every iteration: a stream of stale shell replies must not
+                # postpone automatic recovery by avoiding queue.Empty.
+                if self.interrupt_requested_at is not None:
+                    waited = time.monotonic() - self.interrupt_requested_at
+                    if waited > 3:
+                        restarted = self.restart()
+                        message = (
+                            "interrupt timed out; kernel restarted"
+                            if restarted
+                            else "interrupt timed out; kernel restart failed"
+                        )
+                        finish("interrupted", message, kernel_restarted=restarted)
+                        return
                 try:
                     candidate = kc.get_shell_msg(timeout=1)
                 except queue.Empty:
-                    # ipykernel's interrupt handling is a no-op on Windows
-                    # ("Interrupt message not supported on Windows"), so a
-                    # running cell may never answer an interrupt. If the user
-                    # asked for an interrupt and the kernel has been silent
-                    # past the grace period, restart the kernel so the session
-                    # cannot hang.
-                    if self.interrupt_requested_at is not None:
-                        waited = time.monotonic() - self.interrupt_requested_at
-                        if waited > 3:
-                            restarted = self.restart()
-                            message = (
-                                "interrupt timed out; kernel restarted"
-                                if restarted
-                                else "interrupt timed out; kernel restart failed"
-                            )
-                            finish("interrupted", message, kernel_restarted=restarted)
-                            return
                     continue
                 except Exception as error:
                     log("error", "shell reply lost: %s" % (error,))

@@ -1376,7 +1376,7 @@ test('sanitizeUrl keeps Windows local image paths for the local resolver', async
 
 test('makeImageResolver resolves images next to a Windows absolute notebook path', async () => {
   const { exports } = await loadClient()
-  const { makeImageResolver } = exports.__test
+  const { makeImageResolver, normalizePosix } = exports.__test
   const ctx = { betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route } }
   const scope = { sessionId: 's1', cwd: 'C:\\Users\\me\\notes' }
   const filePath = (resolved) => new URL(resolved).searchParams.get('path')
@@ -1384,6 +1384,13 @@ test('makeImageResolver resolves images next to a Windows absolute notebook path
   assert.equal(filePath(resolve('images/plot.png')), 'C:/Users/me/notes/nb/images/plot.png')
   assert.equal(new URL(resolve('images/plot.png')).searchParams.get('sessionId'), 's1')
   assert.equal(filePath(resolve('C:\\pics\\a.png')), 'C:/pics/a.png')
+
+  // UNC keeps its //server/share prefix for both direct and notebook-relative images.
+  assert.equal(normalizePosix('\\\\server\\share\\plot.png'), '//server/share/plot.png')
+  assert.equal(normalizePosix('//server/share/./plot.png'), '//server/share/plot.png')
+  assert.equal(filePath(resolve('\\\\server\\share\\plot.png')), '//server/share/plot.png')
+  const uncNotebook = makeImageResolver(ctx, scope, '\\\\server\\share\\notes\\demo.ipynb', {})
+  assert.equal(filePath(uncNotebook('images/plot.png')), '//server/share/notes/images/plot.png')
 
   // POSIX absolute and session-relative notebook paths keep their old behavior.
   const posix = makeImageResolver(ctx, scope, '/Users/me/notes/demo.ipynb', {})

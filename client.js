@@ -683,9 +683,11 @@ window.__ModuleLoader__.load({
     }
 
     function normalizePosix(value) {
-      const parts = String(value ?? '').replace(/\\/g, '/').split('/')
+      const normalized = String(value ?? '').replace(/\\/g, '/')
+      const parts = normalized.split('/')
       const output = []
       const absolute = parts[0] === ''
+      const unc = normalized.startsWith('//') && !normalized.startsWith('///')
       for (const part of parts) {
         if (!part || part === '.') continue
         if (part === '..') {
@@ -695,7 +697,7 @@ window.__ModuleLoader__.load({
         }
         output.push(part)
       }
-      return (absolute ? '/' : '') + output.join('/')
+      return (unc ? '//' : absolute ? '/' : '') + output.join('/')
     }
 
     function dirnamePosix(value) {
@@ -1813,8 +1815,20 @@ window.__ModuleLoader__.load({
         setRunAllRunning(false)
         setSaveState('idle')
         setCapacityBlocked(false)
+        // Every adoption, including an invalid/error response, starts a new
+        // document generation. Failure and conflict state belongs to the old one.
+        dirtyRef.current = false
+        setDirty(false)
+        setConflict(null)
+        setAutosaveBlocked(false)
+        setAutosaveDelay(AUTOSAVE_MS)
+        failedSnapshotRef.current = null
+        setEditingCell(null)
+        setEmptyFile(false)
+        setBanner(null)
         if (!data || typeof data !== 'object') {
           setLoadStatus('error')
+          setLoadError(null)
           setLoadMessage(t('invalidResponse'))
           notebookRef.current = null
           setNotebook(null)
@@ -1830,11 +1844,6 @@ window.__ModuleLoader__.load({
           setVersion(data.version || '')
           versionRef.current = data.version || ''
           setEmptyFile(Boolean(data.emptyFile))
-          dirtyRef.current = false
-          setDirty(false)
-          setConflict(null)
-          setAutosaveBlocked(false)
-          failedSnapshotRef.current = null
           setBanner(data.emptyFile ? { kind: 'info', reason: 'empty-file', key: 'emptyFile' } : null)
           return
         }
@@ -1845,7 +1854,6 @@ window.__ModuleLoader__.load({
         setLoadStatus(data.status || 'error')
         setLoadError(data.error || null)
         setLoadMessage(data.message || null)
-        setBanner(null)
       }, [invalidateDocumentWork])
 
       useEffect(() => {
@@ -1860,8 +1868,8 @@ window.__ModuleLoader__.load({
         forceReloadRef.current = true
         // The host owns the unsaved-changes confirmation and the reload itself.
         // Delegating avoids overwriting the draft when the user cancels the
-        // host's "discard changes?" prompt. Conflict/banner state is only
-        // cleared by a successful adopt(), so a cancelled prompt keeps the
+        // host's "discard changes?" prompt. Conflict/banner state is cleared
+        // only when an adopt actually occurs, so a cancelled prompt keeps the
         // conflict explanation and keeps saving blocked.
         if (typeof onReload === 'function') {
           onReload()
@@ -1884,7 +1892,14 @@ window.__ModuleLoader__.load({
         setLoadMessage(null)
         dirtyRef.current = false
         setDirty(false)
+        setConflict(null)
         setAutosaveBlocked(true)
+        setAutosaveDelay(AUTOSAVE_MS)
+        failedSnapshotRef.current = null
+        setEditingCell(null)
+        setEmptyFile(false)
+        // Keep version/versionRef from the failed read: the first save must CAS
+        // against the invalid/unsupported file that is still on disk.
         setBanner({ kind: 'info', reason: 'empty-file', key: 'emptyHint' })
       }, [invalidateDocumentWork])
 
@@ -2331,14 +2346,19 @@ window.__ModuleLoader__.load({
       }, [ctx, path, scope, refreshKernel, bumpKernelEpoch])
 
       const shutdown = useCallback(async () => {
+        const seq = documentSeqRef.current
         bumpKernelEpoch()
+        const epoch = kernelEpochRef.current
+        const isCurrentShutdown = () => documentSeqRef.current === seq && kernelEpochRef.current === epoch
         try {
           await postJson(ctx, 'shutdown', { sessionId: scope && scope.sessionId, path })
-          // A status GET that raced the shutdown request must not repaint the
-          // kernel as running after the authoritative off state is committed.
+          // The response is authoritative only if no newer run/reload/restart
+          // changed the document or kernel generation while it was in flight.
+          if (!isCurrentShutdown()) return
           bumpKernelEpoch()
           setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
         } catch (error) {
+          if (!isCurrentShutdown()) return
           if (error && error.code === 'kernel-unavailable') {
             bumpKernelEpoch()
             setKernel({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })

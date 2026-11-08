@@ -49,6 +49,8 @@
     "cordis.patch.yml",
     "examples",
     "README.md",
+    "README_ZH.md",
+    "docs/screenshot.png",
     "LICENSE",
     "NOTICE"
   ],

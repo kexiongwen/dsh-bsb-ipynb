@@ -290,6 +290,11 @@ function mountNotebook(t, options = {}) {
       needsRender = true
       flush()
     },
+    receive(data) {
+      props = { ...props, customData: data }
+      needsRender = true
+      flush()
+    },
     cancelReload() { api.toolbar.onReload(); flush() },
     saveButton() {
       const toolbar = component('Toolbar')
@@ -1222,6 +1227,45 @@ test('the open-as-empty hint also clears after a successful save', async (t) => 
   assert.equal(app.toolbar.dirty, false)
 })
 
+test('error adoption clears dirty state so a later host snapshot can be adopted', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('unsaved draft')
+  app.reload({ status: 'invalid', error: 'broken', version: 'v2' })
+  await app.settle()
+
+  app.receive(notebookData('RECOVERED', 'v3'))
+  await app.settle()
+  assert.equal(app.cell.cell.outputs[0].text, 'RECOVERED', 'the invalid response must not leave the old draft blocking adoption')
+  assert.equal(app.toolbar.dirty, false)
+})
+
+test('open as empty clears an old conflict and preserves the invalid file version for CAS', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('conflicted draft')
+  const failed = app.save()
+  failed.resolve(response({ ok: false, error: { code: 'write-conflict', message: 'conflict', details: { version: 'v2' } } }, 409))
+  await app.settle()
+  app.reload({ status: 'invalid', error: 'broken', version: 'v3' })
+  await app.settle()
+
+  const open = app.find((value) => value.props?.title === 'Open as empty notebook')
+  assert.ok(open)
+  open.props.onClick()
+  await app.settle()
+  assert.equal(app.toolbar.conflict, null)
+  assert.equal(app.toolbar.dirty, false)
+  app.edit('replacement draft')
+  const request = app.save()
+  assert.equal(app.requests('save').length, 2, 'the old conflict must not block the replacement document')
+  assert.equal(request.body.baseVersion, 'v3', 'the first save still guards the invalid on-disk file')
+  request.resolve(response({ ok: true, value: { version: 'v4', size: 42 } }))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, false)
+  assert.equal(app.banner, null)
+})
+
 test('a malformed attachment reference degrades instead of crashing the render', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
@@ -1480,6 +1524,82 @@ test('a status response that raced shutdown cannot revive the kernel', async (t)
   await app.settle()
   assert.equal(app.toolbar.kernel.running, false, 'shutdown keeps the authoritative off state')
   assert.equal(app.toolbar.kernel.busy, false)
+})
+
+for (const outcome of ['success', 'kernel-unavailable']) {
+  test(`a late shutdown ${outcome} cannot overwrite a newer executing kernel`, async (t) => {
+    const app = mountNotebook(t, { deferStatus: true })
+    await app.settle()
+    app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
+    await app.settle()
+    app.toolbar.onShutdown()
+    const execution = app.run()
+    const stream = executionStream()
+    execution.resolve(stream.response)
+    await app.settle()
+    stream.emit({ type: 'status', cell_id: 'cell-1', execution_state: 'busy' })
+    await app.settle()
+
+    const shutdown = app.requests('shutdown')[0]
+    if (outcome === 'success') shutdown.resolve(response({ ok: true, value: {} }))
+    else shutdown.resolve(response({ ok: false, error: { code: 'kernel-unavailable', message: 'already stopped' } }, 503))
+    await app.settle()
+    assert.equal(app.toolbar.running, true)
+    assert.equal(app.toolbar.kernel.running, true, 'the new run keeps its authoritative running state')
+    assert.equal(app.toolbar.kernel.busy, true)
+    assert.equal(app.toolbar.kernel.executionState, 'busy')
+    stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: true, execution_count: 2 })
+    stream.end()
+    await app.settle()
+  })
+}
+
+test('a late shutdown success cannot overwrite the kernel state after reload', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
+  await app.settle()
+  app.toolbar.onShutdown()
+  app.reload()
+  await app.settle()
+  const kernelAfterReload = JSON.stringify(app.toolbar.kernel)
+
+  app.requests('shutdown')[0].resolve(response({ ok: true, value: {} }))
+  await app.settle()
+  assert.equal(JSON.stringify(app.toolbar.kernel), kernelAfterReload)
+})
+
+test('a late shutdown success cannot overwrite a newer restart', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
+  await app.settle()
+  app.toolbar.onShutdown()
+  app.toolbar.onRestart()
+  await app.settle()
+  app.requests('restart')[0].resolve(response({ ok: true, value: { python: '/python2' } }))
+  await app.settle()
+  const fresh = app.requests('status').at(-1)
+  fresh.resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python2', executionState: 'idle' } }))
+  await app.settle()
+
+  app.requests('shutdown')[0].resolve(response({ ok: true, value: {} }))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, true)
+  assert.equal(app.toolbar.kernel.python, '/python2')
+})
+
+test('a current kernel-unavailable shutdown response still commits the off state', async (t) => {
+  const app = mountNotebook(t, { deferStatus: true })
+  await app.settle()
+  app.requests('status')[0].resolve(response({ ok: true, value: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' } }))
+  await app.settle()
+  app.toolbar.onShutdown()
+  app.requests('shutdown')[0].resolve(response({ ok: false, error: { code: 'kernel-unavailable', message: 'already stopped' } }, 503))
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, false)
+  assert.equal(app.toolbar.kernel.busy, false)
+  assert.equal(app.toolbar.kernel.executionState, 'none')
 })
 
 test('restart advances the kernel generation and refreshes with the replacement state', async (t) => {

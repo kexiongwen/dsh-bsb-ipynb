@@ -380,6 +380,24 @@ test('readJsonBody enforces its byte limit', async () => {
   await assert.rejects(readJsonBody(req, 4), (error) => error.code === 'too-large')
 })
 
+test('readJsonBody and POST routes reject invalid UTF-8 as a bad request', async () => {
+  const malformed = Buffer.from(JSON.stringify({ path: 'ZZINVALIDZZ.ipynb' }))
+  malformed[malformed.indexOf(Buffer.from('ZZINVALIDZZ'))] = 0xff
+  const request = () => {
+    const req = makeReq({ method: 'POST', url: '/ipynb/read' })
+    req[Symbol.asyncIterator] = async function* () { yield malformed }
+    return req
+  }
+  await assert.rejects(readJsonBody(request()), (error) => (
+    error.code === 'bad-request' && error.status === 400 && /valid UTF-8/.test(error.message)
+  ))
+
+  const { state, json } = await invoke(makeCtx(), makeKernels(), request())
+  assert.equal(state.status, 400)
+  assert.equal(json.error.code, 'bad-request')
+  assert.match(json.error.message, /valid UTF-8/)
+})
+
 test('execute streams NDJSON events', async (t) => {
   const discovered = await discoverInterpreters()
   if (!discovered.default) {

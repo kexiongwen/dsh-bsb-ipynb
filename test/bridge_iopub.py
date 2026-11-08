@@ -538,6 +538,75 @@ class IOPubTests(unittest.TestCase):
         self.assertEqual(replies[0]["status"], "interrupted")
         self.assertTrue(replies[0]["kernel_restarted"])
 
+    def test_interrupt_deadline_is_not_postponed_by_stale_shell_replies(self):
+        clock = [10.0]
+        restarts = []
+        original_monotonic = bridge_module.time.monotonic
+        original_restart = self.bridge.restart
+
+        class Session:
+            def msg(self, _msg_type, content):
+                return content
+
+        class Control:
+            def send(self, _msg):
+                pass
+
+        class StaleClient(ControlledClient):
+            def __init__(self):
+                super().__init__()
+                self.session = Session()
+                self.control_channel = Control()
+                self.release_stale = threading.Event()
+                self.stale_replies = 0
+
+            def get_shell_msg(self, timeout=1):
+                if self.stale_replies == 0:
+                    self.shell_entered.set()
+                    if not self.release_stale.wait(3):
+                        raise RuntimeError("test did not release stale replies")
+                self.stale_replies += 1
+                if self.stale_replies > 10:
+                    # Let the unfixed implementation settle with the wrong reply
+                    # instead of leaving an infinite test thread behind.
+                    raise RuntimeError("stale replies bypassed the interrupt deadline")
+                clock[0] += 1.0
+                return {
+                    "header": {"msg_type": "execute_reply"},
+                    "parent_header": {"msg_id": "stale-request"},
+                    "content": {"status": "ok", "execution_count": 1},
+                }
+
+        def restart():
+            restarts.append(clock[0] - self.bridge.interrupt_requested_at)
+            return True
+
+        self.client = StaleClient()
+        self.bridge.kc = self.client
+        self.bridge.restart = restart
+        self.releases.append(self.client.release_stale)
+        bridge_module.time.monotonic = lambda: clock[0]
+        try:
+            run = self.start_run()
+            self.wait(self.client.shell_entered)
+            self.bridge.interrupt()
+            self.client.release_stale.set()
+            self.join(run)
+        finally:
+            self.client.release_stale.set()
+            bridge_module.time.monotonic = original_monotonic
+            self.bridge.restart = original_restart
+        self.assertEqual(restarts, [4.0])
+        self.assertEqual(self.client.stale_replies, 4,
+                         "the deadline must win even though every shell poll returns stale output")
+        replies = [event for event in self.events if event["type"] == "execute_reply"]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0]["status"], "interrupted")
+        self.assertEqual(replies[0]["error"], "interrupt timed out; kernel restarted")
+        self.assertTrue(replies[0]["kernel_restarted"])
+        self.assertEqual(self.bridge.pending, {})
+        self.assertEqual(self.bridge.idle_events, {})
+
     def test_concurrent_restarts_share_one_restart_and_echo_operation_ids(self):
         entered = threading.Event()
         release = threading.Event()
