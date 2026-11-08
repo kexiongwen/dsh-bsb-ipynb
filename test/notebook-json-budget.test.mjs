@@ -30,8 +30,9 @@ function notebook(value = null, attachment = false, mime = 'application/json') {
 }
 
 function expandedNotebook() {
-  // Each payload obeys 100 levels / 10,000 nodes and the complete notebook is
-  // below one million nodes. Only pretty-print indentation exceeds 32 MiB.
+  // Each payload obeys the JSON MIME limits (100 levels / 250,000 nodes) and
+  // the complete notebook stays below one million nodes. Only pretty-print
+  // indentation exceeds 32 MiB.
   const value = nested(90, new Array(9_000).fill(null))
   const result = notebook(value)
   result.cells = Array.from({ length: 21 }, (_, index) => ({ ...result.cells[0], id: 'cell-' + index }))
