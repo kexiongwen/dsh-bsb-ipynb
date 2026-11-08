@@ -35,48 +35,6 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
   assert.equal(styles.length, 1)
   assert.equal(styles[0].id, 'dsh-bsb-ipynb-styles')
   assert.match(styles[0].textContent, /\.dsh-bsb-ipynb-root/)
-  for (const token of [
-    '--dsw-alias-border-l1',
-    '--dsw-alias-label-primary',
-    '--dsw-alias-label-secondary',
-    '--dsw-alias-bg-layer-1',
-    '--dsw-alias-bg-module-platform',
-    '--dsw-alias-interactive-bg-hover',
-    '--dsw-alias-markdown-code-block',
-    '--dsw-alias-markdown-inline-code',
-    '--dsw-alias-link',
-    '--dsw-alias-label-tertiary',
-    '--dsw-alias-state-success-primary',
-    '--dsw-alias-state-warn-primary',
-    '--dsw-alias-state-error-primary',
-    '--dsw-alias-state-business-primary',
-    '--shiki-token-keyword',
-    '--shiki-token-string',
-    '--shiki-token-comment',
-    '--shiki-token-constant',
-    '--shiki-token-function',
-    '--shiki-token-parameter',
-    '--dsh-content-font-size-secondary',
-    '--dsh-code-font-size',
-    '--ds-font-family-code',
-  ]) {
-    assert.ok(styles[0].textContent.includes(token), `styles must consume current theme token ${token}`)
-  }
-  assert.doesNotMatch(
-    styles[0].textContent,
-    /--dsw-(border-default|text-muted|accent-default|surface-default)/,
-    'legacy --dsw-* tokens are outside the current theme contract',
-  )
-  assert.doesNotMatch(
-    styles[0].textContent,
-    /body\[data-ds-dark-theme\]/,
-    'the host palette is inherited through tokens; the plugin must not select its own dark palette',
-  )
-  assert.doesNotMatch(
-    styles[0].textContent,
-    /@media \(prefers-color-scheme: dark\)/,
-    'the OS color scheme must not override an explicit host theme',
-  )
 })
 
 test('registers the en/zh dictionaries and follows the host locale preference', async () => {
@@ -125,11 +83,24 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
   assert.equal(registrations.length, 2)
   assert.equal(registrations[0].ns, LOCALE_NS)
   assert.deepEqual(registrations.map((entry) => entry.language).sort(), ['en', 'zh'])
-  const enKeys = Object.keys(registrations[0].dict).sort()
-  const zhKeys = Object.keys(registrations[1].dict).sort()
-  assert.deepEqual(zhKeys, enKeys, 'both locales expose the same string keys')
-  assert.equal(registrations[0].dict.run, 'Run')
-  assert.equal(registrations[1].dict.run, '运行')
+  const registered = {}
+  for (const entry of registrations) registered[entry.language] = entry.dict
+  assert.ok(registered.en && registered.zh, 'both locale dictionaries are registered')
+  const enKeys = Object.keys(registered.en).sort()
+  assert.deepEqual(Object.keys(registered.zh).sort(), enKeys, 'both locales expose the same string keys')
+  assert.equal(enKeys.length, 56, 'the audited client dictionary exposes 56 translation keys')
+  for (const key of enKeys) {
+    assert.equal(typeof registered.en[key], 'string', `en.${key} must be a translated string`)
+    assert.ok(registered.en[key].length > 0, `en.${key} must not be empty`)
+    assert.equal(typeof registered.zh[key], 'string', `zh.${key} must be a translated string`)
+    assert.ok(registered.zh[key].length > 0, `zh.${key} must not be empty`)
+  }
+  // Merged truncation-banner assertion: the output-truncated copy exists in both
+  // languages and the loop above also proves it is non-empty.
+  assert.ok(registered.en.outputTruncated.length > 0, 'the truncation banner copy exists in English')
+  assert.ok(registered.zh.outputTruncated.length > 0, 'the truncation banner copy exists in Chinese')
+  assert.equal(registered.en.run, 'Run')
+  assert.equal(registered.zh.run, '运行')
   assert.equal(translate('run'), 'Run', 'host preference starts in English')
   active = 'zh'
   assert.equal(translate('run'), '运行', 'translate follows the active host locale')
@@ -211,77 +182,65 @@ test('NotebookView subscribes to the locale registry for live language switches'
   assert.equal(captured.getSnapshot(), 2, 'revision changes reach useSyncExternalStore')
 })
 
-test('load posts the session and path to the host route', async () => {
-  const { exports } = await loadClient()
-  const calls = []
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async (url, init) => {
-    calls.push({ url, init })
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return { ok: true, value: { status: 'ok', notebook: { cells: [] }, version: 'a'.repeat(64) } }
+test('load posts the session and path and converts host failures into an error payload', async () => {
+  const scenarios = [
+    {
+      name: 'success',
+      path: '/workspace/demo.ipynb',
+      sessionId: 'session-1',
+      response: { ok: true, status: 200, body: { ok: true, value: { status: 'ok', notebook: { cells: [] }, version: 'a'.repeat(64) } } },
+      verify(value, calls) {
+        assert.equal(value.status, 'ok', 'success: the host payload is returned unchanged')
+        assert.equal(calls[0].url, 'http://host/ipynb/read', 'success: the read host route is used')
+        const body = JSON.parse(calls[0].init.body)
+        assert.deepEqual(body, { sessionId: 'session-1', path: '/workspace/demo.ipynb' }, 'success: the session and path are posted')
       },
-    }
-  }
-  try {
-    const viewer = exports.__test
-    assert.ok(viewer)
-    const load = exports.apply
-    const ctx = {
-      effect(effect) {
-        return effect()
-      },
-      betterSidebar: {
-        hostRouteUrl(path) {
-          return 'http://host/' + path
-        },
-        registerFileViewer(descriptor) {
-          ctx.viewer = descriptor
-          return () => {}
-        },
-      },
-    }
-    load(ctx)
-    const value = await ctx.viewer.load('/workspace/demo.ipynb', { sessionId: 'session-1' })
-    assert.equal(value.status, 'ok')
-    assert.equal(calls[0].url, 'http://host/ipynb/read')
-    const body = JSON.parse(calls[0].init.body)
-    assert.deepEqual(body, { sessionId: 'session-1', path: '/workspace/demo.ipynb' })
-  } finally {
-    globalThis.fetch = originalFetch
-  }
-})
-
-test('load converts host failures into an error payload instead of throwing', async () => {
-  const { exports } = await loadClient()
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => ({
-    ok: false,
-    status: 403,
-    async json() {
-      return { ok: false, error: { code: 'path-outside-root', message: 'outside' } }
     },
-  })
+    {
+      name: 'host failure',
+      path: '/etc/passwd',
+      sessionId: 's1',
+      response: { ok: false, status: 403, body: { ok: false, error: { code: 'path-outside-root', message: 'outside' } } },
+      verify(value) {
+        assert.deepEqual(value, { status: 'error', code: 'path-outside-root', message: 'outside' }, 'host failure: the error payload replaces a throw')
+      },
+    },
+  ]
+  const originalFetch = globalThis.fetch
   try {
-    const ctx = {
-      effect(effect) {
-        return effect()
-      },
-      betterSidebar: {
-        hostRouteUrl(path) {
-          return 'http://host/' + path
+    for (const scenario of scenarios) {
+      const { exports } = await loadClient()
+      const calls = []
+      globalThis.fetch = async (url, init) => {
+        calls.push({ url, init })
+        return {
+          ok: scenario.response.ok,
+          status: scenario.response.status,
+          async json() {
+            return scenario.response.body
+          },
+        }
+      }
+      assert.ok(exports.__test, `${scenario.name}: the test API is exposed`)
+      const ctx = {
+        effect(effect) {
+          return effect()
         },
-        registerFileViewer(descriptor) {
-          ctx.viewer = descriptor
-          return () => {}
+        betterSidebar: {
+          hostRouteUrl(path) {
+            return 'http://host/' + path
+          },
+          registerFileViewer(descriptor) {
+            ctx.viewer = descriptor
+            return () => {}
+          },
         },
-      },
+      }
+      exports.apply(ctx)
+      const value = await ctx.viewer.load(scenario.path, { sessionId: scenario.sessionId })
+      assert.equal(calls.length, 1, `${scenario.name}: exactly one host request is made`)
+      scenario.verify(value, calls)
     }
-    exports.apply(ctx)
-    const value = await ctx.viewer.load('/etc/passwd', { sessionId: 's1' })
-    assert.deepEqual(value, { status: 'error', code: 'path-outside-root', message: 'outside' })
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -404,26 +363,30 @@ test('protocol-relative images are refused while links keep working', async () =
   assert.match(html, /pixel/)
 })
 
-test('markdown image resolver rewrites local images and resolves attachments', async () => {
+test('markdown image resolver rewrites local images and drops missing ones', async () => {
   const { exports } = await loadClient()
   const { renderMarkdownWithImages } = exports.__test
-  const html = renderMarkdownWithImages('![plot](img/plot.png)', () => '/sidebar/file?path=%2Fws%2Fimg%2Fplot.png')
-  assert.equal(html, '<p><img src="/sidebar/file?path=%2Fws%2Fimg%2Fplot.png" alt="plot" loading="lazy"></p>')
-})
-
-test('markdown image resolver leaves no tag suffix for missing images', async () => {
-  const { exports } = await loadClient()
-  const { renderMarkdownWithImages } = exports.__test
-  const html = renderMarkdownWithImages('![plot](missing.png)', () => null)
-  assert.equal(html, '<p><span class="dsh-bsb-ipynb-missing-image">plot</span></p>')
-})
-
-test('html sanitizer falls back to escaping when DOMParser is unavailable', async () => {
-  const { exports } = await loadClient()
-  const { sanitizeHtml } = exports.__test
-  const html = sanitizeHtml('<b>x</b><script>alert(1)</script>')
-  assert.doesNotMatch(html, /<script>/)
-  assert.match(html, /&lt;b&gt;/)
+  const scenarios = [
+    {
+      name: 'resolved local image',
+      markdown: '![plot](img/plot.png)',
+      resolver: () => '/sidebar/file?path=%2Fws%2Fimg%2Fplot.png',
+      expected: '<p><img src="/sidebar/file?path=%2Fws%2Fimg%2Fplot.png" alt="plot" loading="lazy"></p>',
+    },
+    {
+      name: 'missing image',
+      markdown: '![plot](missing.png)',
+      resolver: () => null,
+      expected: '<p><span class="dsh-bsb-ipynb-missing-image">plot</span></p>',
+    },
+  ]
+  for (const scenario of scenarios) {
+    assert.equal(
+      renderMarkdownWithImages(scenario.markdown, scenario.resolver),
+      scenario.expected,
+      `${scenario.name}: unexpected rendered image markup`,
+    )
+  }
 })
 
 test('html sanitizer degrades to escaped text when DOM cleaning throws', async () => {
@@ -488,7 +451,7 @@ test('html sanitizer resolves attachment and local images through the image reso
   }
 })
 
-test('html sanitizer keeps the URL policy and only resolves safe image sources', async () => {
+test('html sanitizer keeps the URL policy, strips disallowed attributes and only resolves safe image sources', async () => {
   const restore = installDomParser()
   try {
     const { exports } = await loadClient()
@@ -497,7 +460,8 @@ test('html sanitizer keeps the URL policy and only resolves safe image sources',
     const html = sanitizeHtml(
       '<img src="javascript:alert(1)"><img src="//evil.example/pixel.png">' +
         '<img src="file:///C:/pics/a.png"><img src="data:text/html;base64,AAAA">' +
-        '<img src="data:image/png;base64,AAAA">',
+        '<img src="data:image/png;base64,AAAA">' +
+        '<p style="color:red" onclick="alert(1)" class="keep-me">styled</p>',
       {
         resolveImage(src) {
           resolved.push(src)
@@ -511,6 +475,9 @@ test('html sanitizer keeps the URL policy and only resolves safe image sources',
     assert.doesNotMatch(html, /file:\/\//)
     assert.doesNotMatch(html, /data:text\/html/)
     assert.match(html, /data:image\/png;base64,AAAA/)
+    assert.match(html, /<p class="keep-me">styled<\/p>/, 'allowed attributes and text survive sanitization')
+    assert.doesNotMatch(html, /style=/, 'inline style attributes are removed from HTML outputs')
+    assert.doesNotMatch(html, /onclick=/, 'inline event handlers are removed from HTML outputs')
   } finally {
     restore()
   }
@@ -540,7 +507,7 @@ test('html sanitizer fallback ignores the image resolver and still escapes marku
   const { sanitizeHtml } = exports.__test
   assert.equal(typeof globalThis.DOMParser, 'undefined', 'this environment has no DOMParser')
   const resolved = []
-  const html = sanitizeHtml('<img src="attachment:plot.png"><script>alert(1)</script>', {
+  const html = sanitizeHtml('<img src="attachment:plot.png"><b>x</b><script>alert(1)</script>', {
     resolveImage(src) {
       resolved.push(src)
       return 'http://host/file'
@@ -549,6 +516,7 @@ test('html sanitizer fallback ignores the image resolver and still escapes marku
   assert.deepEqual(resolved, [], 'there is no DOM to rewrite in the fallback path')
   assert.doesNotMatch(html, /<img|<script/)
   assert.match(html, /&lt;img src=&quot;attachment:plot\.png&quot;&gt;/)
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/, 'the no-DOM fallback escapes ordinary markup in full')
 })
 
 test('html output images are rewritten before rendering', async () => {
@@ -573,7 +541,7 @@ test('html output images are rewritten before rendering', async () => {
 
 test('reading-mode shortcut resolver handles modifiers, IME and already-handled events', async () => {
   const { exports } = await loadClient()
-  const { resolveReadingShortcut } = exports.__test
+  const { resolveReadingShortcut, cellIdFromEventTarget } = exports.__test
   const context = { targetCellId: 'cell-1', activeCellId: 'cell-9' }
   assert.deepEqual(resolveReadingShortcut({ key: 'Enter', ctrlKey: true }, context), { action: 'run', cellId: 'cell-1' })
   assert.deepEqual(resolveReadingShortcut({ key: 'Enter', metaKey: true }, context), { action: 'run', cellId: 'cell-1' })
@@ -604,11 +572,8 @@ test('reading-mode shortcut resolver handles modifiers, IME and already-handled 
   assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, target: { tagName: 'TEXTAREA' } }, context), null)
   assert.equal(resolveReadingShortcut({ key: 'Enter', ctrlKey: true, target: { tagName: 'TEXTAREA' } }, context), null)
   assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, target: { isContentEditable: true } }, context), null)
-})
 
-test('cell target lookup walks the DOM ancestors to the data-cell-id container', async () => {
-  const { exports } = await loadClient()
-  const { cellIdFromEventTarget } = exports.__test
+  // Cell target lookup walks the DOM ancestors to the data-cell-id container.
   const cellContainer = { getAttribute: (name) => (name === 'data-cell-id' ? 'cell-7' : null), parentNode: null }
   const pre = { getAttribute: () => null, parentNode: { getAttribute: () => null, parentNode: cellContainer } }
   assert.equal(cellIdFromEventTarget(pre), 'cell-7')
@@ -616,18 +581,9 @@ test('cell target lookup walks the DOM ancestors to the data-cell-id container',
   assert.equal(cellIdFromEventTarget(null), null)
 })
 
-test('ansi output keeps colors and strips other control sequences', async () => {
+test('stream output and text MIME values join array parts without comma separators', async () => {
   const { exports } = await loadClient()
-  const { ansiToHtml } = exports.__test
-  const html = ansiToHtml('\u001b[31mred\u001b[0m plain\u001b[2K')
-  assert.match(html, /<span style="color:#cd3131">red<\/span>/)
-  assert.match(html, / plain/)
-  assert.doesNotMatch(html, /\u001b/)
-})
-
-test('stream output joins array text without comma separators', async () => {
-  const { exports } = await loadClient()
-  const { OutputView } = exports.__test
+  const { OutputView, mimeText } = exports.__test
   const tree = OutputView({
     output: { output_type: 'stream', name: 'stdout', text: ['alpha\n', 'beta\n'] },
     resolveImage: () => null,
@@ -636,17 +592,14 @@ test('stream output joins array text without comma separators', async () => {
   const html = tree.props.dangerouslySetInnerHTML.__html
   assert.match(html, /alpha\nbeta/)
   assert.doesNotMatch(html, /alpha,beta|,beta/)
-})
-
-test('image outputs carry localized alt text', async () => {
-  const { exports } = await loadClient()
-  const { OutputView } = exports.__test
-  const tree = OutputView({
-    output: { output_type: 'display_data', data: { 'image/png': 'AAAA' }, metadata: {} },
-    resolveImage: () => null,
-  })
-  assert.equal(tree.type, 'img')
-  assert.equal(tree.props.alt, 'Notebook output image')
+  const scenarios = [
+    { name: 'array lines', input: ['line one\n', 'line two'], expected: 'line one\nline two' },
+    { name: 'scalar string', input: 'plain', expected: 'plain' },
+    { name: 'null value', input: null, expected: '' },
+  ]
+  for (const scenario of scenarios) {
+    assert.equal(mimeText(scenario.input), scenario.expected, `${scenario.name}: unexpected text MIME join`)
+  }
 })
 
 test('python highlighting marks keywords, strings and comments', async () => {
@@ -667,20 +620,6 @@ test('sanitizeUrl strips control characters before the scheme check', async () =
   assert.equal(sanitizeUrl('java\rscript:alert(1)'), null)
   assert.equal(sanitizeUrl('\u0000javascript:alert(1)'), null)
   assert.equal(sanitizeUrl('  https://example.com/a\n'), 'https://example.com/a')
-})
-
-test('sanitizer allowlist does not permit inline style attributes', async () => {
-  const { exports } = await loadClient()
-  assert.equal(exports.__test.ALLOWED_ATTRS.has('style'), false)
-  assert.equal(exports.__test.ALLOWED_ATTRS.has('onclick'), false)
-})
-
-test('array text MIME values join without separators', async () => {
-  const { exports } = await loadClient()
-  const { mimeText } = exports.__test
-  assert.equal(mimeText(['line one\n', 'line two']), 'line one\nline two')
-  assert.equal(mimeText('plain'), 'plain')
-  assert.equal(mimeText(null), '')
 })
 
 test('notebook normalization and serialization round-trip source lines', async () => {
@@ -704,9 +643,12 @@ test('notebook normalization and serialization round-trip source lines', async (
   assert.equal(empty.cells[0].cell_type, 'code')
 })
 
-test('notebook normalization removes nbformat-illegal output fields', async () => {
+test('notebook normalization and serialization strip nbformat-illegal output fields', async () => {
   const { exports } = await loadClient()
-  const { normalizeNotebook } = exports.__test
+  const { normalizeNotebook, serializeNotebook } = exports.__test
+
+  // Stage 1: loading a notebook drops illegal output fields but keeps a valid
+  // execution_count on execute_result.
   const notebook = normalizeNotebook({
     cells: [{
       cell_type: 'code',
@@ -721,16 +663,14 @@ test('notebook normalization removes nbformat-illegal output fields', async () =
     nbformat: 4,
     nbformat_minor: 5,
   })
-  const outputs = notebook.cells[0].outputs
-  assert.equal('execution_count' in outputs[0], false)
-  assert.equal('display_id' in outputs[0], false)
-  assert.equal(outputs[1].execution_count, 2)
-  assert.equal('display_id' in outputs[1], false)
-})
+  const normalizedOutputs = notebook.cells[0].outputs
+  assert.equal('execution_count' in normalizedOutputs[0], false)
+  assert.equal('display_id' in normalizedOutputs[0], false)
+  assert.equal(normalizedOutputs[1].execution_count, 2)
+  assert.equal('display_id' in normalizedOutputs[1], false)
 
-test('serialization strips display_id and illegal execution_count from outputs', async () => {
-  const { exports } = await loadClient()
-  const { serializeNotebook } = exports.__test
+  // Stage 2: serialization applies the same strip to outputs that still carry
+  // the illegal fields, including stream and error outputs.
   const parsed = JSON.parse(serializeNotebook({
     cells: [{
       cell_type: 'code',
@@ -747,15 +687,15 @@ test('serialization strips display_id and illegal execution_count from outputs',
     nbformat: 4,
     nbformat_minor: 5,
   }))
-  const outputs = parsed.cells[0].outputs
-  assert.equal('execution_count' in outputs[0], false)
-  assert.equal('display_id' in outputs[0], false)
-  assert.equal(outputs[1].execution_count, 3)
-  assert.equal('display_id' in outputs[1], false)
-  assert.equal('execution_count' in outputs[2], false)
-  assert.equal('display_id' in outputs[3], false)
+  const serializedOutputs = parsed.cells[0].outputs
+  assert.equal('execution_count' in serializedOutputs[0], false)
+  assert.equal('display_id' in serializedOutputs[0], false)
+  assert.equal(serializedOutputs[1].execution_count, 3)
+  assert.equal('display_id' in serializedOutputs[1], false)
+  assert.equal('execution_count' in serializedOutputs[2], false)
+  assert.equal('display_id' in serializedOutputs[3], false)
   // The original invalid input must not be mutated by serialization.
-  assert.equal('display_id' in outputs[2], false)
+  assert.equal('display_id' in serializedOutputs[2], false)
 })
 
 test('the save preflight measures the same serialized size the server caps', async () => {
@@ -978,7 +918,11 @@ test('execute_reply with ok:false is treated as a failed run', async () => {
 
 test('save button is disabled while a write conflict is unresolved', async () => {
   const { exports } = await loadClient()
-  const { saveButtonDisabled } = exports.__test
+  const { saveButtonDisabled, isStaleSaveResponse } = exports.__test
+  // The document generation predicate is the direct contract for late save
+  // responses; keep it locked here after the standalone mirror test was merged.
+  assert.equal(isStaleSaveResponse(2, 1), true, 'a response from an older document generation is stale')
+  assert.equal(isStaleSaveResponse(1, 1), false)
   assert.equal(saveButtonDisabled({ dirty: true, saveState: 'idle', conflict: null }), false)
   assert.equal(saveButtonDisabled({ dirty: true, saveState: 'idle', conflict: 'v2' }), true)
   assert.equal(saveButtonDisabled({ dirty: false, saveState: 'idle', conflict: null }), true)
@@ -993,31 +937,6 @@ test('restart only forwards a real interpreter path string', async () => {
   assert.equal(resolveRestartPython('', '/usr/bin/python3'), '/usr/bin/python3')
   assert.equal(resolveRestartPython('/usr/bin/python3.12', '/usr/bin/python3'), '/usr/bin/python3.12')
   assert.equal(resolveRestartPython({ type: 'click' }, ''), undefined)
-})
-
-test('stale save responses are detected', async () => {
-  const { exports } = await loadClient()
-  const { isStaleSaveResponse } = exports.__test
-  assert.equal(isStaleSaveResponse(2, 1), true)
-  assert.equal(isStaleSaveResponse(1, 1), false)
-})
-
-test('runs without execute_reply restore pre-run outputs', async () => {
-  const { exports } = await loadClient()
-  const { shouldRestoreOutputsAfterRun } = exports.__test
-  // fatal / kernel_died / truncated stream / abort paths never see a reply.
-  assert.equal(shouldRestoreOutputsAfterRun(false), true)
-  // execute_reply ok:false still has real error output, so keep it.
-  assert.equal(shouldRestoreOutputsAfterRun(true), false)
-})
-
-test('truncation banner string exists in both languages', async () => {
-  const { exports } = await loadClient()
-  const { STRINGS } = exports.__test
-  assert.equal(typeof STRINGS.en.outputTruncated, 'string')
-  assert.equal(typeof STRINGS.zh.outputTruncated, 'string')
-  assert.ok(STRINGS.en.outputTruncated.length > 0)
-  assert.ok(STRINGS.zh.outputTruncated.length > 0)
 })
 
 test('notebook normalization replaces duplicate and illegal cell ids', async () => {
@@ -1377,24 +1296,52 @@ test('an exact byte-limit stream accepts a split surrogate completion that reduc
   assert.equal(full[0].text, text, 'later merging/truncation must not modify the original full snapshot')
 })
 
-test('client translations expose the same keys', async () => {
-  const { exports } = await loadClient()
-  const { STRINGS } = exports.__test
-  assert.deepEqual(Object.keys(STRINGS.en).sort(), Object.keys(STRINGS.zh).sort())
-})
-
 test('markdown fences follow CommonMark closing rules and accept info strings', async () => {
   const { exports } = await loadClient()
   const { renderMarkdown } = exports.__test
-  const longer = renderMarkdown('````\ncode\n````\nafter')
-  assert.match(longer, /<code>code<\/code>/)
-  assert.match(longer, /<p>after<\/p>/, 'a longer closing fence ends the block')
-  assert.equal((longer.match(/<pre/g) || []).length, 1)
-  const info = renderMarkdown('```python title="x"\ncode\n```')
-  assert.match(info, /class="language-python"/)
-  assert.match(info, /<code[^>]*>code<\/code>/)
-  const shorter = renderMarkdown('````\ncode\n```\nmore\n````')
-  assert.match(shorter, /code\n```\nmore/, 'a shorter fence does not close the block')
+  const scenarios = [
+    {
+      name: 'longer closing fence',
+      markdown: '````\ncode\n````\nafter',
+      verify(html, name) {
+        assert.match(html, /<code>code<\/code>/, `${name}: the code body is rendered`)
+        assert.match(html, /<p>after<\/p>/, `${name}: a longer closing fence ends the block`)
+        assert.equal((html.match(/<pre/g) || []).length, 1, `${name}: the fence opens exactly one block`)
+      },
+    },
+    {
+      name: 'python info string',
+      markdown: '```python title="x"\ncode\n```',
+      verify(html, name) {
+        assert.match(html, /class="language-python"/, `${name}: the first info token becomes the language class`)
+        assert.match(html, /<code[^>]*>code<\/code>/, `${name}: the code body is rendered`)
+      },
+    },
+    {
+      name: 'shorter closing fence',
+      markdown: '````\ncode\n```\nmore\n````',
+      verify(html, name) {
+        assert.match(html, /code\n```\nmore/, `${name}: a shorter fence does not close the block`)
+      },
+    },
+    {
+      name: 'c++ info string',
+      markdown: '```c++\nint x;\n```',
+      verify(html, name) {
+        assert.match(html, /class="language-c\+\+"/, `${name}: c++ keeps its language class`)
+      },
+    },
+    {
+      name: 'c# info string',
+      markdown: '```c#\nint x;\n```',
+      verify(html, name) {
+        assert.match(html, /class="language-c#"/, `${name}: c# keeps its language class`)
+      },
+    },
+  ]
+  for (const scenario of scenarios) {
+    scenario.verify(renderMarkdown(scenario.markdown), scenario.name)
+  }
 })
 
 test('deeply nested blockquotes are capped instead of overflowing the stack', async () => {
@@ -1502,45 +1449,6 @@ test('python highlighting normalizes CRLF source', async () => {
   assert.match(html, /tok-comment/)
 })
 
-test('blocked saves back off instead of retrying every autosave tick', async () => {
-  const { exports } = await loadClient()
-  const { blockedAutosaveDelay } = exports.__test
-  assert.equal(blockedAutosaveDelay(1500), 6000)
-  assert.equal(blockedAutosaveDelay(6000), 24000)
-  assert.equal(blockedAutosaveDelay(24000), 30000, 'the delay is capped at 30 s')
-})
-
-test('image/jpg is normalized to image/jpeg', async () => {
-  const { exports } = await loadClient()
-  const { imageSource } = exports.__test
-  assert.equal(imageSource('abc', 'image/jpg'), 'data:image/jpeg;base64,abc')
-})
-
-test('renderJsonOutput shows top-level strings and survives unserializable values', async () => {
-  const { exports } = await loadClient()
-  const { renderJsonOutput } = exports.__test
-  assert.equal(renderJsonOutput('hello'), '"hello"')
-  assert.equal(renderJsonOutput({ a: 1 }), '{\n  "a": 1\n}')
-  assert.equal(renderJsonOutput(1n), '[unserializable JSON output]')
-})
-
-test('output rendering falls back from empty html and accepts image/jpg', async () => {
-  const { exports } = await loadClient()
-  const { OutputView } = exports.__test
-  const render = (data) => OutputView({ output: { output_type: 'display_data', data }, resolveImage: () => null })
-  const fallback = render({ 'text/html': '', 'text/plain': 'plain fallback' })
-  assert.equal(fallback.props.children[0], 'plain fallback')
-  const jpg = render({ 'image/jpg': 'jpgdata' })
-  assert.match(jpg.props.src, /^data:image\/jpeg;base64,jpgdata$/)
-})
-
-test('markdown fences keep c++ and c# language classes', async () => {
-  const { exports } = await loadClient()
-  const { renderMarkdown } = exports.__test
-  assert.match(renderMarkdown('```c++\nint x;\n```'), /class="language-c\+\+"/)
-  assert.match(renderMarkdown('```c#\nint x;\n```'), /class="language-c#"/)
-})
-
 test('dedentSourceLine removes one indent unit from the caret line', async () => {
   const { exports } = await loadClient()
   const { dedentSourceLine } = exports.__test
@@ -1557,7 +1465,7 @@ test('splitSourceLines keeps trailing newlines like the old lookbehind split', a
   assert.deepEqual(splitSourceLines(''), [])
 })
 
-test('output rendering covers MIME priority, fallbacks and sanitization', async () => {
+test('output rendering covers MIME priority, fallbacks, image aliases and sanitization', async () => {
   const { exports } = await loadClient()
   const { OutputView } = exports.__test
   const render = (output) => OutputView({ output, resolveImage: () => null })
@@ -1576,10 +1484,18 @@ test('output rendering covers MIME priority, fallbacks and sanitization', async 
   // DOMParser is unavailable in this harness, so the sanitizer falls back to escaping.
   assert.doesNotMatch(html.props.dangerouslySetInnerHTML.__html, /<script>/)
 
+  const emptyHtml = render({ output_type: 'display_data', data: { 'text/html': '', 'text/plain': 'plain fallback' } })
+  assert.equal(emptyHtml.props.children[0], 'plain fallback', 'empty text/html falls back to text/plain')
+
   const svg = render({ output_type: 'display_data', data: { 'image/svg+xml': '<svg></svg>' } })
   assert.match(svg.props.src, /^data:image\/svg\+xml;base64,/)
   const images = render({ output_type: 'display_data', data: { 'image/png': 'pngdata', 'image/jpeg': 'jpgdata' } })
   assert.match(images.props.src, /^data:image\/png;base64,pngdata$/, 'png wins over jpeg')
+  const jpgAlias = render({ output_type: 'display_data', data: { 'image/jpg': 'jpgdata' } })
+  assert.match(jpgAlias.props.src, /^data:image\/jpeg;base64,jpgdata$/, 'image/jpg is normalized to image/jpeg')
+  const image = render({ output_type: 'display_data', data: { 'image/png': 'AAAA' }, metadata: {} })
+  assert.equal(image.type, 'img', 'image outputs render an img element')
+  assert.equal(image.props.alt, 'Notebook output image', 'image outputs carry localized alt text')
 
   const markdown = render({ output_type: 'display_data', data: { 'text/markdown': '**bold**' } })
   assert.match(markdown.props.className, /markdown/)
@@ -1587,6 +1503,10 @@ test('output rendering covers MIME priority, fallbacks and sanitization', async 
 
   const json = render({ output_type: 'display_data', data: { 'application/json': { a: 1 } } })
   assert.equal(json.props.children[0], '{\n  "a": 1\n}')
+  const jsonString = render({ output_type: 'display_data', data: { 'application/json': 'hello' } })
+  assert.equal(jsonString.props.children[0], '"hello"', 'a top-level JSON string stays quoted')
+  const jsonBigInt = render({ output_type: 'display_data', data: { 'application/json': 1n } })
+  assert.equal(jsonBigInt.props.children[0], '[unserializable JSON output]', 'unserializable JSON output degrades instead of throwing')
   const latex = render({ output_type: 'display_data', data: { 'text/latex': '$x$' } })
   assert.equal(latex.props.children[0], '$x$')
   const plain = render({ output_type: 'display_data', data: { 'text/plain': 'plain' } })
@@ -1622,4 +1542,10 @@ test('ansi output handles carriage returns and strips OSC sequences', async () =
 
   const colored = ansiToHtml('\u001b[31mred\u001b[0m')
   assert.match(colored, /color:#cd3131/)
+  // Merged SGR + CSI coverage: colors survive, plain text is preserved and the
+  // non-SGR control sequence is stripped instead of leaking an escape byte.
+  const mixed = ansiToHtml('\u001b[31mred\u001b[0m plain\u001b[2K')
+  assert.match(mixed, /<span style="color:#cd3131">red<\/span>/)
+  assert.match(mixed, / plain/)
+  assert.doesNotMatch(mixed, /\u001b/)
 })

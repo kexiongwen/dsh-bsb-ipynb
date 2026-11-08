@@ -1,7 +1,7 @@
 # dsh-bsb-ipynb 代码审核报告（macOS + Windows 快照，仅未修复项）
 
 > **审核快照**：2026-11-07，macOS APFS 与 Windows 11 实机各一轮。**本文件只保留仍未修复或只修复了一部分的问题**；已经完全修复的条目已删除，修复记录与回归测试见 `git log`（2026-11-07 的系列提交）与 `test/`。
-> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取，+5 回归）与 L-23（Windows 大小写 alias 回退，+3 回归）也已完成。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **354 tests / 310 pass / 44 skip / 0 fail**（Windows 11，约 18.7s）。
+> **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取，+5 回归）与 L-23（Windows 大小写 alias 回退，+3 回归）也已完成。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **317 tests / 273 pass / 44 skip / 0 fail**（Windows 11，约 18.6s）。
 > **环境**：
 
 | 平台 | 环境 |
@@ -9,7 +9,7 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **354 tests / 310 pass / 44 skip / 0 fail**（2026-11-08）。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **317 tests / 273 pass / 44 skip / 0 fail**（2026-11-08）。
 > **增量复核**：独立审查新增问题编号为 **M-13～M-16**（其中 M-16 已修复）；此前及后续已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
@@ -91,7 +91,7 @@
 - **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-22 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；M-11 的修复在 Windows 上应依赖显式 shutdown 协议与进程树回收，而不是信号升级。
 - **Windows 大小写回退边界（2026-11-08 修复 L-23 的已知范围）**：回退仅在 win32 启用、仅对已删除/missing 路径、仅匹配同 session + 同 realpath workspace，且多候选歧义一律 fail-closed；但 Windows per-directory case-sensitive NTFS 下缺失组件无法用 inode 校验，单 live 变体时 case 变体缺失拼写可能命中同 session/workspace 的该内核（无越权，默认 NTFS 不成立）。macOS APFS 默认大小写不敏感，但本回退未覆盖 macOS（原条目平台标注为 Windows 形态）。
-- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **354 / 310 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
+- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **317 / 273 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
 
 ---
 
@@ -100,7 +100,7 @@
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
 | 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
-| 全量测试（当前工作区） | `npm test`（Windows） | **354 tests / 310 pass / 44 skip / 0 fail**（约 18.7s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
+| 全量测试（当前工作区） | `npm test`（Windows） | **317 tests / 273 pass / 44 skip / 0 fail**（约 18.6s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |

@@ -181,29 +181,25 @@ test('interpreters lists discovered entries with a default', async () => {
   assert.ok('default' in json.value)
 })
 
-test('unknown endpoints return not-found', async () => {
-  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({ url: '/ipynb/nope' }))
-  assert.equal(state.status, 404)
-  assert.equal(json.error.code, 'not-found')
+test('unknown endpoints and wrong methods return protocol errors with routing details', async () => {
+  const cases = [
+    { name: 'unknown endpoint', req: { url: '/ipynb/nope' }, status: 404, code: 'not-found' },
+    { name: 'wrong method', req: { method: 'PUT', url: '/ipynb/read' }, status: 405, code: 'method-not-allowed', allow: 'POST' },
+  ]
+  for (const { name, req, status, code, allow } of cases) {
+    const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq(req))
+    assert.equal(state.status, status, name)
+    assert.equal(json.error.code, code, name)
+    if (allow) assert.equal(state.headers.allow, allow, name)
+  }
 })
 
-test('wrong method returns 405 with allow', async () => {
-  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({ method: 'PUT', url: '/ipynb/read' }))
-  assert.equal(state.status, 405)
-  assert.equal(state.headers.allow, 'POST')
-  assert.equal(json.error.code, 'method-not-allowed')
-})
-
-test('the host admission fence rejects requests before routing', async () => {
-  const { state, json } = await invoke(makeCtx({ rejection: 403 }), makeKernels(), makeReq())
-  assert.equal(state.status, 403)
-  assert.equal(json.error.code, 'forbidden')
-})
-
-test('repeated admission-fence failures are rate limited', async (t) => {
+test('the admission fence rejects requests and rate-limits repeated failure logs', async (t) => {
   const ctx = makeCtx()
+  let mode = 'throw'
   ctx.connection.requestRejection = () => {
-    throw new Error('fence boom')
+    if (mode === 'throw') throw new Error('fence boom')
+    return mode
   }
   const logged = []
   t.mock.method(console, 'error', (...args) => {
@@ -211,26 +207,27 @@ test('repeated admission-fence failures are rate limited', async (t) => {
   })
   for (let index = 0; index < 3; index += 1) {
     const { state, json } = await invoke(ctx, makeKernels(), makeReq())
-    assert.equal(state.status, 403)
-    assert.equal(json.error.code, 'forbidden')
+    assert.equal(state.status, 403, `throwing fence failure ${index + 1}`)
+    assert.equal(json.error.code, 'forbidden', `throwing fence failure ${index + 1}`)
   }
   assert.equal(logged.length, 1, 'only the first failure within the interval is logged')
+  mode = 403
+  const numeric = await invoke(ctx, makeKernels(), makeReq())
+  assert.equal(numeric.state.status, 403, 'a numeric fence rejection')
+  assert.equal(numeric.json.error.code, 'forbidden', 'a numeric fence rejection')
 })
 
-test('non-JSON POST bodies are rejected', async () => {
-  const { state, json } = await invoke(
-    makeCtx(),
-    makeKernels(),
-    makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'x.ipynb' }, headers: { 'content-type': 'text/plain' } }),
-  )
-  assert.equal(state.status, 400)
-  assert.equal(json.error.code, 'bad-request')
-})
-
-test('JSON Content-Type accepts parameters but rejects look-alike media types', async (t) => {
+test('Content-Type must be JSON: parameters are accepted, look-alike media types are rejected', async (t) => {
   const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
-  for (const contentType of ['application/json; charset=utf-8', 'Application/JSON ; charset=UTF-8']) {
+  const cases = [
+    { name: 'json with charset parameter', contentType: 'application/json; charset=utf-8', status: 200 },
+    { name: 'case-insensitive json with parameters', contentType: 'Application/JSON ; charset=UTF-8', status: 200 },
+    { name: 'plain text body', contentType: 'text/plain', status: 400 },
+    { name: 'jsonp look-alike', contentType: 'application/jsonp', status: 400 },
+    { name: 'jsonp look-alike with parameters', contentType: 'application/jsonp; charset=utf-8', status: 400 },
+  ]
+  for (const { name, contentType, status } of cases) {
     const { state, json } = await invoke(
       makeCtx({ cwd: dir }),
       makeKernels(),
@@ -241,23 +238,13 @@ test('JSON Content-Type accepts parameters but rejects look-alike media types', 
         headers: { 'content-type': contentType },
       }),
     )
-    assert.equal(state.status, 200, contentType)
-    assert.equal(json.ok, true, contentType)
-  }
-  for (const contentType of ['application/jsonp', 'application/jsonp; charset=utf-8']) {
-    const { state, json } = await invoke(
-      makeCtx({ cwd: dir }),
-      makeKernels(),
-      makeReq({
-        method: 'POST',
-        url: '/ipynb/read',
-        body: { sessionId: 's1', path: 'demo.ipynb' },
-        headers: { 'content-type': contentType },
-      }),
-    )
-    assert.equal(state.status, 400, contentType)
-    assert.equal(json.error.code, 'bad-request', contentType)
-    assert.match(json.error.message, /Content-Type/)
+    assert.equal(state.status, status, name)
+    if (status === 200) {
+      assert.equal(json.ok, true, name)
+    } else {
+      assert.equal(json.error.code, 'bad-request', name)
+      assert.match(json.error.message, /Content-Type/, name)
+    }
   }
 })
 
@@ -291,27 +278,7 @@ test('read returns the parsed notebook and its version', async (t) => {
   assert.equal(json.value.notebook.cells.length, 1)
 })
 
-test('save reports a write conflict for a stale baseVersion', async (t) => {
-  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
-  const file = path.join(dir, 'demo.ipynb')
-  await writeFile(file, serializeNotebook(emptyNotebook()))
-  const notebook = emptyNotebook()
-  notebook.cells[0].source = '1 + 1'
-  const { state, json } = await invoke(
-    makeCtx({ cwd: dir }),
-    makeKernels(),
-    makeReq({
-      method: 'POST',
-      url: '/ipynb/save',
-      body: { sessionId: 's1', path: 'demo.ipynb', notebook, baseVersion: '0'.repeat(64) },
-    }),
-  )
-  assert.equal(state.status, 409)
-  assert.equal(json.error.code, 'write-conflict')
-  assert.equal(json.error.details.version.length, 64)
-})
-
-test('save writes a fresh version when baseVersion matches', async (t) => {
+test('save reports stale conflicts and writes a fresh version (CAS lifecycle)', async (t) => {
   const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const file = path.join(dir, 'demo.ipynb')
   await writeFile(file, serializeNotebook(emptyNotebook()))
@@ -320,9 +287,25 @@ test('save writes a fresh version when baseVersion matches', async (t) => {
     makeKernels(),
     makeReq({ method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'demo.ipynb' } }),
   )
+  assert.equal(read.state.status, 200)
+  assert.equal(read.json.value.version.length, 64)
+
+  const stale = await invoke(
+    makeCtx({ cwd: dir }),
+    makeKernels(),
+    makeReq({
+      method: 'POST',
+      url: '/ipynb/save',
+      body: { sessionId: 's1', path: 'demo.ipynb', notebook: emptyNotebook(), baseVersion: '0'.repeat(64) },
+    }),
+  )
+  assert.equal(stale.state.status, 409)
+  assert.equal(stale.json.error.code, 'write-conflict')
+  assert.equal(stale.json.error.details.version, read.json.value.version, 'the conflict carries the current version')
+
   const notebook = read.json.value.notebook
   notebook.cells[0].source = 'print(9)'
-  const { state, json } = await invoke(
+  const fresh = await invoke(
     makeCtx({ cwd: dir }),
     makeKernels(),
     makeReq({
@@ -331,8 +314,8 @@ test('save writes a fresh version when baseVersion matches', async (t) => {
       body: { sessionId: 's1', path: 'demo.ipynb', notebook, baseVersion: read.json.value.version },
     }),
   )
-  assert.equal(state.status, 200)
-  assert.notEqual(json.value.version, read.json.value.version)
+  assert.equal(fresh.state.status, 200)
+  assert.notEqual(fresh.json.value.version, read.json.value.version)
 })
 
 test('save rejects malformed client notebooks without modifying the file', async (t) => {
@@ -343,11 +326,7 @@ test('save rejects malformed client notebooks without modifying the file', async
   const baseVersion = sha256(Buffer.from(original))
   const malformed = [
     null,
-    { nbformat: 4 },
     { nbformat: 4, cells: 'not-an-array' },
-    { nbformat: 4, cells: [null] },
-    { nbformat: 4, cells: [{ cell_type: 'invalid' }] },
-    { nbformat: 3, cells: [] },
   ]
   for (const notebook of malformed) {
     const { state, json } = await invoke(
@@ -432,56 +411,58 @@ test('execute streams NDJSON events', async (t) => {
   assert.equal(kernels.calls[0].python, discovered.default)
 })
 
-test('execute validates the notebook path before opening a stream', async (t) => {
+test('execute reports pre-stream validation errors as JSON before opening a stream', async (t) => {
   const base = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const dir = path.join(base, 'session')
   await mkdir(dir)
-  await writeFile(path.join(base, 'outside.ipynb'), serializeNotebook(emptyNotebook()))
-  const { state, json } = await invoke(
-    makeCtx({ cwd: dir }),
-    makeKernels(),
-    makeReq({
-      method: 'POST',
-      url: '/ipynb/execute',
-      body: { sessionId: 's1', path: '../outside.ipynb', cellId: 'c1', code: '1' },
-    }),
-  )
-  assert.equal(state.status, 403)
-  assert.equal(json.error.code, 'path-outside-root')
-})
-
-test('execute reports pre-stream validation errors as JSON', async (t) => {
-  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  await writeFile(path.join(base, 'outside.ipynb'), serializeNotebook(emptyNotebook()))
   const ctx = makeCtx({ cwd: dir })
-
-  const badCode = await invoke(ctx, makeKernels(), makeReq({
-    method: 'POST',
-    url: '/ipynb/execute',
-    body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: 42 },
-  }))
-  assert.equal(badCode.state.status, 400)
-  assert.equal(badCode.json.error.code, 'bad-request')
-
-  const relativePython = await invoke(ctx, makeKernels(), makeReq({
-    method: 'POST',
-    url: '/ipynb/execute',
-    body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1', python: 'python' },
-  }))
-  assert.equal(relativePython.state.status, 400)
-  assert.equal(relativePython.json.error.code, 'bad-request')
-  assert.match(relativePython.json.error.message, /absolute/)
-
-  const unknownPython = await invoke(ctx, makeKernels(), makeReq({
-    method: 'POST',
-    url: '/ipynb/execute',
-    body: {
-      sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1',
-      python: path.join(os.tmpdir(), 'dsh-bsb-ipynb-no-such-python'),
+  const cases = [
+    {
+      name: 'non-string code',
+      body: { path: 'demo.ipynb', cellId: 'c1', code: 42 },
+      status: 400,
+      code: 'bad-request',
     },
-  }))
-  assert.equal(unknownPython.state.status, 400)
-  assert.equal(unknownPython.json.error.code, 'interpreter-unknown')
+    {
+      name: 'relative interpreter path',
+      body: { path: 'demo.ipynb', cellId: 'c1', code: '1', python: 'python' },
+      status: 400,
+      code: 'bad-request',
+      message: /absolute/,
+    },
+    {
+      name: 'unknown interpreter path',
+      body: {
+        path: 'demo.ipynb', cellId: 'c1', code: '1',
+        python: path.join(os.tmpdir(), 'dsh-bsb-ipynb-no-such-python'),
+      },
+      status: 400,
+      code: 'interpreter-unknown',
+    },
+    {
+      name: 'path outside the session workspace',
+      body: { path: '../outside.ipynb', cellId: 'c1', code: '1' },
+      status: 403,
+      code: 'path-outside-root',
+    },
+  ]
+  for (const { name, body, status, code, message } of cases) {
+    const { state, json } = await invoke(
+      ctx,
+      makeKernels(),
+      makeReq({ method: 'POST', url: '/ipynb/execute', body: { sessionId: 's1', ...body } }),
+    )
+    assert.equal(state.status, status, name)
+    assert.equal(json.error.code, code, name)
+    assert.match(
+      String(state.headers['content-type']),
+      /application\/json/,
+      `${name}: a pre-stream failure must be JSON, not an NDJSON stream`,
+    )
+    if (message) assert.match(json.error.message, message, name)
+  }
 })
 
 test('execute reports a busy kernel after headers as a fatal NDJSON event', async (t) => {

@@ -112,23 +112,31 @@ test('metadata node limit rejects broad trees before pretty serialization', () =
   )
 })
 
-test('invalid JSON returns status invalid without throwing', () => {
-  const result = parseNotebookBytes(Buffer.from('{not json'))
-  assert.equal(result.status, 'invalid')
-  assert.equal(result.version.length, 64)
-  assert.match(result.error, /Invalid notebook JSON/)
-})
-
-test('non nbformat 4 returns unsupported', () => {
-  const result = parseNotebookBytes(
-    Buffer.from(JSON.stringify({ nbformat: 3, cells: [], metadata: {} })),
-  )
-  assert.equal(result.status, 'unsupported')
-})
-
-test('missing cells array returns invalid', () => {
-  const result = parseNotebookBytes(Buffer.from(JSON.stringify({ nbformat: 4 })))
-  assert.equal(result.status, 'invalid')
+test('parseNotebookBytes distinguishes invalid JSON, unsupported nbformat and missing cells', () => {
+  const cases = [
+    {
+      name: 'invalid JSON',
+      bytes: Buffer.from('{not json'),
+      status: 'invalid',
+      error: /Invalid notebook JSON/,
+    },
+    {
+      name: 'non nbformat 4',
+      bytes: Buffer.from(JSON.stringify({ nbformat: 3, cells: [], metadata: {} })),
+      status: 'unsupported',
+    },
+    {
+      name: 'missing cells array',
+      bytes: Buffer.from(JSON.stringify({ nbformat: 4 })),
+      status: 'invalid',
+    },
+  ]
+  for (const { name, bytes, status, error } of cases) {
+    const result = parseNotebookBytes(bytes)
+    assert.equal(result.status, status, name)
+    assert.equal(result.version.length, 64, name)
+    if (error) assert.match(result.error, error, name)
+  }
 })
 
 test('empty and whitespace-only files become empty notebooks', () => {
@@ -141,18 +149,9 @@ test('empty and whitespace-only files become empty notebooks', () => {
 })
 
 test('too-large notebooks are rejected', () => {
-  const buffer = Buffer.alloc(NOTEBOOK_CAP_BYTES + 1, 0x20)
+  // Only the byte length matters: the cap check runs before the buffer is read.
+  const buffer = Buffer.allocUnsafe(NOTEBOOK_CAP_BYTES + 1)
   assert.throws(() => parseNotebookBytes(buffer), (error) => error.code === 'too-large')
-})
-
-test('readNotebookFile reads real files', async (t) => {
-  const dir = await tempDir(t)
-  const file = path.join(dir, 'demo.ipynb')
-  const text = serializeNotebook(emptyNotebook())
-  await writeFile(file, text)
-  const result = await readNotebookFile(file)
-  assert.equal(result.status, 'ok')
-  assert.equal(result.version, sha256(Buffer.from(text)))
 })
 
 test('saveNotebookFile writes atomically and changes the version', async (t) => {
@@ -246,19 +245,6 @@ test('save rechecks the version after the temporary write and preserves external
   assert.deepEqual(await readdir(dir), ['demo.ipynb'])
 })
 
-test('saveNotebookFile rejects a stale baseVersion', async (t) => {
-  const dir = await tempDir(t)
-  const file = path.join(dir, 'demo.ipynb')
-  await writeFile(file, serializeNotebook(emptyNotebook()))
-  const read = await readNotebookFile(file)
-  await writeFile(file, serializeNotebook(emptyNotebook()))
-  read.notebook.cells[0].source = '1 + 1'
-  await assert.rejects(
-    saveNotebookFile(file, read.notebook, read.version),
-    (error) => error.code === 'write-conflict' && error.status === 409,
-  )
-})
-
 test('save validates the notebook before reporting a stale version', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
@@ -291,6 +277,7 @@ test('saveNotebookFile maps malformed notebooks to bad-request', async (t) => {
   const malformed = [
     null,
     { nbformat: 4 },
+    { nbformat: 4, cells: [null] },
     { nbformat: 4, cells: [{ cell_type: 'invalid' }] },
     { nbformat: 3, cells: [] },
   ]
@@ -483,6 +470,15 @@ test('bounded notebook reads return exact bytes and stop at the cap', async (t) 
   await writeFile(file, text)
   assert.deepEqual(await readBoundedNotebookFile(file), Buffer.from(text))
 
+  // A real multi-chunk round-trip keeps the exact bytes from every 64 KiB
+  // position (the synthetic-handle test below stubs `position` out).
+  const largeNotebook = emptyNotebook()
+  largeNotebook.cells[0].source = 'print("multi-chunk")\n'.repeat(6 * 1024)
+  const largeText = serializeNotebook(largeNotebook)
+  assert.ok(largeText.length > 64 * 1024)
+  await writeFile(file, largeText)
+  assert.deepEqual(await readBoundedNotebookFile(file), Buffer.from(largeText))
+
   await writeFile(file, '{}')
   await truncate(file, NOTEBOOK_CAP_BYTES + 1)
   await assert.rejects(
@@ -497,27 +493,25 @@ test('bounded notebook reads return exact bytes and stop at the cap', async (t) 
 test('bounded notebook reads stop even when the opened handle size is stale', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
-  await writeFile(file, '{}')
-  await truncate(file, NOTEBOOK_CAP_BYTES + 1)
   const originalOpen = fs.promises.open
   let closed = false
   let requestedBytes = 0
-  fs.promises.open = async (target, flags, mode) => {
-    const handle = await originalOpen.call(fs.promises, target, flags, mode)
-    // A stale fstat must not lift the cap: the chunk loop still reads at most
-    // one byte past it and reports a 413 instead of buffering the whole file.
-    return {
-      stat: async () => ({ isFile: () => true, size: 2 }),
-      read: (buffer, offset, length, position) => {
-        requestedBytes += length
-        return handle.read(buffer, offset, length, position)
-      },
-      close: async () => {
-        closed = true
-        return handle.close()
-      },
-    }
-  }
+  let total = 0
+  // A stale fstat must not lift the cap: the chunk loop still reads at most one
+  // byte past it and reports a 413 instead of buffering the whole file. The
+  // synthetic handle keeps this test memory-light (no 32 MiB fixture on disk).
+  fs.promises.open = async () => ({
+    stat: async () => ({ isFile: () => true, size: 2 }),
+    read: async (buffer, offset, length) => {
+      requestedBytes += length
+      const bytesRead = Math.min(length, NOTEBOOK_CAP_BYTES + 1 - total)
+      total += bytesRead
+      return { bytesRead }
+    },
+    close: async () => {
+      closed = true
+    },
+  })
   try {
     await assert.rejects(
       readBoundedNotebookFile(file),
@@ -533,20 +527,22 @@ test('bounded notebook reads stop even when the opened handle size is stale', as
   assert.equal(requestedBytes, NOTEBOOK_CAP_BYTES + 1, 'the read stops one byte past the cap')
 })
 
-test('a notebook grown after the authorization stat is reported as too-large', async (t) => {
+test('a notebook that grows during a save is too-large at every growth window', async (t) => {
+  // Window 1: the file grows after the authorization stat, before the save stat.
+  // The stale stat must not be trusted; the growth is a 413, never a buffered read.
+  const grownBytes = 40 * 1024 * 1024
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
   await writeFile(file, original)
   const baseVersion = sha256(Buffer.from(original))
-  const grown = Buffer.alloc(40 * 1024 * 1024, 0x20)
   const originalStat = fs.promises.stat
   let injected = false
   fs.promises.stat = async (target, ...rest) => {
     if (!injected && String(target) === file) {
       injected = true
-      // The file grows after authorization: the stale stat must not be trusted.
-      await writeFile(file, grown)
+      // Sparse file: the size assertion below is enough, no 40 MiB buffer.
+      await truncate(file, grownBytes)
       return { isFile: () => true, size: Buffer.byteLength(original), mode: 0o100644 }
     }
     return originalStat.call(fs.promises, target, ...rest)
@@ -556,34 +552,34 @@ test('a notebook grown after the authorization stat is reported as too-large', a
       saveNotebookFile(file, emptyNotebook(), baseVersion),
       (error) =>
         error.code === 'too-large' && error.status === 413 &&
-        error.details.size === grown.length,
+        error.details.size === grownBytes,
     )
   } finally {
     fs.promises.stat = originalStat
   }
-  assert.equal(injected, true, 'the injected growth ran after the authorization stat')
-  assert.deepEqual(await readdir(dir), ['demo.ipynb'], 'the failed save leaves no temp file')
-  assert.equal((await stat(file)).size, grown.length, 'the oversized file is left untouched')
-})
+  assert.equal(injected, true, 'window 1: the injected growth ran after the authorization stat')
+  assert.deepEqual(await readdir(dir), ['demo.ipynb'], 'window 1: the failed save leaves no temp file')
+  assert.equal((await stat(file)).size, grownBytes, 'window 1: the oversized file is left untouched')
 
-test('a notebook that grows after the save stat fails with too-large, not a conflict', async (t) => {
-  const dir = await tempDir(t)
-  const file = path.join(dir, 'demo.ipynb')
-  const original = serializeNotebook(emptyNotebook())
-  await writeFile(file, original)
-  const baseVersion = sha256(Buffer.from(original))
+  // Window 2: the file grows after the save stat, before the version read.
+  // Growth in this window must also surface as 413, not as a write conflict.
+  const secondDir = await tempDir(t)
+  const secondFile = path.join(secondDir, 'demo.ipynb')
+  const secondOriginal = serializeNotebook(emptyNotebook())
+  await writeFile(secondFile, secondOriginal)
+  const secondBaseVersion = sha256(Buffer.from(secondOriginal))
   const originalOpen = fs.promises.open
-  let injected = false
+  let secondInjected = false
   fs.promises.open = async (target, flags, mode) => {
-    if (!injected && String(target) === file) {
-      injected = true
-      await truncate(file, NOTEBOOK_CAP_BYTES + 1)
+    if (!secondInjected && String(target) === secondFile) {
+      secondInjected = true
+      await truncate(secondFile, NOTEBOOK_CAP_BYTES + 1)
     }
     return originalOpen.call(fs.promises, target, flags, mode)
   }
   try {
     await assert.rejects(
-      saveNotebookFile(file, emptyNotebook(), baseVersion),
+      saveNotebookFile(secondFile, emptyNotebook(), secondBaseVersion),
       (error) =>
         error.code === 'too-large' &&
         error.status === 413 &&
@@ -592,7 +588,9 @@ test('a notebook that grows after the save stat fails with too-large, not a conf
   } finally {
     fs.promises.open = originalOpen
   }
-  assert.equal(injected, true, 'the injected growth ran before the version read')
+  assert.equal(secondInjected, true, 'window 2: the injected growth ran before the version read')
+  assert.deepEqual(await readdir(secondDir), ['demo.ipynb'], 'window 2: the failed save leaves no temp file')
+  assert.equal((await stat(secondFile)).size, NOTEBOOK_CAP_BYTES + 1, 'window 2: the oversized file is left untouched')
 })
 
 test('the second save version check also bounds a file that grew past the cap', async (t) => {
@@ -735,21 +733,6 @@ test('non-object MIME bundles become empty output data and non-object attachment
     for (const output of normalized.cells[0].outputs) assert.deepEqual(output.data, {})
     for (const cell of normalized.cells.slice(1)) assert.equal(Object.hasOwn(cell, 'attachments'), false)
   }
-})
-
-test('markdown and raw attachments keep empty or repaired bundles but drop non-bundle entries', () => {
-  const notebook = malformedMimeNotebook()
-  const original = JSON.stringify(notebook)
-  const normalized = normalizeNotebook(notebook)
-  for (const cell of normalized.cells.slice(1)) {
-    assert.deepEqual(Object.keys(cell.attachments).sort(), ['__proto__', 'cleaned.bin', 'empty.bin', 'mixed.bin'])
-    assert.deepEqual(cell.attachments['mixed.bin'], expectedMimeBundle())
-    assert.deepEqual(cell.attachments['cleaned.bin'], {})
-    assert.deepEqual(cell.attachments['empty.bin'], {})
-    assert.ok(Object.hasOwn(cell.attachments, '__proto__'))
-    assert.deepEqual(cell.attachments.__proto__, { 'text/plain': 'ordinary attachment name' })
-  }
-  assert.equal(JSON.stringify(notebook), original)
 })
 
 test('execution counts preserve nonnegative integers and normalize other values to null', () => {

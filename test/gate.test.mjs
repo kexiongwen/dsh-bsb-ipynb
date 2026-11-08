@@ -48,49 +48,57 @@ test('isInside accepts the root and descendants only', () => {
   assert.equal(isInside('/tmp/a', '/tmp'), false)
 })
 
-test('resolveWorkspace resolves the session cwd', async (t) => {
-  const { dir } = await workspace(t)
-  assert.equal(await resolveWorkspace(ctxFor(dir), 's1'), await realpath(dir))
-})
-
-test('resolveWorkspace follows the effective working directory', async (t) => {
+test('resolveWorkspace resolves the session cwd, effective cwd and header fallback', async (t) => {
   const { root, dir } = await workspace(t)
   const other = path.join(root, 'other')
   await mkdir(other)
-  const ctx = ctxFor(dir)
-  ctx.get = (name) => (name === 'workingDirectory' ? { get: () => other } : undefined)
-  assert.equal(await resolveWorkspace(ctx, 's1'), await realpath(other))
-})
-
-test('resolveWorkspace falls back to header.cwd when the optional service fails', async (t) => {
-  const { dir } = await workspace(t)
-  const ctx = ctxFor(dir)
-  ctx.get = () => {
+  const effective = ctxFor(dir)
+  effective.get = (name) => (name === 'workingDirectory' ? { get: () => other } : undefined)
+  const failing = ctxFor(dir)
+  failing.get = () => {
     throw new Error('service unavailable')
   }
-  assert.equal(await resolveWorkspace(ctx, 's1'), await realpath(dir))
+  const cases = [
+    { name: 'session cwd', ctx: ctxFor(dir), expected: dir },
+    { name: 'effective working directory', ctx: effective, expected: other },
+    { name: 'header.cwd fallback when the optional service fails', ctx: failing, expected: dir },
+  ]
+  for (const { name, ctx, expected } of cases) {
+    assert.equal(await resolveWorkspace(ctx, 's1'), await realpath(expected), name)
+  }
 })
 
-test('resolveWorkspace rejects missing sessions and cwd', async () => {
-  assert.rejects(resolveWorkspace(ctxFor('/tmp'), 'missing'), (error) => error.code === 'workspace-unknown')
-  assert.rejects(resolveWorkspace(ctxFor(''), 's1'), (error) => error.code === 'workspace-unknown')
+test('resolveWorkspace rejects missing sessions, empty cwd and relative cwds', async () => {
+  const cases = [
+    { name: 'missing session', ctx: ctxFor('/tmp'), sessionId: 'missing' },
+    { name: 'empty cwd', ctx: ctxFor(''), sessionId: 's1' },
+    { name: 'relative cwd', ctx: ctxFor('relative/project'), sessionId: 's1' },
+  ]
+  for (const { name, ctx, sessionId } of cases) {
+    await assert.rejects(resolveWorkspace(ctx, sessionId), (error) => (
+      error.code === 'workspace-unknown' && error.status === 400
+    ), name)
+  }
 })
 
-test('resolveTarget accepts relative and absolute workspace paths', async (t) => {
-  const { dir } = await workspace(t)
-  const cwd = await resolveWorkspace(ctxFor(dir), 's1')
-  const rel = await resolveTarget(cwd, 'a.ipynb')
-  assert.equal(rel.target, path.join(cwd, 'a.ipynb'))
-  const abs = await resolveTarget(cwd, path.join(cwd, 'a.ipynb'))
-  assert.equal(abs.target, path.join(cwd, 'a.ipynb'))
-})
-
-test('resolveTarget rejects traversal and outside absolute paths', async (t) => {
+test('resolveTarget accepts relative and absolute workspace paths and rejects escapes', async (t) => {
   const { root, dir } = await workspace(t)
   await writeFile(path.join(root, 'outside.ipynb'), '{}')
   const cwd = await resolveWorkspace(ctxFor(dir), 's1')
-  await assert.rejects(resolveTarget(cwd, '../outside.ipynb'), (error) => error.code === 'path-outside-root')
-  await assert.rejects(resolveTarget(cwd, path.join(root, 'outside.ipynb')), (error) => error.code === 'path-outside-root')
+  const target = path.join(cwd, 'a.ipynb')
+  const cases = [
+    { name: 'relative path', requested: 'a.ipynb', target },
+    { name: 'absolute path', requested: path.join(cwd, 'a.ipynb'), target },
+    { name: 'parent traversal', requested: '../outside.ipynb', error: 'path-outside-root' },
+    { name: 'outside absolute path', requested: path.join(root, 'outside.ipynb'), error: 'path-outside-root' },
+  ]
+  for (const { name, requested, target: expected, error } of cases) {
+    if (expected) {
+      assert.equal((await resolveTarget(cwd, requested)).target, expected, name)
+    } else {
+      await assert.rejects(resolveTarget(cwd, requested), (failure) => failure.code === error, name)
+    }
+  }
 })
 
 symlinkTest('resolveTarget rejects symlink escapes', async (t) => {
@@ -223,12 +231,6 @@ symlinkTest('missing-target resolution still rejects an existing directory named
   await symlink('missing/../folder.ipynb', path.join(dir, 'alias.ipynb'))
   await assert.rejects(resolveControlTarget(ctxFor(dir), 's1', 'alias.ipynb'),
     (error) => error.code === 'not-notebook' && error.status === 400)
-})
-
-test('resolveWorkspace rejects a relative session cwd', async () => {
-  await assert.rejects(resolveWorkspace(ctxFor('relative/project'), 's1'), (error) => (
-    error.code === 'workspace-unknown' && error.status === 400
-  ))
 })
 
 test('control resolution retries a transient file change instead of failing', async (t) => {

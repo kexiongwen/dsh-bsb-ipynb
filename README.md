@@ -182,7 +182,7 @@ There is no build step. DSH caches registered bundles, so after changing `client
 ```bash
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
-npm test          # 354 tests at the time of writing
+npm test          # 317 tests at the time of writing
 ```
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
