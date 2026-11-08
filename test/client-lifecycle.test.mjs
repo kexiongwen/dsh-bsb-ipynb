@@ -116,7 +116,8 @@ function mountNotebook(t, options = {}) {
     },
     scope: { sessionId: 'session-1' }, path: '/workspace/demo.ipynb',
     visible: options.visible === undefined ? false : options.visible,
-    customData: options.customData || notebookData(), onReload() { hostReloads += 1 },
+    customData: options.customData || notebookData(),
+    onReload: options.hostReload === false ? undefined : () => { hostReloads += 1 },
   }
   const sameDeps = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => Object.is(value, b[index]))
   const memo = (factory, deps) => {
@@ -448,6 +449,31 @@ test('cancelling the host reload prompt keeps the current execution alive', asyn
   assert.equal(app.cell.cell.execution_count, 2)
   assert.equal(app.toolbar.dirty, true)
 })
+
+for (const staleOutcome of ['success', 'error']) {
+  test(`fallback reload ignores an older ${staleOutcome} response that arrives last`, async (t) => {
+    const app = mountNotebook(t, { hostReload: false })
+    await app.settle()
+    app.toolbar.onReload()
+    app.toolbar.onReload()
+    const reads = app.requests('read')
+    assert.equal(reads.length, 2)
+    assert.equal(app.reloadCount, 0, 'this scenario exercises only the no-host fallback')
+
+    reads[1].resolve(response({ ok: true, value: notebookData('NEWER', 'v2') }))
+    await app.settle()
+    assert.equal(app.cell.cell.outputs[0].text, 'NEWER')
+    if (staleOutcome === 'success') {
+      reads[0].resolve(response({ ok: true, value: notebookData('OLDER', 'v1') }))
+    } else {
+      reads[0].resolve(response({ ok: false, error: { code: 'read-blocked', message: 'STALE ERROR' } }, 409))
+    }
+    await app.settle()
+    assert.equal(app.cell.cell.outputs[0].text, 'NEWER', 'the older request must not replace the adopted document')
+    assert.equal(app.toolbar.dirty, false)
+    assert.equal(app.banner, null)
+  })
+}
 
 for (const outcome of ['conflict', 'failure', 'success']) {
   test(`late save ${outcome} cannot change a reloaded document or unlock its active save`, async (t) => {

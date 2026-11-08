@@ -10,16 +10,16 @@
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
 > **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **317 tests / 273 pass / 44 skip / 0 fail**（2026-11-08）。
-> **增量复核**：独立审查新增问题编号为 **M-13～M-16**（其中 M-16 已修复）；此前及后续已经修复的问题按本文件约定不重复列入。
+> **增量复核**：独立审查新增问题编号为 **M-13～M-17**（其中 M-16 已修复）；此前及后续已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
-> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。M-13～M-16 使用当前工作区行号（M-15、M-16 已修复）。
+> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。M-13～M-17 使用当前工作区行号（M-15、M-16 已修复）。
 
 **问题总览（仅未修复）**
 
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
-| Medium | 8 | M-2、M-4、M-6、M-7、M-8、M-11、M-13、M-14 |
+| Medium | 9 | M-2、M-4、M-6、M-7、M-8、M-11、M-13、M-14、M-17 |
 | Low | 4 | L-5、L-12、L-13、L-22 |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
 | 测试缺口 | 5 | T-1、T-3、T-5、T-6、T-8 |
@@ -28,7 +28,7 @@
 
 ---
 
-## 1. Medium（8 项，未修复）
+## 1. Medium（9 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题与影响 | 证据 | 建议 |
 | --- | --- | --- | --- | --- | --- |
@@ -40,6 +40,7 @@
 | **M-11**（P2） | 全平台 | `lib/kernel.js:564-616`（shutdown/kill）、`738-743`（manager 删除）、`757-766`（dispose） | shutdown 2s 时才由 kill 发 SIGTERM，kill 再隔 2s 才 SIGKILL（总计约 4s），外层 grace 却在 2.5s 结束；随后 manager 无条件删条目，disposeAll 更提前 clear。若 SIGTERM 清理卡住，管理器已显示无内核并允许替代启动，旧 bridge 仍活。Windows 上 SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义（代码已注明），清理只能依赖显式 shutdown 协议。 | 【已验证】受控不退出 child：约 **2502ms** 返回时 `managerKnowsEntry=false、processAlive=true、kills=['SIGTERM']`。 | 等待 exit 覆盖完整 SIGKILL 升级；未确认退出前保留 stopping entry 并报告失败，不能当作已回收；测试忽略 SIGTERM、2.5s 不遗忘/不重复启动、SIGKILL+exit 后才删除。 |
 | **M-13**（P1） | 全平台 | `client.js:1661-1675`（invalidate 仅清 savingRef）、`1728-1740`（reload）、`1810-1818`（save 无 signal，旧响应仅被忽略）；`lib/notebook.js:503-531`（read 不与 save 共队列） | Reload 与在途 save 无同步：D0/v1 上发出保存 A 后 Reload，若 host read 先返回 D0/v1 并 adopt，已发出的 A 仍可随后合法提交为 v3；客户端因 generation 失效忽略 v3，界面显示 D0、磁盘却为 A，下一次保存仍用 v1 并收到 409。用户确认“丢弃”的草稿可能晚到落盘，UI/磁盘版本分叉。 | 【已验证】客户端时序复现 `lateServerVersion=v3、nextBaseVersion=v1`；服务端 read/save 调用顺序核对确认可达，未做真实浏览器端到端复现。 | Reload 必须等待/协调在途保存，在保存 settle 后重新 read/adopt 并采用真实最新版本；仅 abort fetch 或忽略响应不能阻止服务器已提交的写入。 |
 | **M-14**（P2） | 全平台 | `lib/routes.js:436-461`（restartRoute） | `/restart` 在 await 前缓存旧 entry，之后未验证当前 entry 身份。两个并发切换 A→B、A→C 可都 shutdown A，随后第一个 start B，第二个却把当前 B restart 而非启动 C；两个请求均 200，C 响应还返回 C，但最终 current=B。相同窗口也可能让旧 entry 的 busy 检查漏过 replacement 的忙态。 | 【已验证】受控路由并发调用序列为 `shutdown:A, shutdown:A, start:B, restart:B`；B、C 请求均 200，C 响应 value.python=C，最终 current=B。 | 按 target 串行化完整 restart/switch 生命周期，或在管理器内提供原子操作；await 后重新核验 entry 身份、busy 与实际 python，响应必须反映真实启动结果。 |
+| **M-17**（P2） | 全平台 | `client.js:1187-1220`（`makeImageResolver`/`fileUrl`）；better-sidebar 0.30.1 `src/index.ts` `/sidebar/file`、`src/path-security.ts:1-14,65-76` | Markdown 与 `text/html` 图片不经过本插件 workspace gate，词法规范化后的相对 `..`、绝对盘符/UNC 直接交给上游 `/sidebar/file`；上游仅做 lexical resolve，明确无 realpath/containment。仅打开 notebook（无需执行 cell）即可请求并显示宿主工作区外可读图片，违背 README 的 contained access；当前证据仅覆盖图片读取/请求边界，未发现脚本执行或任意文本回读路径。 | 【已验证】Windows 示例 notebook `C:\workspace\nb\demo.ipynb` 中 `../../outside.png` 生成 `path=C:/outside.png` 的 `/sidebar/file` URL；【契约核对】上游 0.30.1 route 按解析路径流式返回文件。未做真实浏览器外联或任意文件内容 exfil 测试。 | 新增本插件受控图片路由：realpath + workspace 包含校验、流式图片响应、MIME/SVG CSP，并覆盖 `..`、绝对路径、UNC、symlink/junction；仅前端过滤 `..` 不足以封堵。 |
 
 ---
 
@@ -81,7 +82,7 @@
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
 | **P1** | M-2（+T-1）、M-13 | M-2 序列化放大可造成内存/CPU 资源风险；M-13 会让已丢弃草稿晚到落盘并造成版本分叉。T-1 仍是安全关键测试可信度问题。 |
-| **P2** | M-4、M-6、M-7、M-8、M-11、M-14 | 性能、失败终止、状态竞态、错误内核生命周期与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-14 需按 target 串行化。 |
+| **P2** | M-4、M-6、M-7、M-8、M-11、M-14、M-17 | 性能、失败终止、状态竞态、错误内核生命周期与设计级加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-14 需按 target 串行化，M-17 需由本插件增加受控图片路由。 |
 | **P3** | §2 的 Low（按组批量）、T-3/T-5/T-6/T-8、§3 Nit | 低成本、低风险，可合并处理。 |
 
 ---
@@ -109,6 +110,7 @@
 | M-8 | 本地 rename 钩子注入（脚本未随仓库提供） | save fulfilled、外部编辑丢失 |
 | M-13 | 当前客户端 mountNotebook 时序复现 + 服务端 read/save 调用顺序核对（脚本未随仓库提供） | 已丢弃草稿晚到为 v3，UI 仍显示 Reload 文档且 next baseVersion=v1；下一次保存模拟 409 conflict=v3 |
 | M-14 | 受控解释器 probe 与并发 `/restart`（脚本未随仓库提供） | `shutdown:A, shutdown:A, start:B, restart:B`；两个请求均 200，C 响应为 C，最终 current=B |
+| M-17 | 当前 `makeImageResolver` 路径复现 + better-sidebar 0.30.1 源码契约 | `C:\workspace\nb\demo.ipynb` 中 `../../outside.png` 解析为 `C:/outside.png` 并生成 `/sidebar/file` URL；上游明确不做 workspace containment，未声称真实浏览器 exfil 复现 |
 | L-12 | 当前源码最小 DOM 替身微基准 | 500/1000/2000/4000 标签约 17.8/55.5/165.0/653.4ms |
 | L-22 | Windows 真实 junction 实验 | 悬空 junction 控制路径退化为请求拼写（L-23 大小写拼写回退已修复，2026-11-08） |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |

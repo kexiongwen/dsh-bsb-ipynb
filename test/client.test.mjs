@@ -1001,6 +1001,48 @@ test('cell edit action uses editCell and doneEditing text', async () => {
   assert.deepEqual(done.props.children, [strings.doneEditing])
 })
 
+test('every cell editor exposes its localized cell type as an accessible name', async () => {
+  const { exports } = await loadClient()
+  const { CellView, STRINGS } = exports.__test
+  const strings = /^zh/i.test(globalThis.navigator?.language || '') ? STRINGS.zh : STRINGS.en
+  for (const [cellType, label] of [
+    ['code', strings.codeCell],
+    ['markdown', strings.markdownCell],
+    ['raw', strings.rawCell],
+  ]) {
+    const tree = CellView({
+      cell: { id: 'cell-1', cell_type: cellType, execution_count: null, metadata: {}, outputs: [], source: '' },
+      index: 0,
+      count: 1,
+      editing: true,
+      running: false,
+    })
+    const editor = tree.props.children[1]
+    assert.equal(editor.type, 'textarea', cellType)
+    assert.equal(editor.props['aria-label'], label, cellType)
+  }
+})
+
+test('raw and source editors have keyboard focus rings without changing source focus', async () => {
+  const { exports, styles } = await loadClient()
+  exports.apply({
+    effect: (effect) => effect(),
+    betterSidebar: {
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer: () => () => {},
+    },
+  })
+  const css = styles[0].textContent
+  assert.match(
+    css,
+    /\.dsh-bsb-ipynb-raw:focus-visible,\s*\.dsh-bsb-ipynb-source-editor:focus-visible\s*\{[^}]*outline: 2px solid var\(--dsh-bsb-ipynb-focus\)/,
+  )
+  assert.ok(
+    css.includes('.dsh-bsb-ipynb-source:focus { outline: 1px solid var(--dsh-bsb-ipynb-focus); outline-offset: -1px; }'),
+    'the existing reading-mode source focus rule remains intact',
+  )
+})
+
 test('cell type changes detect actual output and attachment loss', async () => {
   const { exports } = await loadClient()
   const { cellTypeChangeLosesData } = exports.__test

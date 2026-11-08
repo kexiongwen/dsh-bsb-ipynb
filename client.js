@@ -1566,6 +1566,7 @@ window.__ModuleLoader__.load({
             ? h('textarea', {
                 ref: textareaRef,
                 className: 'dsh-bsb-ipynb-source-editor',
+                'aria-label': cellTypeLabel(cell.cell_type),
                 value: source,
                 spellCheck: false,
                 autoFocus: true,
@@ -1586,6 +1587,7 @@ window.__ModuleLoader__.load({
               ? h('textarea', {
                   ref: textareaRef,
                   className: 'dsh-bsb-ipynb-source-editor',
+                  'aria-label': cellTypeLabel(cell.cell_type),
                   value: source,
                   spellCheck: false,
                   autoFocus: true,
@@ -1600,6 +1602,7 @@ window.__ModuleLoader__.load({
               ? h('textarea', {
                   ref: textareaRef,
                   className: 'dsh-bsb-ipynb-source-editor',
+                  'aria-label': cellTypeLabel(cell.cell_type),
                   value: source,
                   spellCheck: false,
                   autoFocus: true,
@@ -1735,6 +1738,7 @@ window.__ModuleLoader__.load({
       const saveRef = useRef(null)
       const pythonRef = useRef('')
       const forceReloadRef = useRef(false)
+      const reloadRequestRef = useRef(0)
       const saveTimerRef = useRef(null)
       const stopRef = useRef(false)
       const runAllRef = useRef(null)
@@ -1875,7 +1879,12 @@ window.__ModuleLoader__.load({
           onReload()
           return
         }
-        readNotebook(ctx, path, scope).then((data) => adopt(data)).catch(() => {})
+        const requestId = ++reloadRequestRef.current
+        readNotebook(ctx, path, scope).then((data) => {
+          // Only the latest fallback request may replace the current document;
+          // an older success or error must not win by arriving last.
+          if (requestId === reloadRequestRef.current) adopt(data)
+        }).catch(() => {})
       }, [ctx, path, scope, onReload, adopt])
 
       const openAsEmpty = useCallback(() => {
@@ -2799,6 +2808,8 @@ window.__ModuleLoader__.load({
 }
 .dsh-bsb-ipynb-source { cursor: text; min-height: 32px; }
 .dsh-bsb-ipynb-source:focus { outline: 1px solid var(--dsh-bsb-ipynb-focus); outline-offset: -1px; }
+.dsh-bsb-ipynb-raw:focus-visible,
+.dsh-bsb-ipynb-source-editor:focus-visible { outline: 2px solid var(--dsh-bsb-ipynb-focus); outline-offset: -2px; }
 .dsh-bsb-ipynb-source-editor { display: block; min-height: 48px; }
 .dsh-bsb-ipynb-empty-source { display: inline-block; min-height: 1em; }
 .dsh-bsb-ipynb-markdown { padding: 8px 10px; overflow-wrap: anywhere; }

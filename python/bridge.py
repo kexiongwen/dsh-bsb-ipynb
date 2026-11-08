@@ -527,8 +527,14 @@ class Bridge:
     def iopub_loop(self):
         """Pump kernel iopub messages and forward them as events."""
         failures = 0
+        failure_client = None
         while not self.stop.is_set():
             kc = self.kc
+            if kc is not failure_client:
+                # A replacement gets its own failure budget; errors from the
+                # client used before a restart must not poison the new one.
+                failures = 0
+                failure_client = kc
             if kc is None:
                 # Wait for the kernel to come up before pumping.
                 threading.Event().wait(0.1)
@@ -559,6 +565,13 @@ class Bridge:
             except Exception as error:
                 if self.stop.is_set():
                     break
+                if self.restarting or kc is not self.kc:
+                    # Restart stops the old channels before publishing their
+                    # replacement. Those expected failures must not kill the
+                    # bridge or consume the next client's failure budget.
+                    failures = 0
+                    time.sleep(0.05)
+                    continue
                 # A dead client must not turn into a busy loop: back off
                 # between attempts and eventually report a bounded failure.
                 failures += 1

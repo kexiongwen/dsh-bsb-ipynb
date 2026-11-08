@@ -759,6 +759,87 @@ class IOPubTests(unittest.TestCase):
         self.assertIn("alive", status[-1])
         release.set()
 
+    def test_iopub_restart_ignores_old_client_failures_and_recovers(self):
+        class OldClient(ControlledClient):
+            def __init__(self):
+                super().__init__()
+                self.read_failures = 0
+
+            def is_alive(self):
+                return True
+
+            def get_iopub_msg(self, timeout=1):
+                self.read_failures += 1
+                raise RuntimeError("old client channels are stopped")
+
+        class NewClient(ControlledClient):
+            def __init__(self):
+                super().__init__()
+                self.ready_entered = threading.Event()
+                self.release_ready = threading.Event()
+                self.read_attempts = 0
+                self.second_read = threading.Event()
+
+            def wait_for_ready(self, timeout):
+                self.ready_entered.set()
+                if not self.release_ready.wait(3):
+                    raise RuntimeError("test did not release replacement readiness")
+
+            def get_iopub_msg(self, timeout=1):
+                self.read_attempts += 1
+                if self.read_attempts == 1:
+                    # A new client starts with a clean failure budget too.
+                    raise RuntimeError("first replacement read fails")
+                if self.read_attempts == 2:
+                    self.second_read.set()
+                time.sleep(0.01)
+                raise queue.Empty()
+
+        old = OldClient()
+        new = NewClient()
+        self.client = old
+        self.bridge.kc = old
+        self.bridge.km = ControlledManager(new)
+        exits = []
+        restart_results = []
+        original_exit = bridge_module.os._exit
+        bridge_module.os._exit = lambda status: exits.append(status)
+        pump = None
+        restart = None
+        try:
+            restart = self.start_thread(lambda: restart_results.append(self.bridge.restart(31)))
+            self.wait(new.ready_entered)
+            pump = self.start_thread(self.bridge.iopub_loop)
+            deadline = time.monotonic() + 5
+            while old.read_failures <= 10 and not exits and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(exits, [], "old client failures must not terminate a restarting bridge")
+            self.assertGreater(old.read_failures, 10,
+                               "the old client must remain in bounded backoff, not accumulate fatal failures")
+            self.assertTrue(pump.is_alive())
+            self.assertTrue(restart.is_alive())
+            self.assertTrue(self.bridge.restarting)
+            self.assertFalse(self.bridge.stop.is_set())
+            self.assertFalse(any(event.get("type") == "kernel_died" for event in self.events))
+
+            new.release_ready.set()
+            self.join(restart)
+            self.wait(new.second_read)
+            self.assertEqual(restart_results, [True])
+            self.assertIs(self.bridge.kc, new)
+            self.assertEqual(exits, [])
+            self.assertFalse(any(event.get("type") == "kernel_died" for event in self.events))
+            ready = [event for event in self.events if event.get("type") == "ready"]
+            self.assertEqual([event.get("op_id") for event in ready], [31])
+        finally:
+            new.release_ready.set()
+            self.bridge.shutdown_kernel()
+            if restart is not None:
+                restart.join(3)
+            if pump is not None:
+                pump.join(3)
+            bridge_module.os._exit = original_exit
+
     def test_iopub_loop_backs_off_instead_of_spinning_on_a_failing_client(self):
         attempts = []
         exits = []
