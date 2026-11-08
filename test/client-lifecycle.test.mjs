@@ -1194,6 +1194,57 @@ test('metadata preflight offers the matching recovery for output, notebook and c
   }
 })
 
+test('JSON preflight blocks upload and offers recovery that matches the offending data', async (t) => {
+  for (const attachment of [false, true]) {
+    const app = mountNotebook(t, { locale: true })
+    await app.settle()
+    const data = notebookData('OLD', 'v2')
+    const cell = data.notebook.cells[0]
+    const payload = { 'application/vnd.example+json': nestedMetadata(101) }
+    if (attachment) {
+      cell.cell_type = 'markdown'
+      delete cell.outputs
+      delete cell.execution_count
+      cell.attachments = { 'data.json': payload }
+    } else {
+      cell.outputs = [{ output_type: 'display_data', data: payload, metadata: {} }]
+    }
+    app.reload(data)
+    await app.settle()
+    app.edit('edited')
+    app.save()
+    await app.settle()
+    assert.equal(app.requests('save').length, 0, 'invalid JSON never reaches upload serialization')
+    assert.equal(app.banner?.reason, 'json-too-complex')
+    assert.equal(app.banner.key, 'jsonTooComplex')
+    assert.equal(app.banner.action, attachment ? 'reload' : 'clear-outputs')
+    assert.equal(app.timersFor(1500).length, 0, 'autosave does not retry a rejected structure')
+    assert.match(app.bannerText, /JSON/)
+    const banner = app.component('Banner')
+    const rendered = banner.type(banner.props)
+    const clear = findElement(rendered, (value) => value.props?.title === 'Clear all outputs')
+    if (attachment) {
+      assert.equal(clear, null, 'clearing outputs cannot fix attachments')
+      const reload = findElement(rendered, (value) => value.props?.title === 'Reload')
+      assert.ok(reload)
+      const count = app.reloadCount
+      reload.props.onClick()
+      assert.equal(app.reloadCount, count + 1)
+    } else {
+      assert.ok(clear)
+      clear.props.onClick()
+      await app.settle()
+      assert.equal(app.banner, null)
+      const retry = app.save()
+      assert.ok(retry)
+      assert.equal(retry.body.notebook.cells[0].outputs.length, 0)
+      retry.resolve(response({ ok: true, value: { version: 'v3', size: 64 } }))
+      await app.settle()
+      assert.equal(app.toolbar.dirty, false)
+    }
+  }
+})
+
 test('rendered outputs, toolbar state and banners expose accessible semantics', async (t) => {
   const app = mountNotebook(t)
   await app.settle()

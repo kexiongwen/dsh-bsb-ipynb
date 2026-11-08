@@ -88,7 +88,7 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
   assert.ok(registered.en && registered.zh, 'both locale dictionaries are registered')
   const enKeys = Object.keys(registered.en).sort()
   assert.deepEqual(Object.keys(registered.zh).sort(), enKeys, 'both locales expose the same string keys')
-  assert.equal(enKeys.length, 56, 'the audited client dictionary exposes 56 translation keys')
+  assert.equal(enKeys.length, 57, 'the audited client dictionary exposes 57 translation keys')
   for (const key of enKeys) {
     assert.equal(typeof registered.en[key], 'string', `en.${key} must be a translated string`)
     assert.ok(registered.en[key].length > 0, `en.${key} must not be empty`)
@@ -820,18 +820,21 @@ test('metadata cycles keep the original TypeError serialization behavior', async
   }
 })
 
-test('save preflight reports serialization overflow as a capacity failure', async () => {
+test('save preflight rejects toJSON hooks without executing them', async () => {
   const { exports } = await loadClient()
-  const { notebookCapacity, NOTEBOOK_CAP_BYTES } = exports.__test
+  const { notebookCapacity } = exports.__test
+  let called = false
   const notebook = notebookWithMetadata({})
   notebook.cells[0].outputs[0].data = {
     'application/json': {
       toJSON() {
+        called = true
         throw new RangeError('Invalid string length')
       },
     },
   }
-  assert.deepEqual(notebookCapacity(notebook), { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES })
+  assert.throws(() => notebookCapacity(notebook), /toJSON hooks are not supported/)
+  assert.equal(called, false)
 })
 
 test('metadata capacity failure stores translatable state and reloads notebook metadata problems', async () => {

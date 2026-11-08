@@ -172,11 +172,14 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | POST request body cap | 64 MiB (36 MiB on `/ipynb/save`) |
 | Client output budget per cell | 32 MiB (UTF-8 bytes of the complete JSON) |
 | Pending NDJSON queue / single kernel output line | 64 MiB / 64 MiB |
-| Metadata nesting / node limit | 100 levels / 10,000 nodes |
+| Metadata and JSON MIME values (outputs / attachments) | 100 levels / 10,000 nodes per value |
+| Complete notebook structure | 128 levels / 1,000,000 nodes, including source lines on save |
 | Autosave / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
 | Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s + 500 ms exit confirmation / 3 s |
 | Execute stream drain timeout | 10 s (a client that stops reading is disconnected) |
 | Kernel idle sweep | 30 minutes by default; `DSH_IPYNB_KERNEL_IDLE_MS` changes it (`0` disables the sweep) |
+
+Save preflight and server serialization count the pretty-printed UTF-8 bytes, including the final newline, before allocating the complete JSON string or encoded buffer. Node budgets count containers and values across cells; shared values count at every occurrence. Live JSON outputs and their rendered text are also checked before formatting.
 
 ## 🧪 Development & Testing
 

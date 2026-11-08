@@ -406,18 +406,20 @@ test('saveNotebookFile maps malformed notebooks to bad-request', async (t) => {
   assert.equal(await readFile(file, 'utf8'), original)
 })
 
-test('saveNotebookFile maps serialization overflow to a too-large API error', async (t) => {
+test('saveNotebookFile rejects serialization hooks before they can replace validated data', async (t) => {
   const dir = await tempDir(t)
   const file = path.join(dir, 'demo.ipynb')
   const original = serializeNotebook(emptyNotebook())
   await writeFile(file, original)
   const read = await readNotebookFile(file)
   const notebook = emptyNotebook()
+  let called = false
   notebook.cells[0].outputs = [{
     output_type: 'display_data',
     data: {
       'application/json': {
         toJSON() {
+          called = true
           throw new RangeError('Invalid string length')
         },
       },
@@ -425,10 +427,12 @@ test('saveNotebookFile maps serialization overflow to a too-large API error', as
     metadata: {},
   }]
   await assert.rejects(saveNotebookFile(file, notebook, read.version), (error) => {
-    assert.equal(error.code, 'too-large')
-    assert.equal(error.status, 413)
+    assert.equal(error.code, 'bad-request')
+    assert.equal(error.status, 400)
+    assert.match(error.message, /toJSON hooks/)
     return true
   })
+  assert.equal(called, false)
   assert.equal(await readFile(file, 'utf8'), original)
 })
 

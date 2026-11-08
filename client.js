@@ -7,11 +7,16 @@ window.__ModuleLoader__.load({
 
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
-    const SAVE_BANNER_REASONS = new Set(['write-blocked', 'write-conflict', 'save-failed', 'capacity', 'metadata-too-complex', 'empty-file'])
+    const SAVE_BANNER_REASONS = new Set(['write-blocked', 'write-conflict', 'save-failed', 'capacity', 'metadata-too-complex', 'json-too-complex', 'empty-file'])
     const STATUS_POLL_MS = 10000
     const MAX_MARKDOWN_QUOTE_DEPTH = 64
     const METADATA_DEPTH_LIMIT = 100
     const METADATA_NODE_LIMIT = 10_000
+    const JSON_DEPTH_LIMIT = 100
+    const JSON_NODE_LIMIT = 10_000
+    const NOTEBOOK_DEPTH_LIMIT = 128
+    const NOTEBOOK_NODE_LIMIT = 1_000_000
+    const JSON_MIME_PATTERN = /^application\/(.*\+)?json$/
 
     const STRINGS = {
       en: {
@@ -52,6 +57,7 @@ window.__ModuleLoader__.load({
         saveBlockedLocked: 'The notebook file is in use by another program. Close it and save again.',
         capacityTooLarge: 'Notebook is {size} MiB; the save limit is 32 MiB. Clear outputs and save again.',
         metadataTooComplex: 'Notebook metadata is too complex to save. Reduce its nesting or number of entries.',
+        jsonTooComplex: 'Notebook JSON is too complex to save. Reduce its nesting or number of entries.',
         clearCellOutputs: 'Clear outputs',
         clearAllOutputs: 'Clear all outputs',
         clearAllOutputsConfirm: 'Clear the outputs of every cell? They can only be restored by running the cells again.',
@@ -110,6 +116,7 @@ window.__ModuleLoader__.load({
         saveBlockedLocked: '文件正被其它程序占用，请关闭后重试。',
         capacityTooLarge: 'notebook 内容约 {size} MiB，保存上限为 32 MiB。请清空输出后再保存。',
         metadataTooComplex: 'notebook 的 metadata 过于复杂，无法保存。请减少嵌套层级或条目数量。',
+        jsonTooComplex: 'notebook 的 JSON 数据过于复杂，无法保存。请减少嵌套层级或条目数量。',
         clearCellOutputs: '清空输出',
         clearAllOutputs: '清空全部输出',
         clearAllOutputsConfirm: '清空所有单元格的输出？只有重新运行才能恢复。',
@@ -983,128 +990,302 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function assertMetadataWithinLimits(metadata, label) {
-      // Walk iteratively so validation itself cannot overflow the call stack.
-      // Repeated references count as repeated JSON output; only active ancestors are cycles.
-      const ancestors = new WeakSet()
-      const stack = [{ value: metadata, depth: 0, exit: false }]
+    // Keep identical to lib/json-budget.js; parity is covered by regression tests.
+    function measureJsonBytes(value, {
+      limit = Infinity,
+      space = 2,
+      nodeLimit = 1_000_000,
+      depthLimit = 100,
+    } = {}) {
+      if (typeof limit !== 'number' || Number.isNaN(limit) || limit < 0
+        || typeof nodeLimit !== 'number' || Number.isNaN(nodeLimit) || nodeLimit < 0
+        || typeof depthLimit !== 'number' || Number.isNaN(depthLimit) || depthLimit < 0
+        || typeof space !== 'number' || Number.isNaN(space)) {
+        throw new TypeError('JSON budgets and indentation must be non-negative numbers')
+      }
+      const indent = Math.min(10, Math.max(0, Math.trunc(space)))
+      const active = new Set()
+      const stack = []
+      let bytes = 0
       let nodes = 0
-      while (stack.length) {
-        const frame = stack.pop()
-        if (frame.exit) {
-          ancestors.delete(frame.value)
+
+      function fail(reason) {
+        const error = new Error(reason === 'bytes'
+          ? 'JSON exceeds its byte limit'
+          : `JSON exceeds its ${reason} limit`)
+        error.code = reason === 'bytes' ? 'json-too-large' : 'json-too-complex'
+        error.reason = reason
+        // A lower bound is sufficient after early termination.
+        error.bytes = bytes
+        throw error
+      }
+
+      function add(count) {
+        bytes += count
+        if (bytes > limit) fail('bytes')
+      }
+
+      function stringBytes(text) {
+        add(2)
+        for (let index = 0; index < text.length; index += 1) {
+          const code = text.charCodeAt(index)
+          if (code === 0x22 || code === 0x5c
+            || code === 0x08 || code === 0x09 || code === 0x0a
+            || code === 0x0c || code === 0x0d) {
+            add(2)
+          } else if (code < 0x20) {
+            add(6)
+          } else if (code < 0x80) {
+            add(1)
+          } else if (code < 0x800) {
+            add(2)
+          } else if (code >= 0xd800 && code <= 0xdbff) {
+            const next = text.charCodeAt(index + 1)
+            if (next >= 0xdc00 && next <= 0xdfff) {
+              add(4)
+              index += 1
+            } else {
+              add(6)
+            }
+          } else {
+            add(code >= 0xdc00 && code <= 0xdfff ? 6 : 3)
+          }
+        }
+      }
+
+      function descriptorValue(object, key, inherited = false) {
+        let owner = object
+        while (owner !== null) {
+          const descriptor = Object.getOwnPropertyDescriptor(owner, key)
+          if (descriptor) {
+            if (!Object.hasOwn(descriptor, 'value')) {
+              throw new TypeError('JSON accessors are not supported')
+            }
+            return descriptor.value
+          }
+          if (!inherited) break
+          owner = Object.getPrototypeOf(owner)
+        }
+        return undefined
+      }
+
+      function omitted(item) {
+        return item === undefined || typeof item === 'function' || typeof item === 'symbol'
+      }
+
+      function visit(item, depth) {
+        nodes += 1
+        if (nodes > nodeLimit) fail('nodes')
+        if (depth > depthLimit) fail('depth')
+        if (item === null || omitted(item)) {
+          add(4)
+        } else if (typeof item === 'string') {
+          stringBytes(item)
+        } else if (typeof item === 'number') {
+          add(Number.isFinite(item) ? String(item).length : 4)
+        } else if (typeof item === 'boolean') {
+          add(item ? 4 : 5)
+        } else if (typeof item !== 'object') {
+          throw new TypeError('Value cannot be represented as JSON')
+        } else {
+          const array = Array.isArray(item)
+          const prototype = Object.getPrototypeOf(item)
+          // Checking the prototype's parent also accepts objects from another realm.
+          if (!array && prototype !== null && Object.getPrototypeOf(prototype) !== null) {
+            throw new TypeError('Only plain JSON data objects are supported')
+          }
+          if (typeof descriptorValue(item, 'toJSON', true) === 'function') {
+            throw new TypeError('JSON toJSON hooks are not supported')
+          }
+          if (active.has(item)) throw new TypeError('Converting circular structure to JSON')
+          add(2)
+          active.add(item)
+          stack.push({ item, depth, array, keys: array ? null : Object.keys(item), index: 0, written: 0 })
+        }
+      }
+
+      if (omitted(value)) throw new TypeError('Value cannot be represented as JSON')
+      visit(value, 0)
+      while (stack.length > 0) {
+        const frame = stack[stack.length - 1]
+        const length = frame.array ? frame.item.length : frame.keys.length
+        if (frame.index >= length) {
+          if (indent && frame.written > 0) add(1 + frame.depth * indent)
+          active.delete(frame.item)
+          stack.pop()
           continue
         }
-        nodes += 1
-        if (nodes > METADATA_NODE_LIMIT) {
-          const error = new Error(`${label} exceeds the maximum node count of ${METADATA_NODE_LIMIT}`)
-          error.code = 'metadata-too-complex'
-          throw error
+        const key = frame.array ? String(frame.index) : frame.keys[frame.index]
+        frame.index += 1
+        const item = descriptorValue(frame.item, key, frame.array)
+        if (!frame.array && omitted(item)) continue
+        if (frame.written > 0) add(1)
+        if (indent) add(1 + (frame.depth + 1) * indent)
+        if (!frame.array) {
+          stringBytes(key)
+          add(indent ? 2 : 1)
         }
-        if (frame.depth > METADATA_DEPTH_LIMIT) {
-          const error = new Error(`${label} exceeds the maximum depth of ${METADATA_DEPTH_LIMIT}`)
-          error.code = 'metadata-too-complex'
-          throw error
+        frame.written += 1
+        visit(item, frame.depth + 1)
+      }
+      return bytes
+    }
+
+    function assertJsonWithinLimits(value, label, metadata = false) {
+      try {
+        measureJsonBytes(value ?? null, {
+          limit: NOTEBOOK_CAP_BYTES,
+          space: 0,
+          nodeLimit: metadata ? METADATA_NODE_LIMIT : JSON_NODE_LIMIT,
+          depthLimit: metadata ? METADATA_DEPTH_LIMIT : JSON_DEPTH_LIMIT,
+        })
+      } catch (error) {
+        if (error.code === 'json-too-complex') {
+          const depth = error.reason === 'depth'
+          error.message = `${label} exceeds the maximum ${depth ? 'depth of ' + JSON_DEPTH_LIMIT : 'node count of ' + JSON_NODE_LIMIT}`
+          if (metadata) error.code = 'metadata-too-complex'
         }
-        const value = frame.value
-        if (!value || typeof value !== 'object') continue
-        if (ancestors.has(value)) throw new TypeError('Converting circular structure to JSON')
-        ancestors.add(value)
-        stack.push({ value, depth: frame.depth, exit: true })
-        const children = Array.isArray(value) ? value : Object.values(value)
-        // Every child counts as at least one more node; reject an over-wide
-        // object before materializing one stack frame per child.
-        if (children.length > METADATA_NODE_LIMIT - nodes) {
-          const error = new Error(`${label} exceeds the maximum node count of ${METADATA_NODE_LIMIT}`)
-          error.code = 'metadata-too-complex'
-          throw error
-        }
-        for (let index = children.length - 1; index >= 0; index -= 1) {
-          stack.push({ value: children[index], depth: frame.depth + 1, exit: false })
+        throw error
+      }
+    }
+
+    function assertMetadataWithinLimits(metadata, label) {
+      assertJsonWithinLimits(metadata, label, true)
+    }
+
+    function assertMimeBundleWithinLimits(bundle, label) {
+      if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) return
+      for (const mime in bundle) {
+        if (Object.hasOwn(bundle, mime) && JSON_MIME_PATTERN.test(mime)) {
+          assertJsonWithinLimits(bundle[mime], label + ' JSON')
         }
       }
     }
 
-    function assertNotebookMetadataWithinLimits(notebook) {
+    function notebookSaveSnapshot(notebook) {
+      // Remove transient fields before charging the disk budget. Bound these
+      // shallow copies too, before joining source arrays or formatting JSON.
+      let nodes = 0
+      function charge(value, isOutput = false) {
+        nodes += 1
+        for (const key in value) {
+          if (!Object.hasOwn(value, key)) continue
+          if (isOutput && (key === 'display_id' || (key === 'execution_count' && value.output_type !== 'execute_result'))) continue
+          nodes += 1
+          if (nodes > NOTEBOOK_NODE_LIMIT) {
+            const error = new Error('Notebook exceeds its maximum node count')
+            error.code = 'json-too-complex'
+            throw error
+          }
+        }
+        if (nodes > NOTEBOOK_NODE_LIMIT) {
+          const error = new Error('Notebook exceeds its maximum node count')
+          error.code = 'json-too-complex'
+          throw error
+        }
+      }
+      charge(notebook)
+      const cells = []
+      for (const cell of notebook.cells) {
+        charge(cell)
+        if (cell.cell_type !== 'code' || !Array.isArray(cell.outputs)) {
+          cells.push(cell)
+          continue
+        }
+        const outputs = []
+        for (const output of cell.outputs) {
+          charge(output, true)
+          outputs.push(stripIllegalOutputFields(output))
+        }
+        cells.push({ ...cell, outputs })
+      }
+      return { ...notebook, cells }
+    }
+
+    function assertNotebookStructureWithinLimits(notebook) {
+      // Bound the complete input before normalization clones cells or joins
+      // source arrays. The final disk projection is measured separately.
+      measureJsonBytes(notebook, {
+        limit: NOTEBOOK_CAP_BYTES, space: 0,
+        nodeLimit: NOTEBOOK_NODE_LIMIT, depthLimit: NOTEBOOK_DEPTH_LIMIT,
+      })
       assertMetadataWithinLimits(notebook.metadata, 'Notebook metadata')
       for (const cell of notebook.cells) {
         assertMetadataWithinLimits(cell.metadata, 'Cell metadata')
+        if (cell.attachments && typeof cell.attachments === 'object') {
+          for (const name in cell.attachments) {
+            if (Object.hasOwn(cell.attachments, name)) {
+              assertMimeBundleWithinLimits(cell.attachments[name], 'Attachment')
+            }
+          }
+        }
         if (!Array.isArray(cell.outputs)) continue
-        for (const output of cell.outputs) assertMetadataWithinLimits(output?.metadata, 'Output metadata')
+        for (const output of cell.outputs) {
+          assertMetadataWithinLimits(output?.metadata, 'Output metadata')
+          assertMimeBundleWithinLimits(output?.data, 'Output')
+        }
       }
     }
 
     function metadataRecoveryAction(notebook) {
-      // Clearing outputs cannot repair notebook/cell metadata (including when
-      // both locations are over the limit), so those cases must reload instead.
-      try {
-        assertMetadataWithinLimits(notebook.metadata, 'Notebook metadata')
-        for (const cell of notebook.cells) assertMetadataWithinLimits(cell.metadata, 'Cell metadata')
-      } catch (error) {
-        if (error && error.code === 'metadata-too-complex') return 'reload'
-        throw error
+      // Offer clearing only when it actually removes every structural problem,
+      // including JSON attachments and a budget shared across many cells.
+      if (notebook.cells.length > NOTEBOOK_NODE_LIMIT) return 'reload'
+      const cleared = {
+        ...notebook,
+        cells: notebook.cells.map((cell) => cell.cell_type === 'code' ? { ...cell, outputs: [] } : cell),
       }
-      let outputMetadataTooComplex = false
-      for (const cell of notebook.cells) {
-        if (!Array.isArray(cell.outputs)) continue
-        for (const output of cell.outputs) {
-          try {
-            assertMetadataWithinLimits(output?.metadata, 'Output metadata')
-          } catch (error) {
-            if (!error || error.code !== 'metadata-too-complex') throw error
-            // clearAllOutputs only touches code cells; anything else must reload.
-            if (cell.cell_type !== 'code') return 'reload'
-            outputMetadataTooComplex = true
-          }
-        }
-      }
-      return outputMetadataTooComplex ? 'clear-outputs' : 'reload'
+      return notebookCapacity(cleared).ok ? 'clear-outputs' : 'reload'
     }
 
-    // Older Safari (<16.4) cannot parse lookbehind; keep the same semantics
-    // (each line keeps its trailing newline) with a manual scan.
-    function splitSourceLines(source) {
+    // Older Safari (<16.4) cannot parse lookbehind; each line keeps its newline.
+    function splitSourceLines(source, budget = { lines: 0 }) {
       const lines = []
       let start = 0
-      for (;;) {
-        const index = source.indexOf('\n', start)
-        if (index === -1) {
-          if (start < source.length) lines.push(source.slice(start))
-          break
+      while (start < source.length) {
+        if (++budget.lines > NOTEBOOK_NODE_LIMIT) {
+          const error = new Error('Notebook exceeds its maximum node count')
+          error.code = 'json-too-complex'
+          throw error
         }
-        lines.push(source.slice(start, index + 1))
-        start = index + 1
+        const newline = source.indexOf('\n', start)
+        const end = newline === -1 ? source.length : newline + 1
+        lines.push(source.slice(start, end))
+        start = end
       }
       return lines
     }
 
-    function serializeNotebook(notebook) {
-      const value = normalizeNotebook(notebook)
+    function notebookDiskValue(notebook) {
+      const snapshot = notebookSaveSnapshot(notebook)
+      assertNotebookStructureWithinLimits(snapshot)
+      const value = normalizeNotebook(snapshot)
       value.nbformat = 4
       value.nbformat_minor = 5
-      value.cells = value.cells.map((cell) => {
-        const copy = { ...cell, id: cell.id || newCellId() }
-        if (copy.cell_type === 'code') {
-          copy.outputs = Array.isArray(copy.outputs)
-            ? copy.outputs.map(stripIllegalOutputFields)
-            : []
-          copy.execution_count = typeof copy.execution_count === 'number' ? copy.execution_count : null
-        }
-        const source = String(copy.source ?? '')
-        copy.source = source === '' ? [] : splitSourceLines(source)
-        return copy
-      })
-      assertNotebookMetadataWithinLimits(value)
+      const budget = { lines: 0 }
+      value.cells = value.cells.map((cell) => ({
+        ...cell,
+        source: splitSourceLines(String(cell.source ?? ''), budget),
+      }))
+      return value
+    }
+
+    function notebookBytes(value, limit) {
+      return measureJsonBytes(value, {
+        limit: Math.max(0, limit - 1), space: 2,
+        nodeLimit: NOTEBOOK_NODE_LIMIT, depthLimit: NOTEBOOK_DEPTH_LIMIT,
+      }) + 1
+    }
+
+    function serializeNotebook(notebook) {
+      const value = notebookDiskValue(notebook)
+      notebookBytes(value, NOTEBOOK_CAP_BYTES)
       return JSON.stringify(value, null, 2) + '\n'
     }
 
-    // Keep in sync with NOTEBOOK_CAP_BYTES in lib/notebook.js. The server
-    // writes pretty-printed nbformat JSON and rejects anything above this cap
-    // with 413, so measuring the same serialization is the strictest check.
+    // Match the server's pretty-printed UTF-8 disk budget, including its newline,
+    // before allocating either the JSON string or an encoded copy.
     const NOTEBOOK_CAP_BYTES = 32 * 1024 * 1024
-    const capacityEncoder = new TextEncoder()
-    // Immutable notebook snapshots make their default-limit results reusable;
-    // weak keys do not retain snapshots after the viewer discards them.
     const notebookCapacities = new WeakMap()
 
     function notebookCapacity(notebook, limit = NOTEBOOK_CAP_BYTES) {
@@ -1113,15 +1294,15 @@ window.__ModuleLoader__.load({
       if (cacheable && notebookCapacities.has(notebook)) return notebookCapacities.get(notebook)
       let result
       try {
-        const bytes = capacityEncoder.encode(serializeNotebook(notebook)).byteLength
+        const bytes = notebookBytes(notebookDiskValue(notebook), limit)
         result = { ok: bytes <= limit, bytes }
       } catch (error) {
-        if (error && error.code === 'metadata-too-complex') {
-          result = { ok: false, reason: 'metadata-too-complex', bytes: 0 }
+        if (error && (error.code === 'metadata-too-complex' || error.code === 'json-too-complex')) {
+          result = { ok: false, reason: error.code, bytes: 0 }
+        } else if (error && error.code === 'json-too-large') {
+          // The early-exit count is a lower bound, not an exact oversized size.
+          result = { ok: false, bytes: error.bytes + 1 }
         } else if (error instanceof RangeError) {
-          // A notebook whose pretty-printed form exceeds the engine's maximum
-          // string length cannot be uploaded at all; report it as a capacity
-          // failure instead of letting the RangeError escape as a rejected save.
           result = { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES }
         } else {
           throw error
@@ -1235,12 +1416,16 @@ window.__ModuleLoader__.load({
 
     const MAX_CELL_OUTPUT_BYTES = 32 * 1024 * 1024
     const OUTPUT_EVENTS = new Set(['stream', 'display_data', 'execute_result', 'error', 'update_display_data', 'clear_output'])
-    const outputEncoder = new TextEncoder()
     const outputSizes = new WeakMap()
     const outputBudgets = new WeakMap()
 
     function jsonBytes(value) {
-      return outputEncoder.encode(JSON.stringify(value) ?? 'null').byteLength
+      return measureJsonBytes(value ?? null, {
+        space: 0,
+        limit: MAX_CELL_OUTPUT_BYTES,
+        nodeLimit: NOTEBOOK_NODE_LIMIT,
+        depthLimit: NOTEBOOK_DEPTH_LIMIT,
+      })
     }
 
     function outputSize(output) {
@@ -1277,11 +1462,25 @@ window.__ModuleLoader__.load({
     }
 
     function reduceOutputs(previous, event) {
+      try {
+        return reduceOutputsWithinLimits(previous, event)
+      } catch (error) {
+        if (error?.code === 'json-too-large' || error?.code === 'json-too-complex'
+          || error?.code === 'metadata-too-complex'
+          || (error instanceof TypeError && /JSON|circular/i.test(error.message))) {
+          return limitedOutputs()
+        }
+        throw error
+      }
+    }
+
+    function reduceOutputsWithinLimits(previous, event) {
       let outputs = Array.isArray(previous) ? previous : []
       if (!event || !OUTPUT_EVENTS.has(event.type)) return outputs
+      // Even invalid retained output must remain clearable.
+      if (event.type === 'clear_output' && !event.wait) return []
       let budget = outputBudget(outputs)
       if (event.type === 'clear_output') {
-        if (!event.wait) return []
         if (budget.pendingClear) return outputs
         const next = outputs.slice()
         outputBudgets.set(next, { ...budget, pendingClear: true })
@@ -1304,12 +1503,14 @@ window.__ModuleLoader__.load({
         if (!matches.length) return outputs
         const data = event.data || {}
         const metadata = event.metadata || {}
+        assertMimeBundleWithinLimits(data, 'Output JSON')
+        assertMetadataWithinLimits(metadata, 'Output metadata')
         const payloadBytes = jsonBytes(data) + jsonBytes(metadata)
         const replacements = []
         let bytes = budget.bytes
         for (const index of matches) {
           const old = outputs[index]
-          // Encode the shared payload once, including all nested values and
+          // Measure the shared payload once, including all nested values and
           // keys. Each matching display slot still consumes its full size.
           const size = jsonBytes({ ...old, data: null, metadata: null }) - 8 + payloadBytes
           bytes += size - outputSize(old)
@@ -1333,6 +1534,8 @@ window.__ModuleLoader__.load({
         }
       } else {
         output = { output_type: event.type, data: event.data || {}, metadata: event.metadata || {} }
+        assertMimeBundleWithinLimits(output.data, 'Output JSON')
+        assertMetadataWithinLimits(output.metadata, 'Output metadata')
         if (event.type === 'execute_result' && Number.isInteger(event.execution_count)) output.execution_count = event.execution_count
         if (event.display_id) output.display_id = event.display_id
       }
@@ -1369,10 +1572,20 @@ window.__ModuleLoader__.load({
       return value == null ? '' : String(value)
     }
 
-    function renderJsonOutput(value) {
+    function renderJsonOutput(value, nodeLimit = JSON_NODE_LIMIT, depthLimit = JSON_DEPTH_LIMIT) {
       try {
+        measureJsonBytes(value, { limit: MAX_CELL_OUTPUT_BYTES, nodeLimit, depthLimit })
         // A top-level string is JSON (show it quoted), objects get pretty print.
         return typeof value === 'string' ? JSON.stringify(value) : JSON.stringify(value, null, 2)
+      } catch {
+        return '[unserializable JSON output]'
+      }
+    }
+
+    function renderMimeBundle(bundle) {
+      try {
+        assertMimeBundleWithinLimits(bundle, 'Output JSON')
+        return renderJsonOutput(bundle, NOTEBOOK_NODE_LIMIT, NOTEBOOK_DEPTH_LIMIT)
       } catch {
         return '[unserializable JSON output]'
       }
@@ -1432,7 +1645,7 @@ window.__ModuleLoader__.load({
       if (data['text/plain'] != null) {
         return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, mimeText(data['text/plain']))
       }
-      return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, JSON.stringify(data, null, 2))
+      return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, renderMimeBundle(data))
     }
 
     function IconButton(props) {
@@ -1966,11 +2179,11 @@ window.__ModuleLoader__.load({
           // repeat on every autosave and cannot be fixed by editing the source.
           setSaveState('failed')
           setCapacityBlocked(true)
-          if (capacity.reason === 'metadata-too-complex') {
+          if (capacity.reason === 'metadata-too-complex' || capacity.reason === 'json-too-complex') {
             setBanner({
               kind: 'error',
               reason: capacity.reason,
-              key: 'metadataTooComplex',
+              key: capacity.reason === 'metadata-too-complex' ? 'metadataTooComplex' : 'jsonTooComplex',
               action: metadataRecoveryAction(snapshot),
             })
           } else {
@@ -3074,6 +3287,12 @@ window.__ModuleLoader__.load({
       NOTEBOOK_CAP_BYTES,
       METADATA_DEPTH_LIMIT,
       METADATA_NODE_LIMIT,
+      JSON_DEPTH_LIMIT,
+      JSON_NODE_LIMIT,
+      NOTEBOOK_DEPTH_LIMIT,
+      NOTEBOOK_NODE_LIMIT,
+      measureJsonBytes,
+      metadataRecoveryAction,
       notebookCapacity,
       capacityText,
       capacityNoOutputsText,

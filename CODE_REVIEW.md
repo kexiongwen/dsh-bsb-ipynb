@@ -4,6 +4,7 @@
 > **2026-11-08 批次**：M-10、M-12、M-16、L-16、L-21 已修复并补齐回归测试；随后 M-15（有界版本读取，+5 回归）与 L-23（Windows 大小写 alias 回退，+3 回归）也已完成。以上条目按约定从本文件删除（修复细节见 `git log` 与 `test/`）。全量测试 **317 tests / 273 pass / 44 skip / 0 fail**（Windows 11，约 18.6s）。
 > **本次修复**：M-13 已通过客户端等待保存、读取响应版本隔离，以及服务端同路径读写队列修复；跨单元格 `display_id` 更新也已修复。新增回归覆盖保存成功/冲突/失败、取消/编辑/卸载、旧响应隔离、跨 cell 更新与容量/失败回滚。本次完整测试 **352 tests / 308 pass / 44 skip / 0 fail**（Windows 11，约 19.8s）。网络失败时，尚未完成请求解析和路径解析、未进入文件队列的保存不在排队保证内；严格确认此类请求需要额外操作确认协议。
 > **内核生命周期修复**：M-11、M-14 与 T-8 已完成。关闭等待实际退出，强杀后仍无退出事件则报告失败并保留条目；同一路径的启动/切换/重启按序执行，关闭可及时取消待完成操作，路径别名随实际替代内核迁移。回归覆盖并发 A→B/C、执行忙态、关闭打断启动/重启、超时保留条目、空闲回收/插件清理、计时器延迟与迟到退出。本轮完整测试 **373 tests / 329 pass / 44 skip / 0 fail**（Windows 11，约 19.9s）。
+> **JSON 预算修复**：M-2 与 T-6 已完成。JSON MIME 输出及附件与 metadata 一样受每值 100 层 / 10,000 节点约束；整本共享 1,000,000 节点预算。保存与显示在完整字符串 / 编码缓冲区分配前计量格式化 UTF-8 字节，源码拆行及拼接也有界。新增 51 项回归，覆盖结构边界、缩进放大、32MiB 精确容量、临时 display_id 排除、原文件与目录不变、实时更新及界面恢复；本轮完整测试 **424 tests / 380 pass / 44 skip / 0 fail**（Windows 11，约 20.4s）。
 > **环境**：
 
 | 平台 | 环境 |
@@ -11,7 +12,7 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **373 tests / 329 pass / 44 skip / 0 fail**（2026-11-08）。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 Windows 工作区全量测试为 **424 tests / 380 pass / 44 skip / 0 fail**（2026-11-08）。
 > **增量复核**：独立审查新增问题编号为 **M-13～M-17**（其中 M-13～M-16 已修复）；此前及后续已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
@@ -21,20 +22,19 @@
 
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
-| Medium | 6 | M-2、M-4、M-6、M-7、M-8、M-17 |
+| Medium | 5 | M-4、M-6、M-7、M-8、M-17 |
 | Low | 4 | L-5、L-12、L-13、L-22 |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
-| 测试缺口 | 4 | T-1、T-3、T-5、T-6 |
+| 测试缺口 | 3 | T-1、T-3、T-5 |
 
 > 原 Windows 报告中的独立条目已合并：W-B1 → M-6、W-B5 → L-10、W-B6 → L-22、W-B7 → L-23、W-C3 → L-24，W-C6/N-02/N-03 收入 §3；其余 Windows 条目已修复并从报告删除。
 
 ---
 
-## 1. Medium（6 项，未修复）
+## 1. Medium（5 项，未修复）
 
 | ID | 平台 | 位置（快照时） | 问题与影响 | 证据 | 建议 |
 | --- | --- | --- | --- | --- | --- |
-| **M-2**（P1） | 全平台 | `lib/notebook.js:38-73`（限制）、`107-120`（data/attachments 原样保留）、`253-268`（serialize）、`384-408`（先序列化后查 32MiB） | metadata 的 100 层/10,000 节点限制**只覆盖 metadata 对象**：`execute_result/display_data.data[application/*+json]`、`attachments[...]` 中同样会被 pretty-print 的 JSON 值完全不受限，且限制是「每对象」而非整本预算；32MiB 上限仍在 `JSON.stringify` 之后检查。小输入可造成显著内存/CPU 放大（DoS 面），多 cell 或并发保存可进一步放大；客户端保存预检也需同步 pretty-stringify 整本 notebook；快照缓存只避免重复测量，不限制单次分配。RangeError→413 只改善错误分类，不构成分配上限。 | 【已验证】depth=4200 的合法 notebook：compact 42,351 B、read ok，pretty 35,435,973 B（约 **837×**），RSS +132MiB，随后才 413；另有 9,230 B → 4,549,895 B（约 493×）独立复现。 | ① 对 data/attachments 的 JSON 值同样应用 depth/node 限制，并设整本节点/字节预算；② 把 32MiB 做成**有界序列化预算**，超限即中止；③ 快照缓存只减少重复测量，仍需为有界序列化提供统一预算。 |
 | **M-4**（P2） | 全平台 | `client.js:1135-1188`（`OutputView` 未 memo）、`1042-1126`（`reduceOutputs` 流合并）、`1339`（逐 output 渲染） | 大输出渲染 O(n²)：每次流事件产生新 outputs 数组 → 整 cell 重渲；`OutputView` 未按 output 对象缓存，`ansiToHtml`/`sanitizeHtml`/markdown 全文重算；流合并每次 `last.text + chunk` 全量复制；高频 NDJSON 事件无 rAF/短窗口合并。大日志可造成明显 UI 卡顿；真实浏览器布局成本未测量。 | 【已验证】16KiB/chunk reducer + ANSI 微基准 1/2/4/8MiB = **16/57/216/843ms**（≈4×/倍），不含真实 React/DOM。 | memo 未变化 output；高频事件按 rAF/短窗口合并；保留 ANSI 增量状态或分块渲染；保留现有精确字节预算测试。 |
 | **M-6**（P2） | 全平台（Windows 形态） | `lib/gate.js:64-85,152-185,273-279`；`lib/notebook.js:308-330`（读）、`410-447`（存） | 路径授权（realpath 检查）与真正的文件 I/O 是两次独立解析，无 fd/inode 绑定：授权后把目标替换为指向工作区外的 symlink → 越界读；把父目录替换为指向外部的 symlink 且外部内容匹配 baseVersion → 越界写。二次版本校验不缓解（两次 readFile 沿 symlink 读到同一外部内容）。前提是竞争者能并发修改工作区目录项，纯 HTTP 请求本身不能制造 symlink。**Windows 形态（原 W-B1）**：预置的越界 junction 会被 403 正确拒绝，但授权后把父目录换成 junction 即可越界读/写；Windows 创建 junction **不需要管理员/开发者模式**，门槛低于 macOS symlink。 | 【已验证】按 route 相同调用顺序确定性替换：读得到外部内容、写成功写出局外文件（macOS symlink 与 Windows junction 均复现）。注意：junction 在 Node 的 `lstat/readlink` 中是否可见取决于运行环境（见 §8 未核实 1），不能把安全判断建立在「能否看到 reparse point」上。 | 读取将授权、打开、fstat 身份核验和有界读取绑定到同一 fd，并逐组件防跟随；写入绑定父目录身份并使用 dirfd/openat 等价能力，至少在 temp-write/rename 前重验 realpath/dev/ino。仅再做一次字符串 realpath 不能根治。 |
 | **M-7**（P2） | 全平台 | `lib/gate.js:16-53` | 工作区根只认 `ctx.get('workingDirectory').get(session)` / `session.header.cwd`，**不跟随 better-sidebar 的活动根**：文件树根是 `activeWorktreeRootOf(...)`（会采纳 linked git worktree，可能在会话 cwd 之外）。会话活动根为 linked worktree 时，`/ipynb/read`、`/ipynb/save`、`/ipynb/execute`、`/ipynb/status` 全部 403，核心功能不可用。Windows 下同样 403；跨盘 worktree 走 `path.relative` 返回绝对路径 → fail-closed（行为正确但仍是 403）。 | 【契约核对】better-sidebar 0.30.1：`src/index.ts:730-735`、`src/active-worktree.ts:466`；文件 viewer 收到绝对路径后本插件原样提交（`client.js:621,1586,1835`）。未在真实 worktree 会话端到端复现。 | 引入与 better-sidebar 对齐的「活动根集合」（主根 + 关联 worktree realpath，realpath 落在任一候选根内即允许）。 |
@@ -64,14 +64,13 @@
 
 ---
 
-## 4. 测试缺口（4 项，未完成）
+## 4. 测试缺口（3 项，未完成）
 
 | ID | 位置 | 缺口 | 建议 |
 | --- | --- | --- | --- |
 | **T-1**（High，测试可信度） | `client.js` 的 `cleanNode`/`sanitizeHtml` vs `test/client.test.mjs` | 白名单清洗器的真实行为测试仍不完整：2026-11-08 新增 `test/client-dom-stub.mjs` 后，`img[src]` 解析、`sanitizeUrl` 图片策略、缺失图片降级与无 DOMParser 降级已有真实 DOM 用例；`cleanNode` 的 DROP_TAGS、属性删除、`javascript:` 链接化、`target+rel` 覆写及 unwrap 主路径仍无覆盖。L-12 藏于此。 | 复用现有最小 DOM stub 补 DROP_TAGS/属性白名单/`a[target][rel]` 断言，以操作计数验证大量未知标签不再反复扫描。 |
 | T-3 | `client.js` 的快捷键/工具栏/解释器切换/轮询/autosave | 客户端主交互缺测试：工具栏 interrupt/restart/shutdown、解释器切换（confirm + localStorage）、`visible` 轮询、1.5s autosave 正路径、`onToolbarState` 上报仍无直接覆盖；2026-11-08 已补阅读态窗口快捷键（目标解析/IME/preventDefault/双触发/unmount）。 | 复用现有 mount harness（已 mock timer/localStorage/confirm）补齐其余交互；补 composition（`isComposing`/229）× 5 快捷键、CapsLock `KeyS`、CRLF 渲染的回归。 |
 | T-5 | `test/routes.test.mjs`、`test/e2e.test.mjs`、`test/execute-disconnect.test.mjs` 等 | `/execute` 的永不 drain 已有真实 `node:http` + TCP 回归，但其余 HTTP 路径仍主要使用手写 `req/res` 替身；NDJSON 分块、真实 `close`/`writableEnded`、header 大小写及中途 abort 的覆盖仍不完整。 | 扩展真实 socket 端到端测试（`/health`、`/read` 成功/404、`/execute` 流式读取与中途 abort），保留现有慢读/永不 drain 用例。 |
-| T-6 | — | 剩余放大/保护/恢复类逻辑缺少回归测试：M-2 的 data 放大与整本预算。M-15 的 stat→read 增长窗口已随修复补齐（首次/第二次版本校验与 stale-stat 端到端均断言 413）。 | 随 M-2 修复补测试。 |
 
 ---
 
@@ -79,9 +78,9 @@
 
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
-| **P1** | M-2（+T-1） | M-2 序列化放大可造成内存/CPU 资源风险；T-1 仍是安全关键测试可信度问题。 |
+| **P1** | T-1 | 安全关键清洗器的测试覆盖仍不完整。 |
 | **P2** | M-4、M-6、M-7、M-8、M-17 | 性能、路径与存储加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-17 需由本插件增加受控图片路由。 |
-| **P3** | §2 的 Low（按组批量）、T-3/T-5/T-6、§3 Nit | 低成本、低风险，可合并处理。 |
+| **P3** | §2 的 Low（按组批量）、T-3/T-5、§3 Nit | 低成本、低风险，可合并处理。 |
 
 ---
 
@@ -90,7 +89,7 @@
 - **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-22 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；当前关闭仍先尝试显式 shutdown 协议，依赖进程退出事件及进程树回收确认清理，不把已发送信号视为成功。
 - **Windows 大小写回退边界（2026-11-08 修复 L-23 的已知范围）**：回退仅在 win32 启用、仅对已删除/missing 路径、仅匹配同 session + 同 realpath workspace，且多候选歧义一律 fail-closed；但 Windows per-directory case-sensitive NTFS 下缺失组件无法用 inode 校验，单 live 变体时 case 变体缺失拼写可能命中同 session/workspace 的该内核（无越权，默认 NTFS 不成立）。macOS APFS 默认大小写不敏感，但本回退未覆盖 macOS（原条目平台标注为 Windows 形态）。
-- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **373 / 329 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
+- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 Windows 工作区为 **424 / 380 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
 
 ---
 
@@ -99,9 +98,8 @@
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
 | 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
-| 全量测试（当前工作区） | `npm test`（Windows） | **373 tests / 329 pass / 44 skip / 0 fail**（约 19.9s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
+| 全量测试（当前工作区） | `npm test`（Windows） | **424 tests / 380 pass / 44 skip / 0 fail**（约 20.4s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
-| M-2 | 本地受控深度 JSON 故障注入（脚本未随仓库提供） | 42,351 B → 35,435,973 B（837×），RSS +132MiB；独立小用例 9,230 B → 4,549,895 B |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |
 | M-6 | 本地按路由调用顺序注入（脚本未随仓库提供）；Windows junction 注入 | macOS：symlink 替换后读泄漏/写越界；Windows：预置 junction 被 403 拒绝，授权后父目录换 junction 可越界读/写 |
 | M-7 | better-sidebar 0.30.1 源码（`src/index.ts:730-735`、`src/active-worktree.ts:466`） | 文件树根用 `activeWorktreeRootOf`；Windows 同样 403 |
