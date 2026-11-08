@@ -60,27 +60,6 @@ test('a second execute is rejected without stealing the first listener', { skip 
   }
 })
 
-test('restart settles a running cell and leaves a usable kernel', { skip }, async (t) => {
-  const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget(t, 'restart.ipynb')
-  try {
-    const entry = await manager.getOrStart(target, python)
-    const events = []
-    const run = entry.run('c1', 'import time\nprint("started", flush=True)\ntime.sleep(5)\nprint("late")', (event) => events.push(event))
-    // Wait until the kernel has actually started the cell instead of guessing
-    // with a fixed delay.
-    await waitFor(() => events.some((event) => event.type === 'status' && event.execution_state === 'busy'), 10_000)
-    await entry.restart()
-    const reply = await within(run, 5_000, 'restart did not settle the running cell')
-    assert.equal(reply.ok, false)
-    assert.ok(events.some((event) => event.type === 'error'))
-    const after = await within(entry.run('c2', 'print("after")', () => {}), 15_000, 'kernel was not usable after restart')
-    assert.equal(after.ok, true)
-  } finally {
-    await manager.disposeAll()
-  }
-})
-
 test('shutdown and os._exit settle the running cell', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
   const firstTarget = await makeTarget(t, 'shutdown.ipynb')
@@ -127,63 +106,15 @@ test('a hard-killed bridge leaves no connection file behind', { skip }, async (t
   }
 })
 
-test('a broken stdin pipe is handled instead of crashing the host', { skip }, async (t) => {
-  const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget(t, 'epipe.ipynb')
-  try {
-    const entry = await manager.getOrStart(target, python)
-    entry.proc.stdin.destroy(new Error('write EPIPE'))
-    await waitFor(() => entry.ready === false, 5_000)
-    assert.equal(entry.ready, false)
-    await assert.rejects(entry.run('c1', '1'), (error) => error.code === 'kernel-unavailable')
-    assert.equal(entry.busy, false)
-  } finally {
-    await manager.disposeAll()
-  }
-})
+// The stdin-failure, synchronous-write-failure and concurrent-getOrStart
+// coverage moved to test/kernel-lifecycle.test.mjs's fake-child harness (B-1),
+// where it asserts the same entry state without spawning real Python.
 
-test('a synchronous stdin write failure clears the busy execution state', { skip }, async (t) => {
-  const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget(t, 'write-failure.ipynb')
-  let stdin
-  let originalWrite
-  try {
-    const entry = await manager.getOrStart(target, python)
-    stdin = entry.proc.stdin
-    originalWrite = stdin.write
-    stdin.write = () => {
-      throw new Error('simulated write failure')
-    }
-    await assert.rejects(entry.run('c1', '1'), (error) => error.code === 'kernel-unavailable')
-    assert.equal(entry.currentRun, null)
-    assert.equal(entry.busy, false)
-    assert.equal(entry.executionState, 'dead')
-  } finally {
-    if (stdin && originalWrite) stdin.write = originalWrite
-    await manager.disposeAll()
-  }
-})
-
-test('concurrent getOrStart creates only one kernel entry', { skip }, async (t) => {
-  const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget(t, 'shared.ipynb')
-  try {
-    const [first, second] = await Promise.all([
-      manager.getOrStart(target, python),
-      manager.getOrStart(target, python),
-    ])
-    assert.equal(first, second)
-    assert.equal(manager.kernelCount, 1)
-    const events = []
-    const reply = await within(first.run('c1', 'print("shared")', (event) => events.push(event)), 10_000, 'shared execution did not settle')
-    assert.equal(reply.ok, true)
-    assert.ok(events.some((event) => event.type === 'stream' && event.text.includes('shared')))
-  } finally {
-    await manager.disposeAll()
-  }
-})
-
-test('exec ids keep a restarted cell from stealing the next run', { skip }, async (t) => {
+// Merged from the former "restart settles a running cell and leaves a usable
+// kernel" test: this stronger variant keeps its unique restart assertions (the
+// interrupted run receives an error event and the restarted kernel accepts the
+// next execute) on top of the exec-id identity checks.
+test('restart settles the running cell and exec ids keep the restarted cell from stealing the next run', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
   const target = await makeTarget(t, 'exec-id.ipynb')
   try {
@@ -199,6 +130,7 @@ test('exec ids keep a restarted cell from stealing the next run', { skip }, asyn
     assert.equal(entry.ready, true)
     const oldReply = await within(oldRun, 5_000, 'old run was not settled by restart')
     assert.equal(oldReply.ok, false)
+    assert.ok(oldEvents.some((event) => event.type === 'error'), 'the interrupted run receives an error event')
     const newReply = await within(newRun, 15_000, 'second run after restart did not settle')
     assert.equal(newReply.ok, true)
     assert.equal(newReply.cell_id, 'same-cell')
@@ -214,29 +146,9 @@ test('exec ids keep a restarted cell from stealing the next run', { skip }, asyn
   }
 })
 
-test('an oversized stdout line aborts the running cell and restarts the kernel', { skip }, async (t) => {
-  const manager = new KernelManager({}, bridgePath)
-  const target = await makeTarget(t, 'oversize.ipynb')
-  try {
-    const entry = await manager.getOrStart(target, python)
-    const events = []
-    const run = entry.run('big', 'import time\ntime.sleep(5)', (event) => events.push(event))
-    await waitFor(() => events.some((event) => event.type === 'status' && event.execution_state === 'busy'), 10_000)
-    // Simulate a byte flood without materializing 64 MiB in the test.
-    entry.stdoutBytes = 64 * 1024 * 1024
-    entry.handleStdout('x')
-    const reply = await within(run, 5_000, 'oversized output did not settle the run')
-    assert.equal(reply.ok, false)
-    assert.match(entry.lastError, /exceeded 64 MiB/)
-    assert.ok(events.some((event) => event.type === 'fatal' && event.code === 'too-large'))
-    await within(entry.ensureStarted(), 15_000, 'kernel did not come back after oversized output')
-    assert.equal(entry.ready, true)
-    const after = await within(entry.run('after', 'print("after")', () => {}), 15_000, 'kernel unusable after oversized output')
-    assert.equal(after.ok, true)
-  } finally {
-    await manager.disposeAll()
-  }
-})
+// The oversized-line coverage lives in test/kernel-lifecycle.test.mjs's M-16
+// fake-child tests (64 MiB boundary, UTF-8 accounting and restart-only-once),
+// which do not need a real Python kernel to produce the byte flood.
 
 test('DSH_IPYNB_KERNEL_IDLE_MS=0 disables the idle sweep', async (t) => {
   const previous = process.env.DSH_IPYNB_KERNEL_IDLE_MS

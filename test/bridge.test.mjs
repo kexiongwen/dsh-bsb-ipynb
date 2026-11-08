@@ -129,11 +129,21 @@ async function waitForDead(pid, timeoutMs = 8_000) {
   return false
 }
 
-test('bridge executes code, preserves variables and reports errors', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
-  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-')
-  const context = startBridge(cwd)
+test('bridge session executes code, preserves variables, rejects invalid commands, tags exec ids and cleans up its connection file', {
+  skip: !python && 'Requires jupyter_client/ipykernel',
+}, async (t) => {
+  // One real bridge+kernel session covers the former normal-protocol baseline,
+  // invalid-command rejection, exec_id tagging with fast input() failure, and
+  // graceful shutdown removing the host-chosen connection file. Every waitFor
+  // matcher is scoped by cell_id, so a later step can never consume an event
+  // left over from an earlier step.
+  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-session-')
+  const connectionFile = path.join(cwd, 'kernel-connection.json')
+  const context = startBridge(cwd, connectionFile)
   try {
     await context.waitFor((event) => event.type === 'ready')
+    assert.equal(existsSync(connectionFile), true, 'the kernel writes the host-chosen connection file')
+
     context.proc.stdin.write(
       JSON.stringify({ op: 'execute', cell_id: 'c1', code: 'x = 41\nprint("hello")\nx + 1' }) + '\n',
     )
@@ -182,25 +192,7 @@ test('bridge executes code, preserves variables and reports errors', { skip: !py
     assert.equal(update.display_id, 'd1')
     assert.equal(update.data['text/plain'], "'two'")
 
-    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 5000)
-      context.proc.once('exit', () => {
-        clearTimeout(timer)
-        resolve()
-      })
-    })
-  } finally {
-    await shutdown(context.proc)
-  }
-})
-
-test('bridge rejects non-object JSON commands and continues executing', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
-  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-invalid-')
-  const context = startBridge(cwd)
-  try {
-    await context.waitFor((event) => event.type === 'ready')
-
+    // Non-object JSON commands are rejected without stopping the command loop.
     const invalidCommands = [null, [], 'status', 42, true]
     for (const command of invalidCommands) {
       context.proc.stdin.write(JSON.stringify(command) + '\n')
@@ -208,25 +200,57 @@ test('bridge rejects non-object JSON commands and continues executing', { skip: 
     context.proc.stdin.write(
       JSON.stringify({ op: 'execute', cell_id: 'after-invalid', exec_id: 'exec-valid', code: '6 * 7' }) + '\n',
     )
-    const reply = await context.waitFor(
+    const invalidReply = await context.waitFor(
       (event) => event.type === 'execute_reply' && event.cell_id === 'after-invalid',
     )
-    assert.equal(reply.ok, true)
-    assert.equal(reply.exec_id, 'exec-valid')
+    assert.equal(invalidReply.ok, true)
+    assert.equal(invalidReply.exec_id, 'exec-valid')
     const invalidLogs = context.events.filter(
       (event) =>
         event.type === 'log' && event.level === 'error' && event.message === 'invalid command: expected JSON object',
     )
     assert.equal(invalidLogs.length, invalidCommands.length)
 
+    // Every event for a cell carries that cell's exec_id; input() fails fast
+    // because allow_stdin stays disabled for the bridge kernel.
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'e1', exec_id: 'exec-a', code: 'print("tagged")' }) + '\n',
+    )
+    const taggedReply = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'e1')
+    assert.equal(taggedReply.ok, true)
+    assert.equal(taggedReply.exec_id, 'exec-a')
+    const touched = context.events.filter((event) => event.cell_id === 'e1')
+    assert.ok(touched.length >= 2)
+    for (const event of touched) assert.equal(event.exec_id, 'exec-a')
+
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'in1', exec_id: 'exec-in', code: 'input("x")' }) + '\n',
+    )
+    const stdinReply = await context.waitFor(
+      (event) => event.type === 'execute_reply' && event.cell_id === 'in1',
+      20_000,
+    )
+    assert.equal(stdinReply.ok, false)
+    assert.equal(stdinReply.exec_id, 'exec-in')
+    const stdinError = context.events.find((event) => event.type === 'error' && event.cell_id === 'in1')
+    assert.ok(stdinError)
+    assert.match(stdinError.ename, /StdinNotImplementedError/)
+
+    context.proc.stdin.write(
+      JSON.stringify({ op: 'execute', cell_id: 'e2', exec_id: 'exec-b', code: '2 + 2' }) + '\n',
+    )
+    const third = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'e2')
+    assert.equal(third.ok, true)
+    assert.equal(third.exec_id, 'exec-b')
+
+    // A graceful shutdown must exit the bridge and remove the connection file.
     context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 5000)
-      context.proc.once('exit', () => {
-        clearTimeout(timer)
-        resolve()
-      })
-    })
+    await waitForExit(context.proc, 15_000)
+    assert.ok(
+      context.proc.exitCode !== null || context.proc.signalCode !== null,
+      'graceful shutdown exits the bridge process',
+    )
+    assert.equal(existsSync(connectionFile), false, 'graceful shutdown removes the connection file')
   } finally {
     await shutdown(context.proc)
   }
@@ -290,57 +314,6 @@ test('bridge marks interrupt-timeout restarts and clears old kernel state', { sk
   }
 })
 
-test('bridge tags every execution event with its exec_id and fails input() fast', { skip: !python && 'Requires jupyter_client/ipykernel' }, async (t) => {
-  const cwd = await tempDir(t, 'dsh-bsb-ipynb-bridge-exec-')
-  const context = startBridge(cwd)
-  try {
-    await context.waitFor((event) => event.type === 'ready')
-
-    context.proc.stdin.write(
-      JSON.stringify({ op: 'execute', cell_id: 'e1', exec_id: 'exec-a', code: 'print("tagged")' }) + '\n',
-    )
-    const reply = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'e1')
-    assert.equal(reply.ok, true)
-    assert.equal(reply.exec_id, 'exec-a')
-    const touched = context.events.filter((event) => event.cell_id === 'e1')
-    assert.ok(touched.length >= 2)
-    for (const event of touched) assert.equal(event.exec_id, 'exec-a')
-
-    // allow_stdin is disabled, so input() must fail immediately instead of
-    // hanging the executor thread until an interrupt.
-    context.proc.stdin.write(
-      JSON.stringify({ op: 'execute', cell_id: 'in1', exec_id: 'exec-in', code: 'input("x")' }) + '\n',
-    )
-    const stdinReply = await context.waitFor(
-      (event) => event.type === 'execute_reply' && event.cell_id === 'in1',
-      20_000,
-    )
-    assert.equal(stdinReply.ok, false)
-    assert.equal(stdinReply.exec_id, 'exec-in')
-    const stdinError = context.events.find((event) => event.type === 'error' && event.cell_id === 'in1')
-    assert.ok(stdinError)
-    assert.match(stdinError.ename, /StdinNotImplementedError/)
-
-    context.proc.stdin.write(
-      JSON.stringify({ op: 'execute', cell_id: 'e2', exec_id: 'exec-b', code: '2 + 2' }) + '\n',
-    )
-    const third = await context.waitFor((event) => event.type === 'execute_reply' && event.cell_id === 'e2')
-    assert.equal(third.ok, true)
-    assert.equal(third.exec_id, 'exec-b')
-
-    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 5000)
-      context.proc.once('exit', () => {
-        clearTimeout(timer)
-        resolve()
-      })
-    })
-  } finally {
-    await shutdown(context.proc)
-  }
-})
-
 test('bridge IOPub routing bounds retained messages and preserves registration/output ordering', {
   skip: !unitPython && 'Requires Python',
 }, async () => {
@@ -357,23 +330,6 @@ test('a real kernel drops 1000 background messages from a completed cell without
   assert.equal(value.retained, 0)
   assert.equal(value.forwarded, 0)
   assert.equal(value.currentOutput, 'CURRENT RESULT\n')
-})
-
-test('bridge removes the host-chosen connection file on shutdown', {
-  skip: !python && 'Requires jupyter_client/ipykernel',
-}, async (t) => {
-  const cwd = await tempDir(t, 'dsh-bsb-ipynb-connection-')
-  const connectionFile = path.join(cwd, 'kernel-connection.json')
-  const context = startBridge(cwd, connectionFile)
-  try {
-    await context.waitFor((event) => event.type === 'ready')
-    assert.equal(existsSync(connectionFile), true, 'the kernel writes the host-chosen connection file')
-    context.proc.stdin.write(JSON.stringify({ op: 'shutdown' }) + '\n')
-    await waitForExit(context.proc)
-    assert.equal(existsSync(connectionFile), false, 'graceful shutdown removes the connection file')
-  } finally {
-    await shutdown(context.proc)
-  }
 })
 
 test('Windows job object reaps user subprocesses on shutdown and hard kill', {

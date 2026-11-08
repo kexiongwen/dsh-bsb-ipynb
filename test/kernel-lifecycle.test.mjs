@@ -70,22 +70,38 @@ function harness(t, { exitOnKill = true } = {}) {
     return proc
   })
   syncBuiltinESMExports()
-  const manager = new KernelManager({}, '/controlled/bridge.py')
+  // Merged table-driven tests replay several scenarios against one mocked
+  // environment. Each scenario gets a fresh manager (reset()) so entries,
+  // retries and readiness timers from the previous scenario cannot leak in.
+  const managers = []
+  const makeManager = () => {
+    const manager = new KernelManager({}, '/controlled/bridge.py')
+    managers.push(manager)
+    return manager
+  }
+  makeManager()
   const target = '/controlled/notebook.ipynb'
   t.after(async () => {
-    await manager.disposeAll()
+    for (const manager of managers) await manager.disposeAll()
     spawnMock.mock.restore()
     syncBuiltinESMExports()
     timeoutMock.mock.restore()
     clearMock.mock.restore()
   })
   return {
-    manager,
     target,
     processes,
     readyTimers,
+    get manager() {
+      return managers.at(-1)
+    },
     activeReadyTimers: () => readyTimers.filter((timer) => timer.active),
+    async reset() {
+      await managers.at(-1).disposeAll()
+      makeManager()
+    },
     start() {
+      const manager = managers.at(-1)
       const started = manager.getOrStart(target, '/controlled/python')
       return { started, entry: manager.peek(target), proc: processes.at(-1) }
     },
@@ -472,9 +488,10 @@ test('aborting an already-submitted request does not release the active executio
 
 // Keep the failed child alive long enough to deliver events after its
 // replacement has been spawned. These are real manager/entry operations;
-// only child-process scheduling is controlled by the harness.
-async function replaceFailedProcess(t, failure = 'kernel-died') {
-  const h = harness(t, { exitOnKill: false })
+// only child-process scheduling is controlled by the harness. The caller owns
+// the harness so one mocked environment can replay several scenarios.
+async function replaceFailedProcess(h, failure = 'kernel-died') {
+  const timersBefore = h.readyTimers.length
   let oldProc
   if (failure === 'startup-error') {
     const first = h.start()
@@ -492,13 +509,17 @@ async function replaceFailedProcess(t, failure = 'kernel-died') {
   const replacement = h.start()
   const startup = observe(replacement.started)
   assert.notEqual(replacement.proc, oldProc, 'recovery must spawn a replacement process')
-  return { h, oldProc, ...replacement, startup }
+  const oldTimer = h.readyTimers[timersBefore]
+  return { oldProc, oldTimer, ...replacement, startup }
 }
 
-for (const failure of ['kernel-died', 'startup-error']) {
-  for (const phase of ['starting', 'idle', 'executing']) {
-    test(`old process exit after ${failure} cannot disturb a replacement that is ${phase}`, async (t) => {
-      const { h, oldProc, entry, proc, started, startup } = await replaceFailedProcess(t, failure)
+for (const phase of ['starting', 'idle', 'executing']) {
+  test(`an old process exit after a kernel death or a startup error cannot disturb a replacement that is ${phase}`, async (t) => {
+    const h = harness(t, { exitOnKill: false })
+    for (const failure of ['kernel-died', 'startup-error']) {
+      await h.reset()
+      const where = `${failure}, replacement ${phase}`
+      const { oldProc, entry, proc, started, startup } = await replaceFailedProcess(h, failure)
       let running
       let runState
       let command
@@ -514,28 +535,28 @@ for (const failure of ['kernel-died', 'startup-error']) {
       const before = entry.status()
       oldProc.exit(7)
       await flush()
-      assert.equal(entry.proc, proc, 'old exit must not discard the new process handle')
-      assert.equal(h.manager.peek(h.target), entry, 'old exit must not forget the replacement entry')
-      assert.deepEqual(entry.status(), before)
-      assert.deepEqual(proc.kills, [], 'old exit must not kill the new process')
+      assert.equal(entry.proc, proc, `${where}: old exit must not discard the new process handle`)
+      assert.equal(h.manager.peek(h.target), entry, `${where}: old exit must not forget the replacement entry`)
+      assert.deepEqual(entry.status(), before, `${where}: old exit must not change the replacement status`)
+      assert.deepEqual(proc.kills, [], `${where}: old exit must not kill the new process`)
       if (phase === 'starting') {
-        assert.equal(startup.status, 'pending', 'only the replacement may settle its readiness wait')
-        assert.equal(h.activeReadyTimers().length, 1)
+        assert.equal(startup.status, 'pending', `${where}: only the replacement may settle its readiness wait`)
+        assert.equal(h.activeReadyTimers().length, 1, `${where}: the replacement readiness timeout stays armed`)
         proc.event({ type: 'ready' })
         await started
       } else if (phase === 'executing') {
-        assert.equal(runState.status, 'pending', 'old exit must not settle the new execution')
+        assert.equal(runState.status, 'pending', `${where}: old exit must not settle the new execution`)
         reply(proc, command)
-        assert.equal((await running).ok, true)
+        assert.equal((await running).ok, true, `${where}: the replacement execution still settles`)
       }
       // Filtering the old child must not disable lifecycle handling for the
       // current one: its own exit still removes the entry.
       proc.exit(9)
       await flush()
-      assert.equal(entry.proc, null)
-      assert.equal(h.manager.peek(h.target), null)
-    })
-  }
+      assert.equal(entry.proc, null, `${where}: the current child exit still clears its handle`)
+      assert.equal(h.manager.peek(h.target), null, `${where}: the current child exit still forgets the entry`)
+    }
+  })
 }
 
 test('each process exit unlinks only its own connection file', async (t) => {
@@ -576,10 +597,13 @@ const staleProcessEvents = {
   stderr: (proc) => proc.stderr.emit('data', 'STALE STDERR'),
 }
 
-for (const [name, emitStale] of Object.entries(staleProcessEvents)) {
-  for (const phase of ['starting', 'executing']) {
-    test(`old process ${name} cannot affect a replacement that is ${phase}`, async (t) => {
-      const { h, oldProc, entry, proc, started, startup } = await replaceFailedProcess(t)
+for (const phase of ['starting', 'executing']) {
+  test(`stale events from the old process cannot affect a replacement that is ${phase}`, async (t) => {
+    const h = harness(t, { exitOnKill: false })
+    for (const [name, emitStale] of Object.entries(staleProcessEvents)) {
+      await h.reset()
+      const where = `${name}, replacement ${phase}`
+      const { oldProc, entry, proc, started, startup } = await replaceFailedProcess(h)
       const events = []
       let running
       let runState
@@ -596,57 +620,68 @@ for (const [name, emitStale] of Object.entries(staleProcessEvents)) {
       const stdoutBefore = entry.stdoutBuffer
       emitStale(oldProc)
       await flush()
-      assert.equal(entry.proc, proc)
-      assert.equal(h.manager.peek(h.target), entry)
-      assert.deepEqual(entry.status(), before, 'stale child events must not change replacement status')
-      assert.equal(entry.stderrTail, stderrBefore, 'old stderr must not pollute replacement diagnostics')
-      assert.equal(entry.stdoutBuffer, stdoutBefore, 'old stdout must not pollute replacement framing')
-      assert.deepEqual(proc.kills, [])
-      assert.deepEqual(events, [], 'old events must not reach the replacement execution listener')
+      assert.equal(entry.proc, proc, `${where}: an old event must not discard the new process handle`)
+      assert.equal(h.manager.peek(h.target), entry, `${where}: an old event must not forget the replacement entry`)
+      assert.deepEqual(entry.status(), before, `${where}: stale child events must not change replacement status`)
+      assert.equal(entry.stderrTail, stderrBefore, `${where}: old stderr must not pollute replacement diagnostics`)
+      assert.equal(entry.stdoutBuffer, stdoutBefore, `${where}: old stdout must not pollute replacement framing`)
+      assert.deepEqual(proc.kills, [], `${where}: stale child events must not kill the replacement`)
+      assert.deepEqual(events, [], `${where}: old events must not reach the replacement execution listener`)
       if (phase === 'starting') {
-        assert.equal(startup.status, 'pending')
-        assert.equal(h.activeReadyTimers().length, 1)
+        assert.equal(startup.status, 'pending', `${where}: only the replacement may settle its readiness wait`)
+        assert.equal(h.activeReadyTimers().length, 1, `${where}: the replacement readiness timeout stays armed`)
         proc.event({ type: 'ready' })
         await started
         running = entry.run('replacement-cell', 'new work', (event) => events.push(event))
         runState = observe(running)
         command = proc.commands.at(-1)
       }
-      assert.equal(runState.status, 'pending')
+      assert.equal(runState.status, 'pending', `${where}: stale events must not settle the new execution`)
       proc.event({ type: 'stream', cell_id: command.cell_id, exec_id: command.exec_id, text: 'CURRENT OUTPUT' })
-      assert.equal(events.at(-1).text, 'CURRENT OUTPUT', 'current child output must still be delivered')
+      assert.equal(events.at(-1).text, 'CURRENT OUTPUT', `${where}: current child output must still be delivered`)
       proc.exit(8)
-      assert.equal((await running).ok, false, 'current child exit must still fail its active execution')
-      assert.equal(h.manager.peek(h.target), null)
-    })
-  }
+      assert.equal((await running).ok, false, `${where}: current child exit must still fail its active execution`)
+      assert.equal(h.manager.peek(h.target), null, `${where}: current child exit must still forget the entry`)
+    }
+  })
 }
 
-test('completion of an older shutdown cannot delete a replacement entry created during its exit', async (t) => {
+test('an older shutdown or idle-sweep completion cannot delete a replacement entry created during its exit', async (t) => {
   const h = harness(t)
-  const first = await h.startReady()
-  let replacement
-  first.proc.once('exit', () => {
-    // The old entry's exit handler has run, but its async shutdown has not
-    // resumed yet. A new execute may create an entry in this interval.
-    replacement = h.start()
-    observe(replacement.started)
-    replacement.proc.event({ type: 'ready' })
-  })
-  await h.manager.shutdown(h.target)
-  assert.ok(replacement)
-  await replacement.started
-  assert.equal(h.manager.peek(h.target), replacement.entry, 'old shutdown must not delete the new map entry')
-  assert.equal(replacement.entry.proc, replacement.proc)
-  assert.equal(h.manager.status(h.target).ready, true)
-  assert.deepEqual(replacement.proc.kills, [])
+  for (const mode of ['shutdown', 'idle sweep']) {
+    await h.reset()
+    const where = `${mode} cleanup`
+    const first = await h.startReady()
+    let replacement
+    first.proc.once('exit', () => {
+      // The old entry's exit handler has run, but its async shutdown has not
+      // resumed yet. A new execute may create an entry in this interval.
+      replacement = h.start()
+      observe(replacement.started)
+      replacement.proc.event({ type: 'ready' })
+    })
+    if (mode === 'shutdown') {
+      await h.manager.shutdown(h.target)
+    } else {
+      first.entry.lastActivity = 0
+      await h.manager.sweepIdle()
+    }
+    assert.ok(replacement, `${where}: a replacement entry was created during the old exit`)
+    await replacement.started
+    assert.equal(h.manager.peek(h.target), replacement.entry, `${where}: old cleanup must not delete the new map entry`)
+    assert.equal(replacement.entry.proc, replacement.proc, `${where}: the replacement keeps its own process handle`)
+    assert.equal(h.manager.status(h.target).ready, true, `${where}: the replacement is ready`)
+    assert.deepEqual(replacement.proc.kills, [], `${where}: the old cleanup must not kill the replacement`)
+  }
 })
 
-for (const phase of ['starting', 'executing']) {
-  test(`a cleared old ready-timeout callback cannot fail a replacement that is ${phase}`, async (t) => {
-    const { h, entry, proc, started, startup } = await replaceFailedProcess(t)
-    const oldTimer = h.readyTimers[0]
-    assert.equal(oldTimer.active, false, 'the superseded ready timer was cleared')
+test('a cleared old ready-timeout callback cannot fail a replacement that is starting or executing', async (t) => {
+  const h = harness(t, { exitOnKill: false })
+  for (const phase of ['starting', 'executing']) {
+    await h.reset()
+    const where = `replacement ${phase}`
+    const { entry, proc, started, startup, oldTimer } = await replaceFailedProcess(h)
+    assert.equal(oldTimer.active, false, `${where}: the superseded ready timer was cleared`)
     let running
     let runState
     let command
@@ -662,45 +697,28 @@ for (const phase of ['starting', 'executing']) {
     // check its owner even if cancellation can no longer prevent invocation.
     oldTimer.callback()
     await flush()
-    assert.equal(entry.proc, proc)
-    assert.equal(h.manager.peek(h.target), entry)
-    assert.deepEqual(entry.status(), before)
-    assert.deepEqual(proc.kills, [])
+    assert.equal(entry.proc, proc, `${where}: a stale timeout callback must not discard the new process`)
+    assert.equal(h.manager.peek(h.target), entry, `${where}: a stale timeout callback must not forget the replacement`)
+    assert.deepEqual(entry.status(), before, `${where}: a stale timeout callback must not change status`)
+    assert.deepEqual(proc.kills, [], `${where}: a stale timeout callback must not kill the replacement`)
     if (phase === 'starting') {
-      assert.equal(startup.status, 'pending')
-      assert.equal(h.activeReadyTimers().length, 1, 'the current ready timeout remains armed')
+      assert.equal(startup.status, 'pending', `${where}: only the replacement may settle its readiness wait`)
+      assert.equal(h.activeReadyTimers().length, 1, `${where}: the current ready timeout remains armed`)
       proc.event({ type: 'ready' })
       await started
     } else {
-      assert.equal(runState.status, 'pending')
+      assert.equal(runState.status, 'pending', `${where}: a stale timeout callback must not settle the run`)
       reply(proc, command)
-      assert.equal((await running).ok, true)
+      assert.equal((await running).ok, true, `${where}: the replacement run still settles`)
     }
-  })
-}
-
-test('an older idle sweep cannot delete a replacement entry created during shutdown', async (t) => {
-  const h = harness(t)
-  const first = await h.startReady()
-  first.entry.lastActivity = 0
-  let replacement
-  first.proc.once('exit', () => {
-    replacement = h.start()
-    observe(replacement.started)
-    replacement.proc.event({ type: 'ready' })
-  })
-  await h.manager.sweepIdle()
-  assert.ok(replacement)
-  await replacement.started
-  assert.equal(h.manager.peek(h.target), replacement.entry, 'old sweep cleanup must not remove the new entry')
-  assert.equal(replacement.entry.proc, replacement.proc)
-  assert.equal(h.manager.status(h.target).ready, true)
-  assert.deepEqual(replacement.proc.kills, [])
+  }
 })
 
-for (const origin of ['startup', 'previous restart']) {
-  test(`a cleared ${origin} timer cannot settle a newer restart on the same process`, async (t) => {
-    const h = harness(t, { exitOnKill: false })
+test('a cleared startup or previous-restart timer cannot settle a newer restart on the same process', async (t) => {
+  const h = harness(t, { exitOnKill: false })
+  for (const origin of ['startup', 'previous restart']) {
+    await h.reset()
+    const where = `${origin} timer`
     const { entry, proc } = await h.startReady()
     if (origin === 'previous restart') {
       const previousRestart = entry.restart()
@@ -708,24 +726,24 @@ for (const origin of ['startup', 'previous restart']) {
       await previousRestart
     }
     const oldTimer = h.readyTimers.at(-1)
-    assert.equal(oldTimer.active, false)
+    assert.equal(oldTimer.active, false, `${where}: the superseded timer was cleared`)
     const restarting = entry.restart()
     const state = observe(restarting)
     const currentTimer = h.readyTimers.at(-1)
-    assert.notEqual(currentTimer, oldTimer)
+    assert.notEqual(currentTimer, oldTimer, `${where}: the newer restart owns a fresh timer`)
     oldTimer.callback()
     await flush()
-    assert.equal(state.status, 'pending', 'old wait callbacks cannot reject the newer readiness wait')
-    assert.equal(entry.proc, proc)
-    assert.equal(entry.ready, false)
-    assert.equal(currentTimer.active, true)
-    assert.deepEqual(proc.kills, [])
+    assert.equal(state.status, 'pending', `${where}: old wait callbacks cannot reject the newer readiness wait`)
+    assert.equal(entry.proc, proc, `${where}: a stale timer callback must not discard the bridge`)
+    assert.equal(entry.ready, false, `${where}: the newer restart is still waiting`)
+    assert.equal(currentTimer.active, true, `${where}: the current ready timeout remains armed`)
+    assert.deepEqual(proc.kills, [], `${where}: a stale timer callback must not kill the bridge`)
     restartReady(proc)
     await restarting
-    assert.equal(entry.ready, true)
-    assert.equal(h.activeReadyTimers().length, 0)
-  })
-}
+    assert.equal(entry.ready, true, `${where}: the newer restart completes`)
+    assert.equal(h.activeReadyTimers().length, 0, `${where}: no readiness timer remains armed`)
+  }
+})
 
 test('a replacement process starts with fresh stderr diagnostics', async (t) => {
   const h = harness(t, { exitOnKill: false })
@@ -768,19 +786,6 @@ test('a successful restart clears stale status errors', async (t) => {
   await restarting
   assert.equal(entry.lastError, null)
   assert.equal(h.manager.status(h.target).lastError, null)
-})
-
-test('a malformed frame during restart does not overwrite the framing error', async (t) => {
-  const h = harness(t)
-  const { entry, proc } = await h.startReady()
-  const cause = 'Kernel output line exceeded 64 MiB; execution aborted and kernel restarted'
-  entry.lastError = cause
-  const restarting = entry.restart()
-  entry.handleLine('TAIL-OF-GIANT-LINE-NOT-JSON')
-  assert.equal(entry.lastError, cause)
-  restartReady(proc)
-  await restarting
-  assert.equal(entry.lastError, null)
 })
 
 test('a ready-timeout cause survives the exit event that follows it', async (t) => {
@@ -828,16 +833,21 @@ const protocolFaults = {
   'unparseable JSON': () => 'NOT-JSON\n',
   'non-object JSON': () => '42\n',
   'no type': () => `${JSON.stringify({ cell_id: 'cell', exec_id: 'exec', text: 'x' })}\n`,
-  'no exec_id': (command) =>
-    `${JSON.stringify({ type: 'execute_reply', cell_id: command ? command.cell_id : 'cell', ok: true })}\n`,
+  // Missing cell_id and missing exec_id hit the same scopedEventError
+  // condition today; keep both frames so either operand stays independently
+  // locked if that validation is ever split.
   'no cell_id': (command) =>
     `${JSON.stringify({ type: 'stream', exec_id: command ? command.exec_id : 'exec', name: 'stdout', text: 'x' })}\n`,
+  'no exec_id': (command) =>
+    `${JSON.stringify({ type: 'execute_reply', cell_id: command ? command.cell_id : 'cell', ok: true })}\n`,
 }
 
 for (const phase of ['starting', 'idle', 'running']) {
-  for (const [name, buildFrame] of Object.entries(protocolFaults)) {
-    test(`a frame with ${name} while ${phase} fails the run and recycles the bridge`, async (t) => {
-      const h = harness(t)
+  test(`bad frames while ${phase} fail the run and recycle the bridge`, async (t) => {
+    const h = harness(t)
+    for (const [name, buildFrame] of Object.entries(protocolFaults)) {
+      await h.reset()
+      const where = `${name} while ${phase}`
       let entry
       let proc
       let startup
@@ -859,57 +869,57 @@ for (const phase of ['starting', 'idle', 'running']) {
         run = entry.run('live-cell', 'work', (event) => events.push(event))
         runState = observe(run)
         command = proc.commands.at(-1)
-        assert.equal(command.op, 'execute')
+        assert.equal(command.op, 'execute', `${where}: the run was submitted before the fault`)
       }
       proc.stdout.emit('data', buildFrame(command))
       // The cause is recorded and the slot released before the exit arrives.
-      assert.match(entry.lastError, /Unreadable kernel event|Invalid kernel event/)
-      assert.equal(entry.ready, false)
-      assert.equal(entry.busy, false)
+      assert.match(entry.lastError, /Unreadable kernel event|Invalid kernel event/, `${where}: the protocol cause is recorded`)
+      assert.equal(entry.ready, false, `${where}: the bridge is no longer ready`)
+      assert.equal(entry.busy, false, `${where}: the execution slot is released`)
       // A second corrupted frame of the same burst must not tear down twice.
       proc.stdout.emit('data', 'SECOND-BAD-FRAME\n')
-      assert.equal(proc.kills.filter((signal) => signal === 'SIGTERM').length, 1)
+      assert.equal(proc.kills.filter((signal) => signal === 'SIGTERM').length, 1, `${where}: the bridge is torn down once`)
       if (phase === 'running') {
         const replyValue = await run
-        assert.equal(replyValue.ok, false)
-        assert.match(replyValue.error, /Unreadable kernel event|Invalid kernel event/)
-        assert.equal(runState.status, 'fulfilled')
+        assert.equal(replyValue.ok, false, `${where}: the active run is failed`)
+        assert.match(replyValue.error, /Unreadable kernel event|Invalid kernel event/, `${where}: the run reports the protocol cause`)
+        assert.equal(runState.status, 'fulfilled', `${where}: the run settles instead of staying pending`)
         const fatal = events.filter((event) => event.type === 'fatal')
-        assert.equal(fatal.length, 1, 'the active run receives exactly one scoped fatal event')
-        assert.equal(fatal[0].code, 'protocol-error')
-        assert.equal(fatal[0].cell_id, command.cell_id)
-        assert.equal(fatal[0].exec_id, command.exec_id)
-        assert.ok(events.some((event) => event.type === 'error'))
+        assert.equal(fatal.length, 1, `${where}: the active run receives exactly one scoped fatal event`)
+        assert.equal(fatal[0].code, 'protocol-error', `${where}: the fatal event is a protocol error`)
+        assert.equal(fatal[0].cell_id, command.cell_id, `${where}: the fatal event is scoped to the cell`)
+        assert.equal(fatal[0].exec_id, command.exec_id, `${where}: the fatal event is scoped to the execution`)
+        assert.ok(events.some((event) => event.type === 'error'), `${where}: the active run sees an error event`)
       }
       await flush()
       // The bridge is reclaimed: killed, forgotten and no longer reporting.
-      assert.ok(proc.kills.includes('SIGTERM'))
-      assert.equal(proc.stdin.destroyed, true, 'the failing bridge has been terminated')
-      assert.equal(h.manager.peek(h.target), null)
-      assert.equal(h.manager.kernelCount, 0)
-      assert.equal(h.manager.status(h.target).running, false)
+      assert.ok(proc.kills.includes('SIGTERM'), `${where}: the failing bridge is killed`)
+      assert.equal(proc.stdin.destroyed, true, `${where}: the failing bridge has been terminated`)
+      assert.equal(h.manager.peek(h.target), null, `${where}: the failing bridge is forgotten`)
+      assert.equal(h.manager.kernelCount, 0, `${where}: no kernel entry leaks`)
+      assert.equal(h.manager.status(h.target).running, false, `${where}: the notebook reports no running kernel`)
       assert.match(
         entry.lastError,
         /Unreadable kernel event|Invalid kernel event/,
-        'the protocol cause survives the exit event',
+        `${where}: the protocol cause survives the exit event`,
       )
-      assert.match(entry.lastError, /Kernel process exited/)
+      assert.match(entry.lastError, /Kernel process exited/, `${where}: the exit is reported after the cause`)
       if (phase === 'starting') {
-        assert.equal(startup.status, 'rejected')
-        assert.equal(startup.error.code, 'kernel-unavailable')
-        assert.match(startup.error.message, /Unreadable kernel event|Invalid kernel event/)
+        assert.equal(startup.status, 'rejected', `${where}: the startup wait is rejected`)
+        assert.equal(startup.error.code, 'kernel-unavailable', `${where}: the startup failure is kernel-unavailable`)
+        assert.match(startup.error.message, /Unreadable kernel event|Invalid kernel event/, `${where}: the startup failure keeps the protocol cause`)
       }
       // The next execute recovers on a fresh bridge.
       const recovered = await h.startReady()
-      assert.notEqual(recovered.proc, proc)
+      assert.notEqual(recovered.proc, proc, `${where}: recovery spawns a fresh bridge`)
       const nextEvents = []
       const nextRun = recovered.entry.run('recovered-cell', 'print(1)', (event) => nextEvents.push(event))
       reply(recovered.proc, recovered.proc.commands.at(-1))
-      assert.equal((await nextRun).ok, true)
-      assert.ok(nextEvents.some((event) => event.type === 'execute_reply' && event.ok === true))
-      assert.deepEqual(recovered.proc.kills, [])
-    })
-  }
+      assert.equal((await nextRun).ok, true, `${where}: the recovered bridge executes`)
+      assert.ok(nextEvents.some((event) => event.type === 'execute_reply' && event.ok === true), `${where}: the recovered run gets its reply`)
+      assert.deepEqual(recovered.proc.kills, [], `${where}: the recovered bridge is healthy`)
+    }
+  })
 }
 
 test('late but well-formed events from a settled execution are ignored, not treated as protocol errors', async (t) => {
@@ -940,6 +950,9 @@ test('late but well-formed events from a settled execution are ignored, not trea
   assert.equal((await second).ok, true)
 })
 
+// The former direct handleLine() variant of this case asserted a strict subset
+// of these checks (same lastError preservation) and was removed in the B-1
+// merge; this stdout-path version also proves the bridge is not recycled.
 test('a malformed stdout chunk during a restart is ignored instead of recycling the bridge', async (t) => {
   const h = harness(t)
   const { entry, proc } = await h.startReady()
@@ -1054,119 +1067,163 @@ test('a frame of exactly 64 MiB is accepted when the next chunk adds its newline
   assert.ok(events.some((event) => event.type === 'execute_reply' && event.ok === true))
 })
 
-test('a complete line above the cap is rejected and restarts the kernel only once', async (t) => {
+test('an over-cap complete line is rejected for ASCII and UTF-8 byte lengths and restarts the kernel only once', async (t) => {
   const h = harness(t)
-  const { entry, proc } = await h.startReady()
-  const events = []
-  const run = entry.run('big-cell', 'work', (event) => events.push(event))
-  // The unterminated tail may sit exactly at the cap...
-  proc.stdout.emit('data', 'x'.repeat(MAX_LINE_BYTES))
-  assert.equal(entry.stdoutBytes, MAX_LINE_BYTES)
-  assert.equal(entry.lastError, null, 'an unterminated tail of exactly 64 MiB is not over the cap')
-  // ...but the completed line is one byte over: it must be rejected before parsing.
-  proc.stdout.emit('data', 'x\n')
-  assert.match(entry.lastError, /exceeded 64 MiB/)
-  const replyValue = await run
-  assert.equal(replyValue.ok, false)
-  assert.equal(events.filter((event) => event.type === 'fatal' && event.code === 'too-large').length, 1)
-  const restartCommands = () => proc.commands.filter((item) => item.op === 'restart')
-  assert.equal(restartCommands().length, 1)
-  // More chunks of the same flood arrive while the restart is already in flight.
-  entry.stdoutBytes = MAX_LINE_BYTES
-  entry.handleStdout('y')
-  assert.equal(restartCommands().length, 1, 'the flood restarts the kernel only once')
-  const restarting = entry.restartPromise
-  restartReady(proc)
-  await restarting
-  assert.equal(entry.ready, true)
-  const next = entry.run('after', 'print(1)')
-  reply(proc, proc.commands.at(-1))
-  assert.equal((await next).ok, true)
+  for (const scenario of ['ASCII cap + 1 byte', 'UTF-8 bytes cap + 1 byte']) {
+    await h.reset()
+    const where = scenario
+    const { entry, proc } = await h.startReady()
+    const events = []
+    const run = entry.run('big-cell', 'work', (event) => events.push(event))
+    if (scenario === 'ASCII cap + 1 byte') {
+      // The unterminated tail may sit exactly at the cap...
+      proc.stdout.emit('data', 'x'.repeat(MAX_LINE_BYTES))
+      assert.equal(entry.stdoutBytes, MAX_LINE_BYTES, `${where}: the unterminated tail is buffered exactly at the cap`)
+      assert.equal(entry.lastError, null, `${where}: an unterminated tail of exactly 64 MiB is not over the cap`)
+      // ...but the completed line is one byte over: it must be rejected before parsing.
+      proc.stdout.emit('data', 'x\n')
+    } else {
+      // 22.4M three-byte characters: over the byte cap yet far below it in code units.
+      const wide = '中'.repeat(Math.ceil((MAX_LINE_BYTES + 1) / 3))
+      assert.ok(Buffer.byteLength(wide) > MAX_LINE_BYTES, `${where}: the flood exceeds the cap in UTF-8 bytes`)
+      assert.ok(wide.length < MAX_LINE_BYTES, `${where}: the flood is below the cap in UTF-16 code units`)
+      proc.stdout.emit('data', `${wide}\n`)
+    }
+    assert.match(entry.lastError, /exceeded 64 MiB/, `${where}: an over-cap line is recorded`)
+    const replyValue = await run
+    assert.equal(replyValue.ok, false, `${where}: the active run is failed`)
+    assert.equal(events.filter((event) => event.type === 'fatal' && event.code === 'too-large').length, 1, `${where}: exactly one scoped fatal event`)
+    const restartCommands = () => proc.commands.filter((item) => item.op === 'restart')
+    assert.equal(restartCommands().length, 1, `${where}: the flood restarts the kernel once`)
+    if (scenario === 'ASCII cap + 1 byte') {
+      // More chunks of the same flood arrive while the restart is already in flight.
+      entry.stdoutBytes = MAX_LINE_BYTES
+      entry.handleStdout('y')
+      assert.equal(restartCommands().length, 1, `${where}: the flood restarts the kernel only once`)
+    }
+    const restarting = entry.restartPromise
+    restartReady(proc)
+    await restarting
+    assert.equal(entry.ready, true, `${where}: the kernel is usable after the restart`)
+    const next = entry.run('after', 'print(1)')
+    reply(proc, proc.commands.at(-1))
+    assert.equal((await next).ok, true, `${where}: the next execute succeeds`)
+  }
 })
 
-test('the 64 MiB cap counts UTF-8 bytes rather than UTF-16 code units', async (t) => {
+test('a UTF-8 frame split inside a character or across several chunks is reassembled and dispatched only when complete', async (t) => {
   const h = harness(t)
-  const { entry, proc } = await h.startReady()
-  const events = []
-  const run = entry.run('utf8-cell', 'work', (event) => events.push(event))
-  // 22.4M three-byte characters: over the byte cap yet far below it in code units.
-  const wide = '中'.repeat(Math.ceil((MAX_LINE_BYTES + 1) / 3))
-  assert.ok(Buffer.byteLength(wide) > MAX_LINE_BYTES)
-  assert.ok(wide.length < MAX_LINE_BYTES)
-  proc.stdout.emit('data', `${wide}\n`)
-  assert.match(entry.lastError, /exceeded 64 MiB/)
-  assert.equal((await run).ok, false)
-  assert.ok(events.some((event) => event.type === 'fatal' && event.code === 'too-large'))
-  const restarting = entry.restartPromise
-  restartReady(proc)
-  await restarting
-  assert.equal(entry.ready, true)
-  const next = entry.run('after', 'print(1)')
-  reply(proc, proc.commands.at(-1))
-  assert.equal((await next).ok, true)
+  for (const scenario of ['split inside a multi-byte character', 'three arbitrary chunks']) {
+    await h.reset()
+    const where = scenario
+    const { entry, proc } = await h.startReady()
+    const events = []
+    const run = entry.run('utf8-cell', 'work', (event) => events.push(event))
+    const command = proc.commands.at(-1)
+    const text = scenario === 'split inside a multi-byte character' ? '中文😀done' : 'partial output'
+    const line = JSON.stringify({
+      type: 'stream',
+      cell_id: command.cell_id,
+      exec_id: command.exec_id,
+      name: 'stdout',
+      text,
+    })
+    if (scenario === 'split inside a multi-byte character') {
+      const bytes = Buffer.from(`${line}\n`, 'utf8')
+      const emojiStart = bytes.indexOf(Buffer.from('😀', 'utf8'))
+      assert.ok(emojiStart > 0, `${where}: the frame contains a split multi-byte character`)
+      // Split inside the four UTF-8 bytes of 😀: the decoder must hold the partial
+      // character and byte accounting must not count it twice.
+      const decoder = new StringDecoder('utf8')
+      const firstChunk = decoder.write(bytes.subarray(0, emojiStart + 2))
+      const secondChunk = decoder.write(bytes.subarray(emojiStart + 2))
+      proc.stdout.emit('data', firstChunk)
+      assert.equal(entry.stdoutBuffer, firstChunk, `${where}: the partial character is held in the buffer`)
+      assert.equal(entry.stdoutBytes, Buffer.byteLength(firstChunk), `${where}: the held bytes are counted once`)
+      assert.deepEqual(events, [], `${where}: an unterminated frame is not dispatched`)
+      proc.stdout.emit('data', secondChunk)
+      const stream = events.find((event) => event.type === 'stream')
+      assert.equal(stream.text, text, `${where}: the frame text is reassembled byte-exactly`)
+      assert.equal(entry.stdoutBytes, 0, `${where}: the dispatched frame clears the byte counter`)
+      assert.equal(entry.stdoutBuffer, '', `${where}: the dispatched frame clears the buffer`)
+      assert.deepEqual(proc.kills, [], `${where}: a legal frame must not kill the bridge`)
+    } else {
+      const parts = [line.slice(0, 10), line.slice(10, 30), line.slice(30)]
+      proc.stdout.emit('data', parts[0])
+      assert.equal(entry.stdoutBuffer, parts[0], `${where}: the first part is buffered`)
+      assert.equal(entry.stdoutBytes, Buffer.byteLength(parts[0]), `${where}: the first part is counted`)
+      assert.deepEqual(events, [], `${where}: an unterminated frame is not dispatched`)
+      proc.stdout.emit('data', parts[1])
+      assert.deepEqual(events, [], `${where}: a frame still lacking its newline is not dispatched`)
+      assert.equal(entry.stdoutBytes, Buffer.byteLength(parts[0]) + Buffer.byteLength(parts[1]), `${where}: buffered bytes accumulate`)
+      proc.stdout.emit('data', `${parts[2]}\n`)
+      assert.equal(entry.stdoutBytes, 0, `${where}: the dispatched frame clears the byte counter`)
+      assert.equal(entry.stdoutBuffer, '', `${where}: the dispatched frame clears the buffer`)
+      assert.equal(events.filter((event) => event.type === 'stream').length, 1, `${where}: exactly one stream event is dispatched`)
+      assert.equal(events.find((event) => event.type === 'stream').text, text, `${where}: only the newline completes the frame`)
+      assert.deepEqual(proc.kills, [], `${where}: a legal frame must not kill the bridge`)
+    }
+    reply(proc, command)
+    assert.equal((await run).ok, true, `${where}: the run settles successfully`)
+  }
 })
 
-test('a multi-byte frame split across stream chunks is reassembled byte-exactly', async (t) => {
+// ---------------------------------------------------------------------------
+// Migrated from test/kernel.test.mjs: these manager/entry failure paths used to
+// be exercised against a real Python child. The fake-child harness asserts the
+// same observable state without spawning Python.
+// ---------------------------------------------------------------------------
+
+test('stdin errors and synchronous write failures mark the kernel unavailable without crashing the host', async (t) => {
   const h = harness(t)
-  const { entry, proc } = await h.startReady()
+  for (const mode of ['asynchronous stdin error', 'synchronous stdin write failure']) {
+    await h.reset()
+    const where = mode
+    const { entry, proc } = await h.startReady()
+    let originalWrite
+    if (mode === 'asynchronous stdin error') {
+      proc.stdin.emit('error', new Error('write EPIPE'))
+      await flush()
+      assert.equal(entry.ready, false, `${where}: the failed bridge is no longer ready`)
+    } else {
+      originalWrite = proc.stdin.write
+      proc.stdin.write = () => {
+        throw new Error('simulated write failure')
+      }
+    }
+    try {
+      await assert.rejects(
+        entry.run('c1', '1'),
+        (error) => error.code === 'kernel-unavailable',
+        `${where}: an execute is rejected as kernel-unavailable`,
+      )
+      assert.equal(entry.busy, false, `${where}: a rejected execute leaves the kernel idle`)
+      if (mode === 'synchronous stdin write failure') {
+        assert.equal(entry.currentRun, null, `${where}: no phantom current run remains`)
+        assert.equal(entry.executionState, 'dead', `${where}: the execution state is dead`)
+      }
+    } finally {
+      if (originalWrite) proc.stdin.write = originalWrite
+    }
+  }
+})
+
+test('concurrent getOrStart creates only one kernel entry and serves the shared run', async (t) => {
+  const h = harness(t)
+  const first = h.manager.getOrStart(h.target, '/controlled/python')
+  const second = h.manager.getOrStart(h.target, '/controlled/python')
+  const proc = h.processes.at(-1)
+  proc.event({ type: 'ready' })
+  const [entry, same] = await Promise.all([first, second])
+  assert.equal(entry, same, 'both concurrent callers receive the same kernel entry')
+  assert.equal(h.processes.length, 1, 'concurrent starts spawn only one bridge process')
+  assert.equal(h.manager.kernelCount, 1, 'concurrent starts register only one kernel')
   const events = []
-  const run = entry.run('utf8-cell', 'work', (event) => events.push(event))
+  const run = entry.run('c1', 'print("shared")', (event) => events.push(event))
   const command = proc.commands.at(-1)
-  const line = JSON.stringify({
-    type: 'stream',
-    cell_id: command.cell_id,
-    exec_id: command.exec_id,
-    name: 'stdout',
-    text: '中文😀done',
-  })
-  const bytes = Buffer.from(`${line}\n`, 'utf8')
-  const emojiStart = bytes.indexOf(Buffer.from('😀', 'utf8'))
-  assert.ok(emojiStart > 0)
-  // Split inside the four UTF-8 bytes of 😀: the decoder must hold the partial
-  // character and byte accounting must not count it twice.
-  const decoder = new StringDecoder('utf8')
-  const firstChunk = decoder.write(bytes.subarray(0, emojiStart + 2))
-  const secondChunk = decoder.write(bytes.subarray(emojiStart + 2))
-  proc.stdout.emit('data', firstChunk)
-  assert.equal(entry.stdoutBuffer, firstChunk)
-  assert.equal(entry.stdoutBytes, Buffer.byteLength(firstChunk))
-  assert.deepEqual(events, [], 'an unterminated frame is not dispatched')
-  proc.stdout.emit('data', secondChunk)
-  const stream = events.find((event) => event.type === 'stream')
-  assert.equal(stream.text, '中文😀done')
-  assert.equal(entry.stdoutBytes, 0)
-  assert.equal(entry.stdoutBuffer, '')
-  assert.deepEqual(proc.kills, [])
+  assert.equal(command.op, 'execute', 'the shared kernel receives the execute command')
+  proc.event({ type: 'stream', cell_id: command.cell_id, exec_id: command.exec_id, name: 'stdout', text: 'shared\n' })
   reply(proc, command)
-  assert.equal((await run).ok, true)
-})
-
-test('a frame accumulated across several chunks is dispatched only once its newline arrives', async (t) => {
-  const h = harness(t)
-  const { entry, proc } = await h.startReady()
-  const events = []
-  const run = entry.run('cell', 'work', (event) => events.push(event))
-  const command = proc.commands.at(-1)
-  const line = JSON.stringify({
-    type: 'stream',
-    cell_id: command.cell_id,
-    exec_id: command.exec_id,
-    name: 'stdout',
-    text: 'partial output',
-  })
-  const parts = [line.slice(0, 10), line.slice(10, 30), line.slice(30)]
-  proc.stdout.emit('data', parts[0])
-  assert.equal(entry.stdoutBuffer, parts[0])
-  assert.equal(entry.stdoutBytes, Buffer.byteLength(parts[0]))
-  assert.deepEqual(events, [])
-  proc.stdout.emit('data', parts[1])
-  assert.deepEqual(events, [])
-  assert.equal(entry.stdoutBytes, Buffer.byteLength(parts[0]) + Buffer.byteLength(parts[1]))
-  proc.stdout.emit('data', `${parts[2]}\n`)
-  assert.equal(entry.stdoutBytes, 0)
-  assert.equal(entry.stdoutBuffer, '')
-  assert.equal(events.filter((event) => event.type === 'stream').length, 1)
-  assert.equal(events.find((event) => event.type === 'stream').text, 'partial output')
-  reply(proc, command)
-  assert.equal((await run).ok, true)
+  assert.equal((await run).ok, true, 'the shared entry executes the run')
+  assert.ok(events.some((event) => event.type === 'stream' && event.text.includes('shared')), 'the shared run receives its stream output')
 })
