@@ -4,7 +4,8 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { measureJsonBytes } from '../lib/json-budget.js'
 import {
-  JSON_DEPTH_LIMIT, JSON_NODE_LIMIT, NOTEBOOK_DEPTH_LIMIT, NOTEBOOK_NODE_LIMIT,
+  JSON_DEPTH_LIMIT, JSON_NODE_LIMIT, METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT,
+  NOTEBOOK_DEPTH_LIMIT, NOTEBOOK_NODE_LIMIT,
   NOTEBOOK_CAP_BYTES, parseNotebookBytes, readNotebookFile, serializeNotebook, saveNotebookFile, sha256,
 } from '../lib/notebook.js'
 import { loadClient } from './client-harness.mjs'
@@ -43,7 +44,8 @@ test('host and browser use identical bounded JSON measurement and limit constant
   const body = (fn) => fn.toString().split('\n').map((line) => line.trim()).join('\n')
   assert.equal(body(client.measureJsonBytes), body(measureJsonBytes))
   for (const [name, value] of Object.entries({
-    JSON_DEPTH_LIMIT, JSON_NODE_LIMIT, NOTEBOOK_DEPTH_LIMIT, NOTEBOOK_NODE_LIMIT, NOTEBOOK_CAP_BYTES,
+    JSON_DEPTH_LIMIT, JSON_NODE_LIMIT, METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT,
+    NOTEBOOK_DEPTH_LIMIT, NOTEBOOK_NODE_LIMIT, NOTEBOOK_CAP_BYTES,
   })) assert.equal(client[name], value, name)
 })
 
@@ -89,7 +91,7 @@ test('normal JSON values keep host/client disk byte parity and round-trip withou
   }
 })
 
-for (const points of [4_997, 5_000, 50_000]) {
+for (const points of [4_997, 50_000]) {
   test('Plotly scatter with ' + points + ' points remains readable, saveable and usable as live output', async (t) => {
     const { exports } = await loadClient()
     const { notebookCapacity, reduceOutputs, renderJsonOutput } = exports.__test

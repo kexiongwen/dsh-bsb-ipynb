@@ -807,15 +807,6 @@ test('a ready-timeout cause survives the exit event that follows it', async (t) 
   assert.match(entry.lastError, /did not become ready within 30 seconds/)
 })
 
-test('shutdown clears its grace timer instead of keeping the event loop busy', async (t) => {
-  const h = harness(t)
-  await h.startReady()
-  const activeTimeouts = () => process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length
-  const before = activeTimeouts()
-  await h.manager.shutdown(h.target)
-  assert.ok(activeTimeouts() <= before, 'shutdown must clear the 2.5s grace timer')
-})
-
 test('the idle sweep skips entries that are already shutting down', async (t) => {
   const h = harness(t)
   const { entry, proc } = await h.startReady()

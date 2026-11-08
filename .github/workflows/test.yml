@@ -72,8 +72,6 @@ jobs:
       # Real-kernel tests run because the Python dependencies are installed.
       # Symlink-only regressions probe the filesystem capability and skip when
       # it is unavailable; Windows/macOS runners provide it.
+      # Package contents are also checked by test/package.test.mjs.
       - name: Run tests
         run: npm test
-
-      - name: Check package contents
-        run: npm pack --dry-run

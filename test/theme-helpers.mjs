@@ -1,8 +1,8 @@
 /**
- * Helpers for the client theme tests: a tiny CSS rule/declaration parser, a
- * nested `var()` resolver that mimics computed-value resolution, and WCAG
- * contrast math. These stay dependency-free so the suite keeps running with a
- * plain `node --test` on every platform.
+ * Helpers for the client theme tests: a tiny CSS rule/declaration parser and a
+ * nested `var()` resolver that mimics computed-value resolution. These stay
+ * dependency-free so the suite keeps running with a plain `node --test` on
+ * every platform.
  */
 
 /** Strip CSS block comments; comments never contain nested terminators here. */
@@ -173,69 +173,4 @@ export function evaluateCalc(value) {
   let total = 0
   for (const term of terms) total += Number.parseFloat(term.replace(/\s+/g, ''))
   return `${total}px`
-}
-
-/** Parse the CSS colours used by the theme fixtures into `{ r, g, b, a }`. */
-export function parseColor(value) {
-  const text = String(value).trim().toLowerCase()
-  const hex = /^#([0-9a-f]{3,8})$/.exec(text)
-  if (hex) {
-    const digits = hex[1]
-    if (digits.length === 3 || digits.length === 4) {
-      const channels = digits.split('').map((digit) => Number.parseInt(digit + digit, 16))
-      return { r: channels[0], g: channels[1], b: channels[2], a: (channels[3] ?? 255) / 255 }
-    }
-    if (digits.length === 6 || digits.length === 8) {
-      return {
-        r: Number.parseInt(digits.slice(0, 2), 16),
-        g: Number.parseInt(digits.slice(2, 4), 16),
-        b: Number.parseInt(digits.slice(4, 6), 16),
-        a: digits.length === 8 ? Number.parseInt(digits.slice(6, 8), 16) / 255 : 1,
-      }
-    }
-  }
-  const functional = /^rgba?\(([^)]+)\)$/.exec(text)
-  if (functional) {
-    const parts = functional[1].split(/[,/\s]+/).filter(Boolean).map(Number)
-    return { r: parts[0], g: parts[1], b: parts[2], a: parts[3] === undefined ? 1 : parts[3] }
-  }
-  if (text === 'white') return { r: 255, g: 255, b: 255, a: 1 }
-  if (text === 'black') return { r: 0, g: 0, b: 0, a: 1 }
-  if (text === 'transparent') return { r: 0, g: 0, b: 0, a: 0 }
-  throw new Error('unsupported colour: ' + value)
-}
-
-/** Composite a possibly translucent foreground over an opaque backdrop. */
-export function composite(foreground, backdrop) {
-  const alpha = foreground.a
-  return {
-    r: foreground.r * alpha + backdrop.r * (1 - alpha),
-    g: foreground.g * alpha + backdrop.g * (1 - alpha),
-    b: foreground.b * alpha + backdrop.b * (1 - alpha),
-    a: 1,
-  }
-}
-
-/** WCAG 2.x relative luminance. */
-function luminance(color) {
-  const channel = (value) => {
-    const normalized = value / 255
-    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-}
-
-/** WCAG 2.x contrast ratio between two colours. */
-export function contrastRatio(foreground, backdrop) {
-  const front = foreground.a < 1 ? composite(foreground, backdrop) : foreground
-  const first = luminance(front)
-  const second = luminance(backdrop)
-  const lighter = Math.max(first, second)
-  const darker = Math.min(first, second)
-  return (lighter + 0.05) / (darker + 0.05)
-}
-
-/** Mix `color` at `alpha` over `backdrop`, mirroring `color-mix(… N%, transparent)`. */
-export function tint(color, alpha, backdrop) {
-  return composite({ ...color, a: alpha }, backdrop)
 }

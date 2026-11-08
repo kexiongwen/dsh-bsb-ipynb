@@ -37,32 +37,39 @@ function nested(depth, array = false) {
 const placements = ['display_data', 'execute_result', 'markdown', 'raw']
 const mimes = ['application/json', 'application/vnd.example+json']
 const structureError = (error) => error.code === 'bad-request' && error.status === 400
+const oversizedJsonArray = new Array(JSON_NODE_LIMIT).fill(null)
 
+// Every placement and MIME must reach the common structural checks. Exercise
+// the expensive exact array/object node boundaries once below.
 for (const placement of placements) {
   for (const mime of mimes) {
-    test(`${placement} ${mime} enforces the JSON depth boundary`, () => {
+    test(`${placement} ${mime} enforces JSON structure limits`, () => {
       for (const array of [false, true]) {
         const valid = notebookWith(nested(JSON_DEPTH_LIMIT, array), placement, mime)
         assert.doesNotThrow(() => serializeNotebook(valid))
         const invalid = notebookWith(nested(JSON_DEPTH_LIMIT + 1, array), placement, mime)
         assert.throws(() => normalizeNotebook(invalid), (error) => structureError(error) && /JSON data.*maximum depth/.test(error.message))
       }
-    })
-
-    test(`${placement} ${mime} enforces the JSON node boundary`, () => {
-      for (const object of [false, true]) {
-        const payload = (length) => object
-          ? Object.fromEntries(Array.from({ length }, (_, index) => [`item-${index}`, null]))
-          : new Array(length).fill(null)
-        assert.doesNotThrow(() => serializeNotebook(notebookWith(payload(JSON_NODE_LIMIT - 1), placement, mime)))
-        assert.throws(
-          () => normalizeNotebook(notebookWith(payload(JSON_NODE_LIMIT), placement, mime)),
-          (error) => structureError(error) && /JSON data.*maximum node count/.test(error.message),
-        )
-      }
+      assert.throws(
+        () => normalizeNotebook(notebookWith(oversizedJsonArray, placement, mime)),
+        (error) => structureError(error) && /JSON data.*maximum node count/.test(error.message),
+      )
     })
   }
 }
+
+test('JSON payload arrays and objects enforce the exact node boundary', () => {
+  for (const object of [false, true]) {
+    const payload = (length) => object
+      ? Object.fromEntries(Array.from({ length }, (_, index) => [`item-${index}`, null]))
+      : new Array(length).fill(null)
+    assert.doesNotThrow(() => serializeNotebook(notebookWith(payload(JSON_NODE_LIMIT - 1))))
+    assert.throws(
+      () => normalizeNotebook(notebookWith(object ? payload(JSON_NODE_LIMIT) : oversizedJsonArray)),
+      (error) => structureError(error) && /JSON data.*maximum node count/.test(error.message),
+    )
+  }
+})
 
 test('JSON payloads count shared references at every occurrence and reject cycles', () => {
   const shared = new Array((JSON_NODE_LIMIT - 2) / 2).fill(0)

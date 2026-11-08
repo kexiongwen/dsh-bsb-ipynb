@@ -4,16 +4,13 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { loadClient } from './client-harness.mjs'
 import {
-  contrastRatio,
   declarationOf,
   declarationsOf,
   hasDeclaration,
   maskVars,
-  parseColor,
   parseRules,
   resolveVars,
   ruleBody,
-  tint,
 } from './theme-helpers.mjs'
 
 const fixture = JSON.parse(
@@ -281,52 +278,4 @@ test('DSH font settings scale notebook text and code without changing the defaul
   // Text font family is inherited from the host body (`--dsw-font-family`);
   // only code contexts name a font family.
   assert.equal(hasDeclaration(css, '.dsh-bsb-ipynb-root', 'font-family'), false)
-})
-
-test('host palette contrast stays legible in both schemes', () => {
-  for (const scheme of ['light', 'dark']) {
-    const palette = fixture[scheme]
-    const color = (name) => parseColor(palette[name])
-    const layer1 = color('--dsw-alias-bg-layer-1')
-    const module = color('--dsw-alias-bg-module-platform')
-    const codeBlock = color('--dsw-alias-markdown-code-block')
-    const text = color('--dsw-alias-label-primary')
-
-    // Body text and secondary labels keep the WCAG AA floor the host itself
-    // targets for text.
-    assert.ok(contrastRatio(text, layer1) >= 4.5, `${scheme}: primary text on the panel surface`)
-    assert.ok(contrastRatio(color('--dsw-alias-label-secondary'), module) >= 4.5, `${scheme}: muted text on a cell`)
-    assert.ok(
-      contrastRatio(text, tint(color('--dsw-alias-state-business-primary'), 0.12, layer1)) >= 4.5,
-      `${scheme}: info banner text on its tint`,
-    )
-    assert.ok(
-      contrastRatio(text, tint(color('--dsw-alias-state-error-primary'), 0.12, layer1)) >= 4.5,
-      `${scheme}: error banner text on its tint`,
-    )
-
-    // Host-semantic colours are bound to the stock palette; the floors below
-    // catch a mapping mistake (wrong token for a role) without inventing
-    // plugin colours to out-rank the theme.
-    assert.ok(contrastRatio(color('--dsw-alias-state-error-primary'), module) >= 3.5, `${scheme}: traceback text`)
-    assert.ok(contrastRatio(color('--dsw-alias-link'), layer1) >= 4.0, `${scheme}: markdown link`)
-    for (const token of [
-      '--shiki-token-keyword',
-      '--shiki-token-string',
-      '--shiki-token-comment',
-      '--shiki-token-constant',
-      '--shiki-token-function',
-      '--shiki-token-parameter',
-    ]) {
-      assert.ok(contrastRatio(color(token), codeBlock) >= 3.0, `${scheme}: ${token} on a markdown code block`)
-      assert.ok(contrastRatio(color(token), module) >= 3.0, `${scheme}: ${token} on a cell surface`)
-    }
-    for (const token of [
-      '--dsw-alias-label-tertiary',
-      '--dsw-alias-state-success-primary',
-      '--dsw-alias-state-warn-primary',
-    ]) {
-      assert.ok(contrastRatio(color(token), layer1) >= 1.4, `${scheme}: ${token} status dot stays visible`)
-    }
-  }
 })

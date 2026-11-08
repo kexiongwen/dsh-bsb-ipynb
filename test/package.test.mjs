@@ -6,13 +6,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-test('package manifest ships the examples directory and declares the documented DSH minimum', async () => {
+test('npm pack ships examples and linked documentation with the documented DSH minimum', async (t) => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.ok(manifest.files.includes('examples'), 'examples must survive npm pack')
   assert.equal(manifest.engines.dsh, '>=0.2.2-rc.1')
-})
-
-test('npm pack includes the linked documentation and screenshot', async (t) => {
   const cache = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-pack-'))
   t.after(async () => { await rm(cache, { recursive: true, force: true }) })
   const options = {
@@ -34,6 +30,7 @@ test('npm pack includes the linked documentation and screenshot', async (t) => {
     'README.md',
     'README_ZH.md',
     'docs/screenshot.png',
+    'examples/demo.ipynb',
     'client.js',
     'python/bridge.py',
     'icon.svg',

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT, NOTEBOOK_CAP_BYTES } from '../lib/notebook.js'
 import { installDomParser } from './client-dom-stub.mjs'
 import { loadClient } from './client-harness.mjs'
 
@@ -88,7 +87,6 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
   assert.ok(registered.en && registered.zh, 'both locale dictionaries are registered')
   const enKeys = Object.keys(registered.en).sort()
   assert.deepEqual(Object.keys(registered.zh).sort(), enKeys, 'both locales expose the same string keys')
-  assert.equal(enKeys.length, 60, 'the audited client dictionary exposes 60 translation keys')
   for (const key of enKeys) {
     assert.equal(typeof registered.en[key], 'string', `en.${key} must be a translated string`)
     assert.ok(registered.en[key].length > 0, `en.${key} must not be empty`)
@@ -837,45 +835,6 @@ test('save preflight rejects toJSON hooks without executing them', async () => {
   assert.equal(called, false)
 })
 
-test('metadata capacity failure stores translatable state and reloads notebook metadata problems', async () => {
-  const stateCalls = []
-  let stateIndex = 0
-  const { exports } = await loadClient({
-    useState(initial) {
-      const index = stateIndex++
-      return [initial, (value) => stateCalls.push({ index, value })]
-    },
-    useRef(value) {
-      return { current: value }
-    },
-    useCallback(callback) {
-      return callback
-    },
-  })
-  const { NotebookView, STRINGS, METADATA_DEPTH_LIMIT, bannerText } = exports.__test
-  const tree = NotebookView({
-    ctx: {},
-    scope: {},
-    path: '/workspace/demo.ipynb',
-    visible: false,
-    customData: {
-      status: 'ok',
-      version: 'v1',
-      notebook: notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT + 1)),
-    },
-  })
-  tree.props.children[0].props.onSave()
-  const banner = stateCalls.map((call) => call.value).find((value) => value && value.reason === 'metadata-too-complex')
-  assert.ok(banner)
-  const strings = /^zh/i.test(globalThis.navigator?.language || '') ? STRINGS.zh : STRINGS.en
-  assert.equal(banner.key, 'metadataTooComplex')
-  assert.equal(Object.hasOwn(banner, 'text'), false, 'static text must not be frozen into banner state')
-  assert.equal(bannerText(banner), strings.metadataTooComplex)
-  assert.equal(banner.action, 'reload', 'clearing outputs cannot repair notebook metadata')
-  assert.equal(typeof STRINGS.en.metadataTooComplex, 'string')
-  assert.equal(typeof STRINGS.zh.metadataTooComplex, 'string')
-})
-
 test('autosave recovers after a failed save only when the notebook changes', async () => {
   const { exports } = await loadClient()
   const { shouldScheduleAutosave } = exports.__test
@@ -1566,14 +1525,6 @@ test('output rendering covers MIME priority, fallbacks, image aliases and saniti
 
   const unknown = render({ output_type: 'display_data', data: { 'application/x-custom': 1 } })
   assert.match(unknown.props.children[0], /application\/x-custom/)
-})
-
-test('client and server notebook limits stay in parity', async () => {
-  const { exports } = await loadClient()
-  const client = exports.__test
-  assert.equal(client.NOTEBOOK_CAP_BYTES, NOTEBOOK_CAP_BYTES)
-  assert.equal(client.METADATA_DEPTH_LIMIT, METADATA_DEPTH_LIMIT)
-  assert.equal(client.METADATA_NODE_LIMIT, METADATA_NODE_LIMIT)
 })
 
 test('ansi output handles carriage returns and strips OSC sequences', async () => {

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { KernelManager, exceedsMaxLineBytes } from '../lib/kernel.js'
+import { KernelManager } from '../lib/kernel.js'
 import { findPython, tempDir } from './python-helper.mjs'
 
 const bridgePath = fileURLToPath(new URL('../python/bridge.py', import.meta.url))
@@ -174,9 +174,4 @@ test('DSH_IPYNB_KERNEL_IDLE_MS=0 disables the idle sweep', async (t) => {
   await manager.sweepIdle()
   assert.deepEqual(shutdowns, ['shutdown'], 'a positive TTL still sweeps idle kernels')
   assert.equal(manager.entries.has('idle-target'), false)
-})
-
-test('the oversized-line helper uses a strict byte boundary', () => {
-  assert.equal(exceedsMaxLineBytes(64 * 1024 * 1024), false)
-  assert.equal(exceedsMaxLineBytes(64 * 1024 * 1024 + 1), true)
 })

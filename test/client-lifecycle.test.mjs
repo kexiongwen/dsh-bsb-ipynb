@@ -439,7 +439,7 @@ for (const termination of ['fatal', 'stream-error', 'fetch-error']) {
   })
 }
 
-test('cancelling the host reload prompt keeps the current execution alive', async (t) => {
+test('cancelling the reload prompt keeps the current execution alive', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
   const request = app.run()
@@ -482,62 +482,60 @@ for (const staleOutcome of ['success', 'error']) {
   })
 }
 
-for (const hostReload of [true, false]) {
-  for (const outcome of ['conflict', 'failure', 'success']) {
-    test(`${hostReload ? 'host' : 'fallback'} reload waits for an in-flight save ${outcome} before reading the disk`, async (t) => {
-      const app = mountNotebook(t, { hostReload })
-      await app.settle()
-      app.edit('old draft')
-      const oldSave = app.save()
-      app.toolbar.onReload()
-      await app.settle()
-      assert.equal(app.reloadCount, 0, 'the host must not read while the save can still commit')
-      assert.equal(app.requests('read').length, 0, 'the fallback must not read while the save can still commit')
-      app.save()
-      assert.equal(app.requests('save').length, 1, 'waiting for reload does not start another save')
-
-      // Successful/conflict responses follow the server write. The failure case
-      // separately checks that a rejected transport releases the reload wait;
-      // server-side ordering of an unfinished write is covered by I/O tests.
-      const disk = notebookData('LATEST DISK', 'v2')
-      disk.notebook.cells[0].source = outcome === 'success' ? 'old draft' : 'external draft'
-      if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', message: 'CONFLICT', details: { version: 'v2' } } }, 409))
-      else if (outcome === 'failure') oldSave.reject(new Error('NETWORK FAILURE'))
-      else oldSave.resolve(response({ ok: true, value: { version: 'v2' } }))
-      await app.settle()
-      assert.equal(app.reloadCount, 0, 'plugin reload owns confirmation regardless of host callback availability')
-      assert.equal(app.requests('read').length, 1)
-      app.requests('read')[0].resolve(response({ ok: true, value: disk }))
-      await app.settle()
-      assert.equal(app.cell.cell.source, disk.notebook.cells[0].source)
-      assert.equal(app.cell.cell.outputs[0].text, 'LATEST DISK')
-      assert.equal(app.toolbar.dirty, false)
-      assert.equal(app.toolbar.conflict, null)
-      assert.equal(app.banner, null)
-      app.edit('next draft')
-      const nextSave = app.save()
-      assert.equal(nextSave.body.baseVersion, 'v2', 'the next save uses the actual latest disk version')
-      nextSave.resolve(response({ ok: true, value: { version: 'v3' } }))
-      await app.settle()
-    })
-  }
-
-  test(`${hostReload ? 'host' : 'fallback'} reload cannot replace edits saved while its read was in flight`, async (t) => {
-    const app = mountNotebook(t, { hostReload })
+for (const outcome of ['conflict', 'failure', 'success']) {
+  test(`reload waits for an in-flight save ${outcome} before reading the disk`, async (t) => {
+    const app = mountNotebook(t)
     await app.settle()
+    app.edit('old draft')
+    const oldSave = app.save()
     app.toolbar.onReload()
-    app.edit('newer draft')
-    const save = app.save()
-    save.resolve(response({ ok: true, value: { version: 'v2' } }))
     await app.settle()
+    assert.equal(app.reloadCount, 0, 'plugin reload must not delegate to the host callback')
+    assert.equal(app.requests('read').length, 0, 'reload must not read while the save can still commit')
+    app.save()
+    assert.equal(app.requests('save').length, 1, 'waiting for reload does not start another save')
+
+    // Successful/conflict responses follow the server write. The failure case
+    // separately checks that a rejected transport releases the reload wait;
+    // server-side ordering of an unfinished write is covered by I/O tests.
+    const disk = notebookData('LATEST DISK', 'v2')
+    disk.notebook.cells[0].source = outcome === 'success' ? 'old draft' : 'external draft'
+    if (outcome === 'conflict') oldSave.resolve(response({ ok: false, error: { code: 'write-conflict', message: 'CONFLICT', details: { version: 'v2' } } }, 409))
+    else if (outcome === 'failure') oldSave.reject(new Error('NETWORK FAILURE'))
+    else oldSave.resolve(response({ ok: true, value: { version: 'v2' } }))
+    await app.settle()
+    assert.equal(app.reloadCount, 0, 'plugin reload owns confirmation')
+    assert.equal(app.requests('read').length, 1)
+    app.requests('read')[0].resolve(response({ ok: true, value: disk }))
+    await app.settle()
+    assert.equal(app.cell.cell.source, disk.notebook.cells[0].source)
+    assert.equal(app.cell.cell.outputs[0].text, 'LATEST DISK')
     assert.equal(app.toolbar.dirty, false)
-    app.requests('read')[0].resolve(response({ ok: true, value: notebookData('STALE', 'v1') }))
-    await app.settle()
-    assert.equal(app.cell.cell.source, 'newer draft', 'even a now-clean draft must survive the older read')
+    assert.equal(app.toolbar.conflict, null)
+    assert.equal(app.banner, null)
     app.edit('next draft')
-    assert.equal(app.save().body.baseVersion, 'v2')
+    const nextSave = app.save()
+    assert.equal(nextSave.body.baseVersion, 'v2', 'the next save uses the actual latest disk version')
+    nextSave.resolve(response({ ok: true, value: { version: 'v3' } }))
+    await app.settle()
   })
 }
+
+test('reload cannot replace edits saved while its read was in flight', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.toolbar.onReload()
+  app.edit('newer draft')
+  const save = app.save()
+  save.resolve(response({ ok: true, value: { version: 'v2' } }))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, false)
+  app.requests('read')[0].resolve(response({ ok: true, value: notebookData('STALE', 'v1') }))
+  await app.settle()
+  assert.equal(app.cell.cell.source, 'newer draft', 'even a now-clean draft must survive the older read')
+  app.edit('next draft')
+  assert.equal(app.save().body.baseVersion, 'v2')
+})
 
 test('only the latest queued reload runs after saving, and cancellation does not lock the editor', async (t) => {
   const app = mountNotebook(t)
@@ -1241,7 +1239,7 @@ test('an oversized notebook without outputs does not offer a no-op clear action'
 test('metadata preflight offers the matching recovery for output, notebook and cell metadata', async (t) => {
   for (const location of ['output', 'notebook', 'cell']) {
     const scenario = `${location} metadata`
-    const app = mountNotebook(t)
+    const app = mountNotebook(t, { locale: true })
     await app.settle()
     const data = notebookData('OLD', 'v2')
     if (location === 'output') {
@@ -1262,9 +1260,16 @@ test('metadata preflight offers the matching recovery for output, notebook and c
     await app.settle()
     assert.equal(app.requests('save').length, 0, `${scenario}: over-complex metadata is blocked before upload`)
     assert.equal(app.banner?.reason, 'metadata-too-complex', `${scenario}: the preflight failure is stored in banner state`)
+    assert.equal(app.banner.key, 'metadataTooComplex', `${scenario}: the banner stores a translatable key`)
+    assert.equal(Object.hasOwn(app.banner, 'text'), false, `${scenario}: static text must not be frozen into banner state`)
+    const english = app.bannerText
+    assert.match(english, /metadata is too complex/)
+    app.setLocale('zh')
+    assert.match(app.bannerText, /metadata 过于复杂/)
+    app.setLocale('en')
+    assert.equal(app.bannerText, english, `${scenario}: the existing banner follows locale switches`)
 
     if (location === 'output') {
-      assert.equal(app.banner.key, 'metadataTooComplex', `${scenario}: the banner stores a translatable key`)
       assert.equal(app.banner.action, 'clear-outputs', `${scenario}: the clear-outputs action is offered`)
       const banner = app.component('Banner')
       const clearAll = findElement(banner.type(banner.props), (value) => value.props?.title === 'Clear all outputs')
@@ -1288,7 +1293,7 @@ test('metadata preflight offers the matching recovery for output, notebook and c
       const rendered = banner.type(banner.props)
       const reload = findElement(rendered, (value) => value.props?.title === 'Reload')
       const clearAll = findElement(rendered, (value) => value.props?.title === 'Clear all outputs')
-      assert.ok(reload, `${scenario}: the banner provides the host reload action`)
+      assert.ok(reload, `${scenario}: the banner provides the reload action`)
       assert.equal(clearAll, null, `${scenario}: clearing outputs cannot repair notebook or cell metadata`)
       const reloadCount = app.requests('read').length
       reload.props.onClick()
@@ -1504,25 +1509,6 @@ test('the empty-file hint disappears once the notebook is saved', async (t) => {
   assert.equal(app.toolbar.dirty, false)
 })
 
-test('the open-as-empty hint also clears after a successful save', async (t) => {
-  const app = mountNotebook(t)
-  await app.settle()
-  await app.reload({ status: 'invalid', error: 'broken', version: 'v1' })
-  await app.settle()
-  const open = app.find((value) => value.props?.title === 'Open as empty notebook')
-  assert.ok(open, 'the invalid document offers the open-as-empty action')
-  open.props.onClick()
-  await app.settle()
-  assert.equal(app.banner?.reason, 'empty-file')
-  app.edit('print("saved")')
-  const request = app.save()
-  assert.ok(request)
-  request.resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
-  await app.settle()
-  assert.equal(app.banner, null, 'saving clears the open-as-empty hint')
-  assert.equal(app.toolbar.dirty, false)
-})
-
 test('error adoption clears dirty state so a later host snapshot can be adopted', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
@@ -1547,9 +1533,10 @@ test('open as empty clears an old conflict and preserves the invalid file versio
   await app.settle()
 
   const open = app.find((value) => value.props?.title === 'Open as empty notebook')
-  assert.ok(open)
+  assert.ok(open, 'the invalid document offers the open-as-empty action')
   open.props.onClick()
   await app.settle()
+  assert.equal(app.banner?.reason, 'empty-file')
   assert.equal(app.toolbar.conflict, null)
   assert.equal(app.toolbar.dirty, false)
   app.edit('replacement draft')
@@ -1559,7 +1546,7 @@ test('open as empty clears an old conflict and preserves the invalid file versio
   request.resolve(response({ ok: true, value: { version: 'v4', size: 42 } }))
   await app.settle()
   assert.equal(app.toolbar.dirty, false)
-  assert.equal(app.banner, null)
+  assert.equal(app.banner, null, 'saving clears the open-as-empty hint')
 })
 
 test('a malformed attachment reference degrades instead of crashing the render', async (t) => {
