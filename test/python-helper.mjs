@@ -20,7 +20,20 @@ export function findPython(imports = 'sys') {
 
 export async function tempDir(t, prefix = 'dsh-bsb-ipynb-test-') {
   const dir = await mkdtemp(path.join(os.tmpdir(), prefix))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  t.after(async () => {
+    // A killed kernel/bridge child releases its cwd handle a moment after the
+    // test body on Windows; retry briefly instead of failing an otherwise
+    // passing test in the teardown hook (EBUSY/EPERM/ENOTEMPTY are transient).
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rm(dir, { recursive: true, force: true })
+        return
+      } catch (error) {
+        if (attempt >= 20 || !['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+  })
   return dir
 }
 
