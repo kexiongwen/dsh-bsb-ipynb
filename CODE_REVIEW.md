@@ -1,6 +1,6 @@
 # dsh-bsb-ipynb 代码审查：未解决项
 
-> 更新：2026-11-14。适用于 DSH 0.2.2-rc.2+ / dsh-better-sidebar 0.32.x；当前验证组合为 DSH 0.2.2-rc.3 + Better Sidebar 0.32.1。
+> 更新：2026-11-15。适用于 DSH 0.2.2-rc.2+ / dsh-better-sidebar 0.32.x；当前验证组合为 DSH 0.2.2-rc.3 + Better Sidebar 0.32.1。
 >
 > 本报告只记录当前未解决项。编号按本版顺序排列，与旧报告不对应。位置以函数名为主，避免行号随改动失效。
 
@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | Medium | 4 | M-1～M-4 |
 | Low | 4 | L-1～L-4 |
-| Nit | 5 | N-1～N-5 |
+| Nit | 6 | N-1～N-6 |
 | 测试缺口 | 1 | T-1 |
 
 **证据标记**：【已验证】表示确定性复现或可重跑测试；【契约核对】表示对照宿主或上游源码；【代码确认】表示代码路径明确，但未单独做运行期复现。
@@ -65,6 +65,7 @@
 | **N-3** | 客户端 | 任意 `class` 有视觉伪装面，但移除会破坏 pandas 等输出，需产品决策；解释器获取失败时 select 文案仍有误导；执行中编辑态 Ctrl+Enter/Ctrl+S 静默早退；Tab 的焦点行为可补充文档说明。 |
 | **N-4** | Windows 环境 | `lastError` 可能含本地化 WinError 文案；Node 对尾点、尾空格和保留设备名的字面语义与 Win32 工具不同，升级 Node/Windows 后应复验。 |
 | **N-5** | 测试统计 | `test/bridge_iopub.py` 的 26 个 Python unittest 在 Node 汇总中只体现为 2 个测试，计数不代表真实 Python 用例数；这不是假绿。 |
+| **N-6** | 客户端/宿主依赖 | 公式排版复用宿主页面的 KaTeX 样式表（以 `.katex` 字体探测是否可用，缺失时改用 MathML），并依赖 client module loader 的 package-local chunk 能力。升级 DSH 后应复验公式外观与 `client.katex.js` 加载；降级路径只显示公式源码，不会报错。 |
 
 ## 4. 测试缺口
 
@@ -83,9 +84,9 @@
 
 ## 6. 当前验证
 
-- 本地 macOS 全量测试：**431 tests / 425 pass / 6 skip / 0 fail**，约 11.7s。
+- 本地 macOS 全量测试：**437 tests / 431 pass / 6 skip / 0 fail**，约 11.6s（含新增的 6 个公式渲染用例）。
 - 当前 CI 的三平台矩阵与 pinned 浏览器 E2E 均通过：[运行记录 43610459940](https://github.com/kexiongwen/dsh-bsb-ipynb/actions/runs/43610459940)。
-- 本地 pinned E2E 覆盖普通根、宿主指定的备用根和受控图片的真实浏览器加载；测试套件另含真实 Git worktree 与真实 Python/Jupyter 路径。
+- 本地 pinned E2E 覆盖普通根、宿主指定的备用根、受控图片与 KaTeX 公式（chunk 懒加载 + 宿主样式表）的真实浏览器加载；测试套件另含真实 Git worktree 与真实 Python/Jupyter 路径。
 
 ### 仍需注意的验证边界
 

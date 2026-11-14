@@ -30,6 +30,7 @@
 ## ✨ 特性
 
 - **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。Markdown 与 `text/html` 输出中的图片按同一规则解析：`attachment:`、相对路径与 Windows 盘符/UNC 路径经插件自带的工作区受限图片路由加载，`http(s)` 与 `data:image` 保持原地址直连（远程图片由源站加载）。
+- **LaTeX 公式**：Markdown 单元格、Markdown 输出与 `text/latex` 输出均支持 `$...$` / `\(...\)` 行内公式和 `$$...$$` / `\[...\]` 块级公式。KaTeX 以 package-local chunk 形式随插件分发，仅当 notebook 含公式时才加载；样式表与字体复用 DSH 页面已加载的 KaTeX 资源，缺失时自动改用自包含的 MathML。`text/html` 输出中的公式仍按静态 HTML 清洗，不做排版。
 - **编辑**：点击单元格进入编辑；插入/删除、上移/下移、切换类型、Markdown 预览、清空单个或全部输出。
 - **执行**：每个 notebook 一个按文件路径共享的常驻内核，变量跨单元格保留；支持全部运行、中断、重启与关闭。
 - **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后默认 1.5 秒自动保存（可在设置面板调整）。
@@ -90,6 +91,9 @@ python -m pip install jupyter_client ipykernel    # Windows（或：py -3 -m pip
 dsh-bsb-ipynb/
 ├── index.js          # 宿主插件入口：注册 /ipynb 路由并管理内核
 ├── client.js         # 浏览器 bundle（手写，无构建步骤）
+├── client.katex.js   # vendored KaTeX chunk，含公式时懒加载（生成文件）
+├── scripts/
+│   └── build-katex-chunk.mjs # 从固定版本 devDependency 重新生成 client.katex.js
 ├── lib/
 │   ├── routes.js     # /ipynb/* HTTP API
 │   ├── kernel.js     # 每个 notebook 一个 bridge 进程、事件队列与空闲回收
@@ -170,6 +174,8 @@ Notebook 相关接口需要非空 `sessionId` 与 `path`（`/status` 与 `/image
 ## ⚠️ 已知限制
 
 - 仅支持 Python 内核（nbformat 4.x）；不渲染依赖 JavaScript 的交互输出（ipywidgets、plotly、bokeh 等），HTML 会被清洗为静态内容。
+- **HTML 输出中的公式**：`text/html` 输出里内嵌的 LaTeX 不会被排版，该通道保持清洗后的静态内容；公式请使用 Markdown 单元格、Markdown 输出或 `text/latex` 输出。
+- **旧版宿主上的公式**：KaTeX chunk 依赖 client module loader 的 package-local chunk 能力（已在 DSH 0.2.2-rc.3 验证）。宿主不支持时会继续显示公式源码而非报错，插件其余功能不受影响。
 - 不支持 `input()`：内核以 `allow_stdin=False` 启动，调用会立即报错而非挂起。`%%` cell magic 与 `!cmd`、`%pip`、`%cd`、`%pwd` 可用。
 - 中断后约 3 秒内核仍未响应会被强制重启，所有变量与内核状态都会清空。
 - 执行结果由客户端回写并在保存时落盘；服务端不会在后台追加输出。
@@ -185,6 +191,8 @@ Notebook 相关接口需要非空 `sessionId` 与 `path`（`/status` 与 `/image
 | notebook 落盘上限 | 32 MiB（超过返回 413） |
 | POST 请求体上限 | 64 MiB（`/ipynb/save` 为 36 MiB） |
 | 客户端每单元格输出预算 | 32 MiB（完整 JSON 的 UTF-8 字节） |
+| 公式渲染 | 单条公式 20,000 字符、每次 Markdown 渲染最多 2,000 条、渲染缓存 2,000 条 |
+| KaTeX chunk | KaTeX 0.19.1，压缩后约 267 KiB；仅当 notebook 含公式时请求 |
 | NDJSON 待发队列 / 单行内核输出 | 64 MiB / 64 MiB |
 | metadata | 每个值 100 层 / 10,000 个节点 |
 | JSON MIME 值（输出 / 附件） | 每个值 100 层 / 250,000 个节点 |
@@ -199,27 +207,30 @@ Notebook 相关接口需要非空 `sessionId` 与 `path`（`/status` 与 `/image
 
 ## 🧪 开发与测试
 
-无需构建步骤。DSH 会缓存已注册的 bundle，修改 `client.js` 或宿主侧代码后，需重载 `dsh-bsb-ipynb` 插件（或重启 DSH）才会生效；修改客户端后还需硬刷新页面（`Ctrl/Cmd+Shift+R`）。
+无需为 viewer 构建。唯一的生成物是 vendored KaTeX chunk `client.katex.js`，仅在特意升级固定 devDependency 后重新生成。DSH 会缓存已注册的 bundle，修改 `client.js`、`client.katex.js` 或宿主侧代码后，需重载 `dsh-bsb-ipynb` 插件（或重启 DSH）才会生效；修改客户端后还需硬刷新页面（`Ctrl/Cmd+Shift+R`）。
 
 ```bash
-for file in index.js lib/*.js client.js; do node --check "$file"; done
+for file in index.js lib/*.js client.js client.katex.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
 npm test          # 运行完整单元测试与集成测试
-npm install       # 安装仅开发期使用的 Playwright，供固定版本浏览器 E2E
+npm install       # 仅开发期依赖：Playwright 与 KaTeX（E2E、chunk 重建）
 npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1 上运行 E2E
+npm run build:katex  # 有意升级 KaTeX 后重新生成 client.katex.js
 ```
 
 上述默认 E2E 命令使用普通工作区根。需要验证宿主指定的备用根兼容路径时，在 macOS/Linux 运行 `DSH_IPYNB_E2E_WORKTREE=1 npm run test:e2e`；Windows PowerShell 使用 `$env:DSH_IPYNB_E2E_WORKTREE='1'; npm run test:e2e`。
 
-浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，检查 viewer 设置面板，通过真实文件树打开生成的 notebook，经受限路由渲染本地图片，再用编辑器头部的 **全部运行** 操作执行，检查内核页面，再从目录行操作新建另一个 notebook，并校验第一个 notebook 在真实 Python 内核下自动保存的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
+浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，检查 viewer 设置面板，通过真实文件树打开生成的 notebook，经受限路由渲染本地图片，加载 KaTeX chunk 并确认宿主样式表生效，再用编辑器头部的 **全部运行** 操作执行，检查内核页面，再从目录行操作新建另一个 notebook，并校验第一个 notebook 在真实 Python 内核下自动保存的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
 
 主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
+
+`test/client-math.test.mjs` 在 VM 中直接执行随包发布的 `client.katex.js`，覆盖行内/块级定界符、代码块与货币符号排除、`text/latex` 输出路径以及懒加载失败重试约定；E2E 还会在真实宿主中确认样式表确实作用于渲染结果。
 
 版本变更见 [CHANGELOG.md](CHANGELOG.md)；当前未解决问题与验证证据见 [CODE_REVIEW.md](CODE_REVIEW.md)。
 
 ## 🤝 贡献
 
-欢迎提交 issue 与 pull request。开发环境、测试与 PR 规范见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。`client.js` 保持手写、无构建步骤，不引入打包器或新的运行时依赖。
+欢迎提交 issue 与 pull request。开发环境、测试与 PR 规范见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。`client.js` 保持手写、无构建步骤，不引入打包器或新的运行时依赖；vendored KaTeX chunk 是唯一的生成物，禁止手改。
 
 ## 📄 许可
 

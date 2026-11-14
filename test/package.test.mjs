@@ -34,6 +34,7 @@ test('npm pack ships examples and linked documentation with the documented DSH m
     'docs/screenshot.png',
     'examples/demo.ipynb',
     'client.js',
+    'client.katex.js',
     'python/bridge.py',
     'icon.svg',
     'locale/zh.json',

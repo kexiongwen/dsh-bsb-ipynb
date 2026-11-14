@@ -28,12 +28,50 @@ Design reference (no code copied):
   Used as a reference for the HTTP route layout, session workspace
   containment, notebook version guard and NDJSON streaming design.
 
-Upstream license text:
+Bundled third-party runtime:
+
+  KaTeX 0.19.1 — https://katex.org
+  MIT License, Copyright (c) 2013-2020 Khan Academy and other contributors
+
+  - client.katex.js — the KaTeX browser build, vendored unmodified by
+    scripts/build-katex-chunk.mjs and wrapped in the DSH package-local chunk
+    registration. The plugin ships no KaTeX stylesheet or fonts: the DSH Web
+    page already loads them for conversation math, and MathML output is used
+    when that stylesheet is absent.
+  - The generated chunk, its pinned version and the SHA-256 of the upstream
+    katex.min.js are recorded in the file header; regenerate it with
+    `npm run build:katex` after deliberately upgrading the dev dependency.
+
+Upstream license texts:
 
   The MIT License (MIT)
 
   Copyright (c) dong-victor
   Copyright (c) 2026 dsh-external
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+  KaTeX license text:
+
+  The MIT License (MIT)
+
+  Copyright (c) 2013-2020 Khan Academy and other contributors
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal

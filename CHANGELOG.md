@@ -4,6 +4,35 @@ All notable changes to `dsh-bsb-ipynb` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-15
+
+### Added
+
+- **LaTeX math rendering** for Markdown cells, Markdown outputs and
+  `text/latex` outputs: `$...$` / `\(...\)` inline and `$$...$$` / `\[...\]`
+  display formulas, rendered by a vendored KaTeX 0.19.1 chunk that loads only
+  when a notebook contains math. Formula styles and webfonts come from the DSH
+  page; a self-contained MathML fallback covers a host without them.
+- Formula limits: 20,000 characters per formula, 2,000 formulas per Markdown
+  render and a 2,000-entry render cache. Code spans, fenced code, escaped `$`
+  and currency-like dollar amounts stay literal.
+
+### Changed
+
+- `client.katex.js` is now shipped beside `client.js`; the generator
+  `scripts/build-katex-chunk.mjs` (`npm run build:katex`) rebuilds it from the
+  pinned `katex` dev dependency after a deliberate upgrade.
+- The pinned browser E2E opens a notebook with inline and display math and
+  asserts the rendered KaTeX markup and the host stylesheet.
+- Unit coverage adds `test/client-math.test.mjs`, which evaluates the shipped
+  chunk and exercises the Markdown, output and lazy-loader paths.
+
+### Fixed
+
+- Markdown cells and `text/latex` outputs no longer display raw formula source
+  when KaTeX is available; HTML outputs intentionally remain sanitized static
+  content.
+
 ## [0.2.0] - 2026-11-14
 
 ### Added
@@ -64,5 +93,6 @@ concurrency, and workspace-contained file access. See the
 [v0.1.0 release](https://github.com/kexiongwen/dsh-bsb-ipynb/releases/tag/v0.1.0)
 for the original notes.
 
+[0.3.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/releases/tag/v0.1.0

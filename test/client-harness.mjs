@@ -19,8 +19,12 @@ let loadCount = 0
  * stylesheet, expose the plugin exports, and stub React with plain objects.
  * The artifact is imported once; every call re-runs its factory so the tests
  * still get fresh module state (all plugin state lives inside the factory).
+ *
+ * `moduleAsync` optionally supplies the package-local chunk result for
+ * `require.async('./client.katex.js')`; pass a function to model a request that
+ * can fail or resolve later.
  */
-export async function loadClient(reactOverrides = {}) {
+export async function loadClient(reactOverrides = {}, moduleAsync = null) {
   let options = null
   const listeners = new Map()
   // The viewer installs a window keydown listener for its lifetime; keep the
@@ -73,9 +77,16 @@ export async function loadClient(reactOverrides = {}) {
     assert.equal(options.id, 'dsh-bsb-ipynb')
     cachedFactory = options.factory
   }
-  const exports = cachedFactory((id) => {
+  const moduleRequire = (id) => {
     if (id === 'react') return react
     throw new Error('unexpected module: ' + id)
-  })
+  }
+  if (moduleAsync !== null) {
+    moduleRequire.async = async (spec) => {
+      if (spec !== './client.katex.js') throw new Error('unexpected chunk: ' + spec)
+      return typeof moduleAsync === 'function' ? moduleAsync() : moduleAsync
+    }
+  }
+  const exports = cachedFactory(moduleRequire)
   return { exports, styles }
 }

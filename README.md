@@ -30,6 +30,7 @@
 ## ✨ Features
 
 - **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks. Images in Markdown and `text/html` outputs resolve the same way: `attachment:`, relative and Windows drive/UNC paths go through the plugin's workspace-confined image route, while `http(s)` and `data:image` sources load as-is (remote images are fetched from their origin).
+- **LaTeX math** — `$...$` / `\(...\)` inline and `$$...$$` / `\[...\]` display formulas in Markdown cells, Markdown outputs and `text/latex` outputs. KaTeX ships as a package-local chunk that loads only when a notebook contains math; the plugin reuses the DSH page's KaTeX stylesheet and webfonts and switches to self-contained MathML when that stylesheet is absent. Formulas in `text/html` outputs stay sanitized, not typeset.
 - **Cell editing** — click a cell to edit it; insert or delete cells, move them up/down, switch cell types, preview Markdown, and clear one cell's or all outputs.
 - **Execution** — one persistent kernel per notebook, keyed by file path, keeps variables alive across cells; Run all, interrupt, restart and shut down.
 - **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits by default (configurable in the settings panel).
@@ -90,6 +91,9 @@ Run (`Cmd/Ctrl + Enter`) and save (`Cmd/Ctrl + S`) shortcuts also work in readin
 dsh-bsb-ipynb/
 ├── index.js          # host plugin entry: registers /ipynb routes and owns kernels
 ├── client.js         # browser bundle (hand-written, no build step)
+├── client.katex.js   # vendored KaTeX chunk, lazily loaded for math (generated)
+├── scripts/
+│   └── build-katex-chunk.mjs # regenerates client.katex.js from the pinned devDependency
 ├── lib/
 │   ├── routes.js     # /ipynb/* HTTP API
 │   ├── kernel.js     # one bridge process per notebook, event queue, idle sweep
@@ -170,6 +174,8 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 ## ⚠️ Known Limitations
 
 - Python kernels only (nbformat 4.x). Interactive JavaScript outputs (ipywidgets, plotly, bokeh, …) are not rendered; HTML is sanitized into static content.
+- **Math in HTML outputs** — formulas embedded in `text/html` outputs are not typeset; that surface stays sanitized and static. Markdown cells, Markdown outputs and `text/latex` outputs are typeset.
+- **Math on older hosts** — the KaTeX chunk uses the client module loader's package-local chunk support (verified with DSH 0.2.2-rc.3). A host without it keeps showing the formula source instead of failing; the rest of the plugin is unaffected.
 - No `input()`: kernels start with `allow_stdin=False`, so calls fail immediately rather than hanging. `%%` cell magics and `!cmd`, `%pip`, `%cd`, `%pwd` work.
 - If the kernel is still unresponsive about 3 s after an interrupt, it is force-restarted and all variables and kernel state are lost.
 - Results are written back by the client and persisted on save; the server never appends output in the background.
@@ -185,6 +191,8 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Notebook file size cap | 32 MiB (files above this are rejected with 413) |
 | POST request body cap | 64 MiB (36 MiB on `/ipynb/save`) |
 | Client output budget per cell | 32 MiB (UTF-8 bytes of the complete JSON) |
+| Formula rendering | 20,000 characters per formula, 2,000 formulas per Markdown render, 2,000-entry render cache |
+| KaTeX chunk | KaTeX 0.19.1, ≈267 KiB minified JS, requested only when a notebook contains math |
 | Pending NDJSON queue / single kernel output line | 64 MiB / 64 MiB |
 | Metadata | 100 levels / 10,000 nodes per value |
 | JSON MIME values (outputs / attachments) | 100 levels / 250,000 nodes per value |
@@ -199,21 +207,24 @@ Save preflight and server serialization count the pretty-printed UTF-8 bytes, in
 
 ## 🧪 Development & Testing
 
-There is no build step. DSH caches registered bundles, so after changing `client.js` or host-side code, reload the `dsh-bsb-ipynb` plugin (or restart DSH) to apply it; after client changes also hard-refresh the page (`Ctrl/Cmd+Shift+R`).
+There is no build step for the viewer. The one generated artifact is the vendored KaTeX chunk `client.katex.js`, regenerated only when the pinned dev dependency is upgraded. DSH caches registered bundles, so after changing `client.js`, `client.katex.js` or host-side code, reload the `dsh-bsb-ipynb` plugin (or restart DSH) to apply it; after client changes also hard-refresh the page (`Ctrl/Cmd+Shift+R`).
 
 ```bash
-for file in index.js lib/*.js client.js; do node --check "$file"; done
+for file in index.js lib/*.js client.js client.katex.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
 npm test          # run the complete unit and integration suite
-npm install       # Playwright (dev-only) for the pinned browser E2E
+npm install       # Playwright and KaTeX (dev-only) for the E2E lane and chunk rebuilds
 npm run test:e2e  # isolated DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1
+npm run build:katex  # regenerate client.katex.js after a deliberate KaTeX upgrade
 ```
 
 The default E2E command above uses the normal workspace root. To exercise the host-selected alternate-root compatibility lane, run `DSH_IPYNB_E2E_WORKTREE=1 npm run test:e2e` on macOS/Linux; in Windows PowerShell, use `$env:DSH_IPYNB_E2E_WORKTREE='1'; npm run test:e2e`.
 
-The browser E2E creates a temporary `DSH_HOME`, installs this checkout plus the pinned `dsh-better-sidebar` into a fresh Web profile, boots `dsh` on a free port, checks the viewer settings panel, opens a generated notebook through the real file tree, renders a local image through the confined route, and runs it through the editor-header **Run all** action, checks the Kernels page, creates another notebook from a directory row action and asserts the first notebook's autosaved output with the real Python kernel. It needs Google Chrome, network access for the first pnpm install, and a DSH CLI (`DSH_E2E_DSH_BIN`, or `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE` when run inside DSH Desktop). Update `PINNED_DSH` / `PINNED_BSB` in `test/e2e/run.mjs` when upgrading deliberately; the client runtime guard rejects older Better Sidebar builds. Set `DSH_E2E_KEEP=1` to keep the temporary DSH home for inspection. Run it after any DSH / Better Sidebar bump and before a release; CI runs the three-OS unit matrix plus this pinned E2E lane.
+The browser E2E creates a temporary `DSH_HOME`, installs this checkout plus the pinned `dsh-better-sidebar` into a fresh Web profile, boots `dsh` on a free port, checks the viewer settings panel, opens a generated notebook through the real file tree, renders a local image through the confined route, loads the KaTeX chunk and checks the host stylesheet applies, and runs it through the editor-header **Run all** action, checks the Kernels page, creates another notebook from a directory row action and asserts the first notebook's autosaved output with the real Python kernel. It needs Google Chrome, network access for the first pnpm install, and a DSH CLI (`DSH_E2E_DSH_BIN`, or `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE` when run inside DSH Desktop). Update `PINNED_DSH` / `PINNED_BSB` in `test/e2e/run.mjs` when upgrading deliberately; the client runtime guard rejects older Better Sidebar builds. Set `DSH_E2E_KEEP=1` to keep the temporary DSH home for inspection. Run it after any DSH / Better Sidebar bump and before a release; CI runs the three-OS unit matrix plus this pinned E2E lane.
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
+
+The math tests in `test/client-math.test.mjs` evaluate the shipped `client.katex.js` chunk in a VM, exercise inline/display delimiters, code-span and currency exclusions, the `text/latex` output path and the lazy-loader retry contract; the E2E additionally asserts that the real host stylesheet styles the rendered formula.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes and [CODE_REVIEW.md](CODE_REVIEW.md) for current unresolved issues and verification evidence.
 

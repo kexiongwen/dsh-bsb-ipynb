@@ -100,7 +100,7 @@ jobs:
       # explicitly instead of relying on a glob to hide the rest.
       - name: Static checks
         run: |
-          for file in index.js lib/*.js client.js; do node --check "$file"; done
+          for file in index.js lib/*.js client.js client.katex.js; do node --check "$file"; done
           python -m py_compile python/bridge.py
 
       # No DSH_IPYNB_PYTHON override here: discovery has to find the

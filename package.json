@@ -1,6 +1,6 @@
 {
   "name": "dsh-bsb-ipynb",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -29,9 +29,11 @@
   ],
   "scripts": {
     "test": "node --test --test-timeout=180000 test/*.test.mjs",
-    "test:e2e": "node test/e2e/run.mjs"
+    "test:e2e": "node test/e2e/run.mjs",
+    "build:katex": "node scripts/build-katex-chunk.mjs"
   },
   "devDependencies": {
+    "katex": "0.19.1",
     "playwright": "1.65.1"
   },
   "main": "./index.js",
@@ -46,8 +48,10 @@
   "files": [
     "index.js",
     "client.js",
+    "client.katex.js",
     "lib",
     "python/bridge.py",
+    "scripts",
     "locale",
     "icon.svg",
     "cordis.patch.yml",

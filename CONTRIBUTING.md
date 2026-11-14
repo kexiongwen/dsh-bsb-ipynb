@@ -12,6 +12,8 @@ welcome. For security issues use [SECURITY.md](SECURITY.md), not the issue track
 - Google Chrome and the dev-only `playwright` package for `npm run test:e2e`
 
 There is no build step: `client.js` is loaded as-is and the host side is plain ESM.
+The one generated artifact is the vendored KaTeX chunk `client.katex.js`; it is
+committed and only regenerated deliberately after a version bump.
 
 ```bash
 # macOS / Linux
@@ -19,18 +21,20 @@ python3 -m pip install jupyter_client ipykernel nbformat
 # Windows
 python -m pip install jupyter_client ipykernel nbformat
 
-for file in index.js lib/*.js client.js; do node --check "$file"; done
+for file in index.js lib/*.js client.js client.katex.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
 npm test
 npm install          # Playwright is dev-only; the unit suite needs no dependencies
 npm run test:e2e     # pinned DSH + Better Sidebar browser smoke test
+npm run build:katex  # only when upgrading the pinned KaTeX dev dependency
 ```
 
 `npm run test:e2e` creates an isolated `DSH_HOME`, boots the pinned DSH Web
-profile, and drives the settings panel, editor-header actions, the Kernels page
-and file-tree actions through Chrome. It accepts `DSH_E2E_DSH_BIN`, or uses
-`DSH_INSTALL_DIR` / `DSH_NODE_EXECUTABLE` when run inside DSH Desktop. Keep
-`PINNED_DSH` and `PINNED_BSB` in `test/e2e/run.mjs` in sync when upgrading.
+profile, and drives the settings panel, editor-header actions, the Kernels page,
+the file-tree actions and KaTeX math output through Chrome. It accepts
+`DSH_E2E_DSH_BIN`, or uses `DSH_INSTALL_DIR` / `DSH_NODE_EXECUTABLE` when run
+inside DSH Desktop. Keep `PINNED_DSH` and `PINNED_BSB` in `test/e2e/run.mjs` in
+sync when upgrading.
 
 After changing `client.js`, reload the plugin and hard-refresh the page
 (`Ctrl/Cmd+Shift+R`). UI strings live in the `STRINGS` table in `client.js`;
@@ -49,5 +53,7 @@ behavior changes and keep tests deterministic.
 - Fork, branch from `main`, keep changes focused.
 - Describe what changed and how it was tested.
 - Do not add a bundler or runtime dependency; keep `client.js` hand-written.
+  The vendored KaTeX chunk is the single generated artifact and must not be
+  edited by hand.
 - Do not commit secrets, absolute local paths or generated caches.
 - Contributions are accepted under the MIT License.

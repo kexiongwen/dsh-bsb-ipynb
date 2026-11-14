@@ -146,6 +146,17 @@ function notebookFor(marker) {
       metadata: {},
       source: ['![E2E local image](e2e-image.png)'],
     }, {
+      cell_type: 'markdown',
+      id: 'e2e-math',
+      metadata: {},
+      source: [
+        'Inline $E=mc^2$ formula and a display equation:',
+        '',
+        '$$',
+        '\\int_0^1 x^2\\,dx = \\frac{1}{3}',
+        '$$',
+      ],
+    }, {
       cell_type: 'code',
       execution_count: null,
       id: 'e2e-cell',
@@ -429,6 +440,19 @@ async function main() {
       const image = document.querySelector('.dsh-bsb-ipynb-root img[alt="E2E local image"]')
       return image && image.complete && image.naturalWidth > 0 && new URL(image.src).pathname === '/ipynb/image'
     }, null, { timeout: 20_000 })
+
+    log('asserting math rendered from the lazily loaded KaTeX chunk')
+    await page.locator('.dsh-bsb-ipynb-root .katex').first().waitFor({ state: 'visible', timeout: 20_000 })
+    const mathStyled = await page.evaluate(() => {
+      const math = document.querySelector('.dsh-bsb-ipynb-root .katex')
+      if (!math) return false
+      const family = getComputedStyle(math).fontFamily || ''
+      return /katex/i.test(family)
+    })
+    assert.equal(mathStyled, true, 'the host KaTeX stylesheet styles formula output')
+    // The display block must have been parsed as display math, not as prose.
+    assert.ok(await page.locator('.dsh-bsb-ipynb-root .katex-display, .dsh-bsb-ipynb-root math[display="block"]').count() >= 1,
+      'display equations render as display math')
 
     log('running the notebook through the editor-header action')
     const runAllButtons = page.getByRole('button', { name: /^(Run all|全部运行)$/ })

@@ -4,6 +4,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } = React
+    // The plugin factory's module table also serves this package's lazy chunks;
+    // keep it for the on-demand KaTeX chunk (see loadMathRenderer below).
+    const hostRequire = require
 
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
@@ -22,6 +25,16 @@ window.__ModuleLoader__.load({
     const NOTEBOOK_DEPTH_LIMIT = 128
     const NOTEBOOK_NODE_LIMIT = 1_000_000
     const JSON_MIME_PATTERN = /^application\/(.*\+)?json$/
+    // Math support: KaTeX is vendored as a package-local chunk (client.katex.js)
+    // and requested only when a notebook actually contains formulas. The page
+    // already carries the host's KaTeX stylesheet and webfonts, so the plugin
+    // adds no CSS or font assets of its own.
+    const KATEX_CHUNK = './client.katex.js'
+    const KATEX_SOURCE_LIMIT = 20_000
+    const KATEX_RENDER_LIMIT = 2_000
+    const KATEX_CACHE_LIMIT = 2_000
+    // Cheap preload hint: `$...$`, `$$...$$`, `\(...\)` or `\[...\]`.
+    const MATH_HINT = /(^|[^\\])\$[^\s$]|\\\(|\\\[|^[ \t]*\$\$/m
 
     const STRINGS = {
       en: {
@@ -490,7 +503,229 @@ window.__ModuleLoader__.load({
     const INLINE_IMAGE_PATTERN = new RegExp('!\\[([^\\]]*)\\]\\(' + INLINE_DESTINATION + '\\)', 'g')
     const INLINE_LINK_PATTERN = new RegExp('\\[([^\\]]+)\\]\\(' + INLINE_DESTINATION + '\\)', 'g')
 
-    function renderInline(value) {
+    // ------------------------------------------------------------------ math
+    // Formulas are parsed and rendered only in Markdown sources and in
+    // text/markdown or text/latex outputs. The renderer is the lazily loaded
+    // KaTeX chunk; when it is absent or rejects a formula, the original source
+    // stays visible instead of disappearing.
+
+    // The host page loads KaTeX's stylesheet globally (it renders math in the
+    // conversation). Detect that stylesheet through the font family KaTeX sets
+    // on `.katex`; without it, emit self-describing MathML instead of relying
+    // on missing fonts.
+    function katexCssAvailable() {
+      if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return false
+      const body = document.body
+      if (!body || typeof body.appendChild !== 'function') return false
+      try {
+        const probe = document.createElement('span')
+        probe.className = 'katex'
+        probe.setAttribute('aria-hidden', 'true')
+        probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none'
+        body.appendChild(probe)
+        const family = String(getComputedStyle(probe).fontFamily || '')
+        probe.remove()
+        return /katex/i.test(family)
+      } catch {
+        return false
+      }
+    }
+
+    /** Wrap a KaTeX module in a cached, bounded renderer; null when unusable. */
+    function createMathRenderer(katex) {
+      if (!katex || typeof katex.renderToString !== 'function') return null
+      const output = katexCssAvailable() ? 'htmlAndMathml' : 'mathml'
+      const cache = new Map()
+      return function renderMath(source, displayMode) {
+        if (typeof source !== 'string' || source.length > KATEX_SOURCE_LIMIT) return null
+        const key = (displayMode ? 'D' : 'I') + source
+        if (cache.has(key)) return cache.get(key)
+        let html = null
+        try {
+          html = katex.renderToString(source, {
+            displayMode: Boolean(displayMode),
+            throwOnError: true,
+            strict: 'ignore',
+            trust: false,
+            maxExpand: 1000,
+            output,
+          })
+        } catch {
+          // A formula KaTeX rejects keeps its literal source at the call site.
+          html = null
+        }
+        if (cache.size >= KATEX_CACHE_LIMIT) cache.delete(cache.keys().next().value)
+        cache.set(key, html)
+        return html
+      }
+    }
+
+    let katexRendererPromise = null
+
+    /**
+     * Load the vendored KaTeX chunk once per page. A missing chunk (older host,
+     * failed request) resolves to null and stays retryable on the next notebook;
+     * `require.async` is a package-local chunk operation in the DSH module table.
+     */
+    function loadMathRenderer() {
+      if (katexRendererPromise) return katexRendererPromise
+      katexRendererPromise = (async () => {
+        try {
+          if (!hostRequire || typeof hostRequire.async !== 'function') return null
+          const module = await hostRequire.async(KATEX_CHUNK)
+          return createMathRenderer(module && (module.default || module))
+        } catch {
+          return null
+        }
+      })().then((renderer) => {
+        if (!renderer) katexRendererPromise = null
+        return renderer
+      })
+      return katexRendererPromise
+    }
+
+    /** Render one formula within the per-pass budget; null means "keep source". */
+    function mathSegment(renderMath, source, displayMode, budget) {
+      if (typeof renderMath !== 'function') return null
+      if (typeof source !== 'string' || source.length > KATEX_SOURCE_LIMIT) return null
+      if (budget && budget.rendered >= KATEX_RENDER_LIMIT) return null
+      // Count attempts, not just successes: rejected formulas also cost a parse.
+      if (budget) budget.rendered += 1
+      let html = null
+      try {
+        html = renderMath(source, Boolean(displayMode))
+      } catch {
+        html = null
+      }
+      return html || null
+    }
+
+    function sourceHasMath(source) {
+      return typeof source === 'string' && MATH_HINT.test(source)
+    }
+
+    /** True when any cell source or output carries a formula worth loading KaTeX for. */
+    function notebookHasMath(notebook) {
+      if (!notebook || !Array.isArray(notebook.cells)) return false
+      for (const cell of notebook.cells) {
+        if (!cell || typeof cell !== 'object') continue
+        // Only Markdown cells are typeset; a `$` in Python source or a raw cell
+        // is not a formula and must not trigger the chunk download.
+        if (cell.cell_type === 'markdown' && sourceHasMath(cell.source)) return true
+        if (!Array.isArray(cell.outputs)) continue
+        for (const output of cell.outputs) {
+          if (!output || typeof output !== 'object' || output.output_type === 'error') continue
+          const data = output.data
+          if (!data || typeof data !== 'object') continue
+          if (data['text/latex'] != null) return true
+          if (sourceHasMath(mimeText(data['text/markdown']))) return true
+        }
+      }
+      return false
+    }
+
+    function isEscapedAt(text, index) {
+      let slashes = 0
+      for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) slashes += 1
+      return slashes % 2 === 1
+    }
+
+    function mathOpenerAt(text, index) {
+      if (text.startsWith('$$', index)) return { delimiter: '$$', close: '$$', display: true }
+      if (text[index] === '$') return { delimiter: '$', close: '$', display: false }
+      if (text.startsWith('\\(', index)) return { delimiter: '\\(', close: '\\)', display: false }
+      if (text.startsWith('\\[', index)) return { delimiter: '\\[', close: '\\]', display: true }
+      return null
+    }
+
+    // Find the closing delimiter of an inline formula. `$` follows the
+    // MathJax-compatible rule that the closing `$` may not be preceded by
+    // whitespace and may not be followed by a digit, so "$5 and $6" and
+    // "cost $5" stay plain text.
+    function findMathClose(text, from, close) {
+      let cursor = from
+      while (cursor < text.length) {
+        // Check the delimiter before the escape skip: a `\)` closer itself
+        // starts with a backslash and would otherwise be consumed as an escape.
+        if (text.startsWith(close, cursor) && !isEscapedAt(text, cursor)) {
+          if (close === '$') {
+            if (/\s/.test(text[cursor - 1])) { cursor += 1; continue }
+            const next = text[cursor + 1]
+            if (next && /\d/.test(next)) { cursor += 1; continue }
+          }
+          return cursor
+        }
+        if (text[cursor] === '\\') { cursor += 2; continue }
+        cursor += 1
+      }
+      return -1
+    }
+
+    // Replace inline formulas with already-rendered placeholders before links
+    // and emphasis run, so `_`, `*`, `[` and `(` inside TeX cannot be mistaken
+    // for Markdown syntax. Code spans were placeholdered earlier.
+    function inlineMathToPlaceholders(text, renderMath, placeholder, budget) {
+      let output = ''
+      let last = 0
+      let index = 0
+      while (index < text.length) {
+        const opener = mathOpenerAt(text, index)
+        if (!opener || isEscapedAt(text, index)) {
+          index += 1
+          continue
+        }
+        const after = text[index + opener.delimiter.length]
+        if (opener.delimiter === '$' && (!after || /\s/.test(after) || after === '$')) {
+          index += 1
+          continue
+        }
+        const close = findMathClose(text, index + opener.delimiter.length, opener.close)
+        if (close === -1 || close === index + opener.delimiter.length) {
+          index += opener.delimiter.length
+          continue
+        }
+        const source = text.slice(index + opener.delimiter.length, close)
+        const html = mathSegment(renderMath, source, opener.display, budget)
+        if (html) {
+          output += text.slice(last, index) + placeholder(html)
+          index = close + opener.close.length
+          last = index
+          continue
+        }
+        index += opener.delimiter.length
+      }
+      return output + text.slice(last)
+    }
+
+    // Consume a display-math block that starts on `from` and closes on its own
+    // line. Never joins a closing delimiter with trailing prose.
+    function consumeDisplayMath(lines, from) {
+      const opener = lines[from].match(/^\s*(\$\$|\\\[)/)
+      if (!opener) return null
+      const closer = opener[1] === '$$' ? '$$' : '\\]'
+      const body = []
+      let index = from
+      let rest = lines[from].slice(opener[0].length)
+      for (;;) {
+        const at = rest.lastIndexOf(closer)
+        if (at !== -1 && rest.slice(at + closer.length).trim() === '') {
+          body.push(rest.slice(0, at))
+          return { opener: opener[1], closer, tex: body.join('\n'), next: index + 1 }
+        }
+        body.push(rest)
+        index += 1
+        // An unclosed `$$` is ordinary paragraph text, not a block that
+        // swallows the rest of the cell.
+        if (index >= lines.length) return null
+        rest = lines[index]
+      }
+    }
+
+    function renderInline(value, options) {
+      const settings = options || {}
+      const renderMath = typeof settings.renderMath === 'function' ? settings.renderMath : null
+      const mathBudget = settings.mathBudget || { rendered: 0 }
+
       // Control characters carry no Markdown meaning, so one of them can mark
       // already-rendered fragments. Stripping it from the input keeps user
       // text from ever colliding with a placeholder.
@@ -515,6 +750,10 @@ window.__ModuleLoader__.load({
       // Code spans first: their contents must not take part in any later link
       // or emphasis parsing.
       text = text.replace(/`([^`]+)`/g, (match, code) => placeholder('<code>' + escapeHtml(code) + '</code>'))
+
+      // Formulas become placeholders before link/emphasis parsing so TeX
+      // punctuation can never be read as Markdown syntax.
+      if (renderMath) text = inlineMathToPlaceholders(text, renderMath, placeholder, mathBudget)
 
       // Links and images are captured before escaping so their attributes are
       // escaped exactly once and emphasis can never rewrite them.
@@ -556,6 +795,8 @@ window.__ModuleLoader__.load({
       const settings = options || {}
       const depth = typeof settings.depth === 'number' ? settings.depth : 0
       const resolveImage = typeof settings.resolveImage === 'function' ? settings.resolveImage : null
+      const renderMath = typeof settings.renderMath === 'function' ? settings.renderMath : null
+      const mathBudget = settings.mathBudget || { rendered: 0 }
       const lines = String(source ?? '').replace(/\r\n?/g, '\n').split('\n')
       let index = 0
       let html = ''
@@ -590,10 +831,21 @@ window.__ModuleLoader__.load({
             '</code></pre>'
           continue
         }
+        // Display math consumes its whole block before paragraph grouping, so
+        // blank lines and Markdown punctuation inside TeX stay untouched.
+        const display = consumeDisplayMath(lines, index)
+        if (display) {
+          index = display.next
+          const rendered = mathSegment(renderMath, display.tex, true, mathBudget)
+          html += rendered
+            ? '<div class="dsh-bsb-ipynb-math">' + rendered + '</div>'
+            : '<pre class="dsh-bsb-ipynb-math-source">' + escapeHtml(display.opener + display.tex + display.closer) + '</pre>'
+          continue
+        }
         const heading = line.match(/^(#{1,6})\s+(.*)$/)
         if (heading) {
           const level = heading[1].length
-          html += '<h' + level + '>' + renderInline(heading[2].trim()) + '</h' + level + '>'
+          html += '<h' + level + '>' + renderInline(heading[2].trim(), settings) + '</h' + level + '>'
           index += 1
           continue
         }
@@ -629,7 +881,7 @@ window.__ModuleLoader__.load({
             }
           }
           html += ordered ? '<ol>' : '<ul>'
-          for (const item of items) html += '<li>' + renderInline(item) + '</li>'
+          for (const item of items) html += '<li>' + renderInline(item, settings) + '</li>'
           html += ordered ? '</ol>' : '</ul>'
           continue
         }
@@ -649,11 +901,11 @@ window.__ModuleLoader__.load({
             index += 1
           }
           html += '<table><thead><tr>'
-          for (const cell of header) html += '<th>' + renderInline(cell) + '</th>'
+          for (const cell of header) html += '<th>' + renderInline(cell, settings) + '</th>'
           html += '</tr></thead><tbody>'
           for (const row of rows) {
             html += '<tr>'
-            for (const cell of row) html += '<td>' + renderInline(cell) + '</td>'
+            for (const cell of row) html += '<td>' + renderInline(cell, settings) + '</td>'
             html += '</tr>'
           }
           html += '</tbody></table>'
@@ -668,13 +920,13 @@ window.__ModuleLoader__.load({
           paragraph.push(lines[index])
           index += 1
         }
-        html += '<p>' + paragraph.map(renderInline).join('<br>') + '</p>'
+        html += '<p>' + paragraph.map((paragraphLine) => renderInline(paragraphLine, settings)).join('<br>') + '</p>'
       }
       return html
     }
 
-    function renderMarkdownWithImages(source, resolveImage) {
-      let html = renderMarkdown(source)
+    function renderMarkdownWithImages(source, resolveImage, renderMath) {
+      let html = renderMarkdown(source, { renderMath })
       if (typeof resolveImage !== 'function') return html
       return html.replace(/<img src="([^"]*)" alt="([^"]*)" loading="lazy">/g, (match, src, alt) => {
         // The resolver needs the original URL; only its final URL is escaped
@@ -1850,7 +2102,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function OutputView({ output, resolveImage }) {
+    function OutputView({ output, resolveImage, renderMath }) {
       if (!output || typeof output !== 'object') return null
       if (output.output_type === 'stream') {
         return h('pre', {
@@ -1892,14 +2144,22 @@ window.__ModuleLoader__.load({
           className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-markdown',
           // Output markdown can reference attachment:/relative images just like
           // markdown cells, so use the image-aware renderer here too.
-          dangerouslySetInnerHTML: { __html: renderMarkdownWithImages(mimeText(data['text/markdown']), resolveImage) },
+          dangerouslySetInnerHTML: { __html: renderMarkdownWithImages(mimeText(data['text/markdown']), resolveImage, renderMath) },
         })
       }
       if (typeof data['application/json'] !== 'undefined') {
         return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, renderJsonOutput(data['application/json']))
       }
       if (data['text/latex'] != null) {
-        return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, mimeText(data['text/latex']))
+        const latex = mimeText(data['text/latex'])
+        const rendered = mathSegment(renderMath, latex, true, null)
+        if (rendered) {
+          return h('div', {
+            className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-math',
+            dangerouslySetInnerHTML: { __html: rendered },
+          })
+        }
+        return h('pre', { className: 'dsh-bsb-ipynb-output dsh-bsb-ipynb-math-source', tabIndex: 0 }, latex)
       }
       if (data['text/plain'] != null) {
         return h('pre', { className: 'dsh-bsb-ipynb-output', tabIndex: 0 }, mimeText(data['text/plain']))
@@ -1937,7 +2197,7 @@ window.__ModuleLoader__.load({
     }
 
     function CellView(props) {
-      const { cell, index, count, ctx, scope, notebookPath, editing, running, busy, onEdit, onDone, onSource, onRun, onMove, onDelete, onType, onInsertBelow, onSave, onClearOutputs } = props
+      const { cell, index, count, ctx, scope, notebookPath, editing, running, busy, renderMath, onEdit, onDone, onSource, onRun, onMove, onDelete, onType, onInsertBelow, onSave, onClearOutputs } = props
       const textareaRef = useRef(null)
       const source = cell.source ?? ''
       const resolveImage = useMemo(
@@ -2068,7 +2328,7 @@ window.__ModuleLoader__.load({
                 })
               : h('div', {
                   className: 'dsh-bsb-ipynb-markdown',
-                  dangerouslySetInnerHTML: { __html: renderMarkdownWithImages(source, resolveImage) },
+                  dangerouslySetInnerHTML: { __html: renderMarkdownWithImages(source, resolveImage, renderMath) },
                 })
             : editing
               ? h('textarea', {
@@ -2090,7 +2350,7 @@ window.__ModuleLoader__.load({
                   },
                 }, source),
         code && Array.isArray(cell.outputs) && cell.outputs.length
-          ? h('div', { className: 'dsh-bsb-ipynb-outputs', role: 'log', 'aria-live': 'polite' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output, resolveImage })))
+          ? h('div', { className: 'dsh-bsb-ipynb-outputs', role: 'log', 'aria-live': 'polite' }, cell.outputs.map((output, outputIndex) => h(OutputView, { key: outputIndex, output, resolveImage, renderMath })))
           : null,
       )
     }
@@ -2204,6 +2464,9 @@ window.__ModuleLoader__.load({
       const [kernel, setKernel] = useState({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
       const [interpreters, setInterpreters] = useState([])
       const [python, setPython] = useState('')
+      // The lazily loaded KaTeX renderer; null until a document with math asks
+      // for it, so notebooks without formulas never download the chunk.
+      const [mathRenderer, setMathRenderer] = useState(null)
       // A settings save applies to already-open notebooks without a remount.
       useEffect(() => {
         setAutosaveDelay(autosaveMs)
@@ -2221,6 +2484,14 @@ window.__ModuleLoader__.load({
         })
         return undefined
       }, [ctx, pluginSettings.idleMinutes])
+      useEffect(() => {
+        if (mathRenderer || !notebookHasMath(notebook)) return undefined
+        let cancelled = false
+        void loadMathRenderer().then((renderer) => {
+          if (!cancelled && renderer) setMathRenderer(() => renderer)
+        })
+        return () => { cancelled = true }
+      }, [notebook, mathRenderer])
       const customRef = useRef(customData)
       const dirtyRef = useRef(false)
       const notebookRef = useRef(notebook)
@@ -3253,6 +3524,7 @@ window.__ModuleLoader__.load({
               editing: editingCell === cell.id,
               running: runningCell === cell.id,
               busy: Boolean(runningCell) || runAllRunning,
+              renderMath: mathRenderer,
               onEdit: (cellId) => {
                 activeCellRef.current = cellId
                 setEditingCell(cellId)
@@ -3801,6 +4073,13 @@ window.__ModuleLoader__.load({
 .dsh-bsb-ipynb-source-editor { display: block; min-height: 48px; }
 .dsh-bsb-ipynb-empty-source { display: inline-block; min-height: 1em; }
 .dsh-bsb-ipynb-markdown { padding: 8px 10px; overflow-wrap: anywhere; }
+/* Formula markup is produced by KaTeX and styled by the host page's global
+   KaTeX stylesheet; these rules only keep wide display math scrollable. */
+.dsh-bsb-ipynb-math { overflow-x: auto; }
+.dsh-bsb-ipynb-markdown .dsh-bsb-ipynb-math { margin: 0.5em 0; }
+.dsh-bsb-ipynb-output.dsh-bsb-ipynb-math { white-space: normal; font-family: inherit; }
+.dsh-bsb-ipynb-math .katex-display { margin: 0; }
+.dsh-bsb-ipynb-math-source { white-space: pre-wrap; overflow-wrap: anywhere; }
 .dsh-bsb-ipynb-markdown > :first-child { margin-top: 0; }
 .dsh-bsb-ipynb-markdown > :last-child { margin-bottom: 0; }
 .dsh-bsb-ipynb-markdown h1,
@@ -4204,6 +4483,15 @@ window.__ModuleLoader__.load({
       renderMarkdown,
       renderMarkdownWithImages,
       renderInline,
+      notebookHasMath,
+      sourceHasMath,
+      createMathRenderer,
+      loadMathRenderer,
+      katexCssAvailable,
+      consumeDisplayMath,
+      KATEX_CHUNK,
+      KATEX_SOURCE_LIMIT,
+      KATEX_RENDER_LIMIT,
       ansiToHtml,
       highlightPython,
       normalizeNotebook,
