@@ -816,8 +816,9 @@ for (const overflow of [false, true]) {
         clearTimeout(timer)
         resolve()
       }
-      if (response.destroyed || response.closed) return done()
-      response.once('close', done)
+      // Windows can emit the response's close before the socket's close event
+      // updates destroyed. Wait for the resource this assertion actually owns.
+      if (serverSocket.destroyed) return done()
       serverSocket.once('close', done)
     })
     assert.equal(response.destroyed || response.closed, true, 'the HTTP response must be forcibly closed')
