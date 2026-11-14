@@ -29,7 +29,7 @@
 
 ## ✨ Features
 
-- **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks. Images in Markdown and `text/html` outputs resolve the same way: `attachment:`, relative and Windows drive/UNC paths go through the host file route, while `http(s)` and `data:image` sources load as-is (remote images are fetched from their origin).
+- **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks. Images in Markdown and `text/html` outputs resolve the same way: `attachment:`, relative and Windows drive/UNC paths go through the plugin's workspace-confined image route, while `http(s)` and `data:image` sources load as-is (remote images are fetched from their origin).
 - **Cell editing** — click a cell to edit it; insert or delete cells, move them up/down, switch cell types, preview Markdown, and clear one cell's or all outputs.
 - **Execution** — one persistent kernel per notebook, keyed by file path, keeps variables alive across cells; Run all, interrupt, restart and shut down.
 - **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits by default (configurable in the settings panel).
@@ -143,7 +143,7 @@ Intentionally not themed: ANSI 16-colour stdout painting (content, so the same n
 
 ## 🌐 HTTP API
 
-All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false,error:{code,message,details?}}`. POST bodies must be `application/json`; `/execute` responds with `application/x-ndjson`.
+All routes are mounted under `/ipynb`. JSON APIs return `{ok:true,value}` or `{ok:false,error:{code,message,details?}}`; `/image` streams image bytes and `/execute` responds with `application/x-ndjson`. POST bodies must be `application/json`.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -151,6 +151,7 @@ All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false
 | GET | `/ipynb/interpreters` | Interpreter list and default |
 | GET | `/ipynb/config` | Current kernel idle timeout (`idleMinutes`; 0 disables the sweep) |
 | GET | `/ipynb/kernels?sessionId=` | Live kernels inside the session workspace |
+| GET | `/ipynb/image?sessionId=&path=` | Stream a workspace-confined image with MIME and SVG safety headers |
 | POST | `/ipynb/config` | `{idleMinutes}`; updates the kernel idle timeout |
 | GET | `/ipynb/status?sessionId=&path=` | Kernel status for a notebook |
 | POST | `/ipynb/read` | Read and parse a notebook |
@@ -161,7 +162,7 @@ All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false
 | POST | `/ipynb/restart` | Restart the kernel, optionally switching `python` |
 | POST | `/ipynb/shutdown` | Shut the kernel down |
 
-All routes except `/health`, `/interpreters` and `/config` require a non-empty `sessionId` and `path` (query parameters for `/status`, JSON body for the rest). `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
+All routes except `/health`, `/interpreters` and `/config` require a non-empty `sessionId` and `path` (query parameters for `/status` and `/image`, JSON body for the rest). `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
 
 Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root`, `not-found`, `read-blocked`, `not-notebook`, `too-large`, `write-conflict`, `write-blocked`, `write-failed`, `kernel-busy`, `kernel-unavailable`, `interpreter-unknown`, `method-not-allowed`, `internal`.
 
@@ -207,7 +208,7 @@ npm install       # Playwright (dev-only) for the pinned browser E2E
 npm run test:e2e  # isolated DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1
 ```
 
-The browser E2E creates a temporary `DSH_HOME`, installs this checkout plus the pinned `dsh-better-sidebar` into a fresh Web profile, boots `dsh` on a free port, checks the viewer settings panel, opens a generated notebook through the real file tree, runs it through the editor-header **Run all** action, checks the Kernels page, creates another notebook from a directory row action and asserts the first notebook's autosaved output with the real Python kernel. It needs Google Chrome, network access for the first pnpm install, and a DSH CLI (`DSH_E2E_DSH_BIN`, or `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE` when run inside DSH Desktop). Update `PINNED_DSH` / `PINNED_BSB` in `test/e2e/run.mjs` when upgrading deliberately; the client runtime guard rejects older Better Sidebar builds. Set `DSH_E2E_KEEP=1` to keep the temporary DSH home for inspection. Run it after any DSH / Better Sidebar bump and before a release; CI runs the three-OS unit matrix plus this pinned E2E lane.
+The browser E2E creates a temporary `DSH_HOME`, installs this checkout plus the pinned `dsh-better-sidebar` into a fresh Web profile, boots `dsh` on a free port, checks the viewer settings panel, opens a generated notebook through the real file tree, renders a local image through the confined route, and runs it through the editor-header **Run all** action, checks the Kernels page, creates another notebook from a directory row action and asserts the first notebook's autosaved output with the real Python kernel. It needs Google Chrome, network access for the first pnpm install, and a DSH CLI (`DSH_E2E_DSH_BIN`, or `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE` when run inside DSH Desktop). Update `PINNED_DSH` / `PINNED_BSB` in `test/e2e/run.mjs` when upgrading deliberately; the client runtime guard rejects older Better Sidebar builds. Set `DSH_E2E_KEEP=1` to keep the temporary DSH home for inspection. Run it after any DSH / Better Sidebar bump and before a release; CI runs the three-OS unit matrix plus this pinned E2E lane.
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
 

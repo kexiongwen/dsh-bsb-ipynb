@@ -29,7 +29,7 @@
 
 ## ✨ 特性
 
-- **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。Markdown 与 `text/html` 输出中的图片按同一规则解析：`attachment:`、相对路径与 Windows 盘符/UNC 路径经宿主文件路由加载，`http(s)` 与 `data:image` 保持原地址直连（远程图片由源站加载）。
+- **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。Markdown 与 `text/html` 输出中的图片按同一规则解析：`attachment:`、相对路径与 Windows 盘符/UNC 路径经插件自带的工作区受限图片路由加载，`http(s)` 与 `data:image` 保持原地址直连（远程图片由源站加载）。
 - **编辑**：点击单元格进入编辑；插入/删除、上移/下移、切换类型、Markdown 预览、清空单个或全部输出。
 - **执行**：每个 notebook 一个按文件路径共享的常驻内核，变量跨单元格保留；支持全部运行、中断、重启与关闭。
 - **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后默认 1.5 秒自动保存（可在设置面板调整）。
@@ -143,7 +143,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 
 ## 🌐 HTTP API
 
-所有接口挂在 `/ipynb` 下，返回 `{ok:true,value}` 或 `{ok:false,error:{code,message,details?}}`。POST 请求体必须是 `application/json`，`/execute` 返回 `application/x-ndjson`。
+所有接口挂在 `/ipynb` 下。JSON 接口返回 `{ok:true,value}` 或 `{ok:false,error:{code,message,details?}}`；`/image` 直接流式返回图片字节，`/execute` 返回 `application/x-ndjson`。POST 请求体必须是 `application/json`。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -151,6 +151,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | GET | `/ipynb/interpreters` | 解释器列表与默认项 |
 | GET | `/ipynb/config` | 当前内核空闲超时（`idleMinutes`；0 表示不回收） |
 | GET | `/ipynb/kernels?sessionId=` | 会话工作区内正在运行的内核 |
+| GET | `/ipynb/image?sessionId=&path=` | 流式返回工作区内图片，并设置 MIME 与 SVG 安全响应头 |
 | POST | `/ipynb/config` | `{idleMinutes}`；更新内核空闲超时 |
 | GET | `/ipynb/status?sessionId=&path=` | notebook 的内核状态 |
 | POST | `/ipynb/read` | 读取并解析 notebook |
@@ -161,7 +162,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | POST | `/ipynb/restart` | 重启内核，可同时切换 `python` |
 | POST | `/ipynb/shutdown` | 关闭内核 |
 
-除 `/health`、`/interpreters`、`/config` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
+除 `/health`、`/interpreters`、`/config` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 与 `/image` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
 
 错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`read-blocked`、`not-notebook`、`too-large`、`write-conflict`、`write-blocked`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
 
@@ -207,7 +208,7 @@ npm install       # 安装仅开发期使用的 Playwright，供固定版本浏�
 npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1 上运行 E2E
 ```
 
-浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，检查 viewer 设置面板，通过真实文件树打开生成的 notebook，用编辑器头部的 **全部运行** 操作执行，检查内核页面，再从目录行操作新建另一个 notebook，并校验第一个 notebook 在真实 Python 内核下自动保存的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
+浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，检查 viewer 设置面板，通过真实文件树打开生成的 notebook，经受限路由渲染本地图片，再用编辑器头部的 **全部运行** 操作执行，检查内核页面，再从目录行操作新建另一个 notebook，并校验第一个 notebook 在真实 Python 内核下自动保存的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
 
 主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
 

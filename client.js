@@ -1611,8 +1611,7 @@ window.__ModuleLoader__.load({
         const params = new URLSearchParams()
         if (scope && scope.sessionId) params.set('sessionId', scope.sessionId)
         params.set('path', target)
-        if (scope && scope.cwd) params.set('cwd', scope.cwd)
-        return ctx.betterSidebar.hostRouteUrl('sidebar/file?' + params.toString())
+        return ctx.betterSidebar.hostRouteUrl('ipynb/image?' + params.toString())
       }
       return (source) => {
         if (!source) return null

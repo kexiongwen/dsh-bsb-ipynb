@@ -737,89 +737,93 @@ test('execute destroys the stream when a client never drains', async (t) => {
   assert.equal(ended, false, 'the forced close must not also end the response')
 })
 
-test('execute destroys a backpressured real HTTP response and socket', { timeout: 30_000 }, async (t) => {
-  const priorPython = process.env.DSH_IPYNB_PYTHON
-  process.env.DSH_IPYNB_PYTHON = process.execPath
-  resetInterpreterCache()
-  t.after(() => {
-    if (priorPython === undefined) delete process.env.DSH_IPYNB_PYTHON
-    else process.env.DSH_IPYNB_PYTHON = priorPython
+for (const overflow of [false, true]) {
+    test(`execute destroys a backpressured real HTTP response and socket${overflow ? ' after output overflow' : ''}`, { timeout: 30_000 }, async (t) => {
+    const priorPython = process.env.DSH_IPYNB_PYTHON
+    process.env.DSH_IPYNB_PYTHON = process.execPath
     resetInterpreterCache()
-  })
-  const discovered = await discoverInterpreters()
-  assert.ok(discovered.default, 'the controlled interpreter probe must provide an executable')
-  const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
-  await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
-  const ctx = makeCtx({ cwd: dir })
-  const kernels = makeKernels()
-  const output = 'x'.repeat(4 * 1024 * 1024)
-  kernels.entry.run = async (cellId, code, onEvent) => {
-    for (let index = 0; index < 4; index += 1) {
-      onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text: output })
+    t.after(() => {
+      if (priorPython === undefined) delete process.env.DSH_IPYNB_PYTHON
+      else process.env.DSH_IPYNB_PYTHON = priorPython
+      resetInterpreterCache()
+    })
+    const discovered = await discoverInterpreters()
+    assert.ok(discovered.default, 'the controlled interpreter probe must provide an executable')
+    const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')
+    await writeFile(path.join(dir, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+    const ctx = makeCtx({ cwd: dir })
+    const kernels = makeKernels()
+    const output = 'x'.repeat((overflow ? 17 : 4) * 1024 * 1024)
+    kernels.entry.run = async (cellId, code, onEvent) => {
+      // The first large frame enters Node's response buffer. With a blocked
+      // socket, four more queued frames exceed the plugin's 64 MiB queue cap.
+      for (let index = 0; index < (overflow ? 5 : 4); index += 1) {
+        onEvent({ type: 'stream', cell_id: cellId, name: 'stdout', text: output })
+      }
+      onEvent({ type: 'execute_reply', cell_id: cellId, ok: true, execution_count: 1 })
     }
-    onEvent({ type: 'execute_reply', cell_id: cellId, ok: true, execution_count: 1 })
-  }
-  registerIpynbRoutes(ctx, kernels, { drainTimeoutMs: 250 })
-  const handler = ctx.registered[0].handler
-  const sockets = new Set()
-  let response
-  let serverSocket
-  let notifyRequest
-  const requestReceived = new Promise((resolve) => { notifyRequest = resolve })
-  const server = createServer((req, res) => {
-    response = res
-    serverSocket = req.socket
-    notifyRequest()
-    void handler(req, res)
-  })
-  server.on('connection', (socket) => {
-    sockets.add(socket)
-    socket.on('close', () => sockets.delete(socket))
-  })
-  let client
-  t.after(async () => {
-    client?.destroy()
-    for (const socket of sockets) socket.destroy()
-    if (server.listening) await new Promise((resolve) => server.close(resolve))
-  })
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  client = connect(server.address().port, '127.0.0.1')
-  // The forced server-side close may reset the raw client. Never consume data.
-  client.on('error', () => {})
-  await once(client, 'connect')
-  const body = JSON.stringify({ sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1' })
-  client.write([
-    'POST /ipynb/execute HTTP/1.1',
-    'Host: 127.0.0.1',
-    'Content-Type: application/json',
-    `Content-Length: ${Buffer.byteLength(body)}`,
-    'Connection: close',
-    '',
-    body,
-  ].join('\r\n'))
-  await requestReceived
-  assert.ok(response)
-  assert.ok(serverSocket)
+    registerIpynbRoutes(ctx, kernels, { drainTimeoutMs: 250 })
+    const handler = ctx.registered[0].handler
+    const sockets = new Set()
+    let response
+    let serverSocket
+    let notifyRequest
+    const requestReceived = new Promise((resolve) => { notifyRequest = resolve })
+    const server = createServer((req, res) => {
+      response = res
+      serverSocket = req.socket
+      notifyRequest()
+      void handler(req, res)
+    })
+    server.on('connection', (socket) => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+    })
+    let client
+    t.after(async () => {
+      client?.destroy()
+      for (const socket of sockets) socket.destroy()
+      if (server.listening) await new Promise((resolve) => server.close(resolve))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    client = connect(server.address().port, '127.0.0.1')
+    // The forced server-side close may reset the raw client. Never consume data.
+    client.on('error', () => {})
+    await once(client, 'connect')
+    const body = JSON.stringify({ sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1' })
+    client.write([
+      'POST /ipynb/execute HTTP/1.1',
+      'Host: 127.0.0.1',
+      'Content-Type: application/json',
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      'Connection: close',
+      '',
+      body,
+    ].join('\r\n'))
+    await requestReceived
+    assert.ok(response)
+    assert.ok(serverSocket)
 
-  // The injected 250 ms drain timeout forces the close; wait for the real
-  // socket close events instead of sleeping for the production 10 s default.
-  await new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => reject(new Error('the response was not force-closed')), 10_000)
-    const done = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve()
-    }
-    if (response.destroyed || response.closed) return done()
-    response.once('close', done)
-    serverSocket.once('close', done)
-  })
-  assert.equal(response.destroyed || response.closed, true, 'the HTTP response must be forcibly closed')
-  assert.equal(serverSocket.destroyed, true, 'the backpressured server socket must be destroyed')
-})
+    // The injected 250 ms drain timeout forces the close; wait for the real
+    // socket close events instead of sleeping for the production 10 s default.
+    await new Promise((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => reject(new Error('the response was not force-closed')), 10_000)
+      const done = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve()
+      }
+      if (response.destroyed || response.closed) return done()
+      response.once('close', done)
+      serverSocket.once('close', done)
+    })
+    assert.equal(response.destroyed || response.closed, true, 'the HTTP response must be forcibly closed')
+    assert.equal(serverSocket.destroyed, true, 'the backpressured server socket must be destroyed')
+    })
+}
 
 test('status, interrupt, restart and shutdown work after the notebook is deleted', async (t) => {
   const dir = await tempDir(t, 'dsh-bsb-ipynb-routes-')

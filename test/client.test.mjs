@@ -1652,6 +1652,7 @@ test('makeImageResolver resolves images next to a Windows absolute notebook path
   const filePath = (resolved) => new URL(resolved).searchParams.get('path')
   const resolve = makeImageResolver(ctx, scope, 'C:\\Users\\me\\notes\\nb\\demo.ipynb', { attachments: {} })
   assert.equal(filePath(resolve('images/plot.png')), 'C:/Users/me/notes/nb/images/plot.png')
+  assert.equal(new URL(resolve('images/plot.png')).pathname, '/ipynb/image', 'local images use the plugin-controlled route')
   assert.equal(new URL(resolve('images/plot.png')).searchParams.get('sessionId'), 's1')
   assert.equal(filePath(resolve('C:\\pics\\a.png')), 'C:/pics/a.png')
 

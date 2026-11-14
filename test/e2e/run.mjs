@@ -141,6 +141,11 @@ async function stopServer(child) {
 function notebookFor(marker) {
   return {
     cells: [{
+      cell_type: 'markdown',
+      id: 'e2e-markdown',
+      metadata: {},
+      source: ['![E2E local image](e2e-image.png)'],
+    }, {
       cell_type: 'code',
       execution_count: null,
       id: 'e2e-cell',
@@ -270,7 +275,7 @@ async function waitForSavedOutput(notebookPath, marker) {
     try {
       const notebook = JSON.parse(await readFile(notebookPath, 'utf8'))
       last = JSON.stringify(notebook)
-      const cell = notebook.cells && notebook.cells[0]
+      const cell = notebook.cells && notebook.cells.find((entry) => entry.cell_type === 'code')
       const output = cell && Array.isArray(cell.outputs)
         ? cell.outputs.some((entry) => JSON.stringify(entry).includes(marker))
         : false
@@ -364,6 +369,10 @@ async function main() {
       },
     }, null, 1), 'utf8')
     await writeFile(notebookPath, JSON.stringify(notebookFor(marker), null, 1), 'utf8')
+    await writeFile(path.join(workspaceDir, 'e2e-image.png'), Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    ))
     // A visible subdirectory gives the file-action lane a directory row to
     // right-click; the action creates its notebook inside it.
     const notesDir = path.join(workspaceDir, 'notes')
@@ -403,6 +412,12 @@ async function main() {
     await openRightSidebar(page)
     await openFilesPage(page)
     await openNotebook(page, notebookName)
+    const localImage = page.locator('.dsh-bsb-ipynb-root img[alt="E2E local image"]')
+    await localImage.waitFor({ state: 'visible', timeout: 20_000 })
+    await page.waitForFunction(() => {
+      const image = document.querySelector('.dsh-bsb-ipynb-root img[alt="E2E local image"]')
+      return image && image.complete && image.naturalWidth > 0 && new URL(image.src).pathname === '/ipynb/image'
+    }, null, { timeout: 20_000 })
 
     log('running the notebook through the editor-header action')
     const runAllButtons = page.getByRole('button', { name: /^(Run all|全部运行)$/ })

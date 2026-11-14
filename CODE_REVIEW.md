@@ -13,7 +13,8 @@
 > **跟进修复验收（历史）**：本轮新增 26 项回归，完整测试 **450 tests / 406 pass / 44 skip / 0 fail**（Windows 11，约 21.2s）。M-14 的失败启动后立即重试窗口与 M-17 图片访问边界未在本轮修复，继续列入剩余项。
 > **2026-11-08 测试精简（历史）**：删除 reload 等待保存矩阵中已失效的 host/fallback 维度（no-host 旧响应/编辑保护用例仍保留）、重复的 5,000 点 Plotly 用例与纯 fixture 对比度检查；合并 metadata/空本提示、常量和打包断言。JSON 结构矩阵保留 8 个入口的深度边界与节点拒绝检查，将完整数组/对象节点边界集中验证一次；真实 32MiB/64MiB 边界、保存竞态、关闭时序及跨平台路径回归保留。测试报告由 450 项减至 **431 tests / 387 pass / 44 skip / 0 fail**（Windows 11，约 20.5s）。CI 删除独立重复打包步骤，包内容由 `npm test` 内的实际打包测试验证；44 项跳过仍为本机文件系统能力限制。
 > **2026-11-14 测试精简（两批）**：第一批合并 JSON placement/MIME 矩阵、metadata 深度/节点与路由 config 用例，并吸收 4 个零散工具测试；第二批合并阅读模式快捷键 11→3、输出 reducer 6→3，以及 Markdown/sanitizer 的 5 组重复场景。两批合计 **448 → 416 tests**，断言未减少。该批 macOS 全量测试为 **416 tests / 410 pass / 6 skip / 0 fail**；对应修复前 CI [43597488370](https://github.com/kexiongwen/dsh-bsb-ipynb/actions/runs/43597488370) 的三平台矩阵与 pinned DSH + Better Sidebar E2E 全绿。下文 **431 / 387 / 44** 为 2026-11-08 Windows 历史快照，不再代表当前工作区。
-> **2026-11-14 第一批客户端修复**：Kernels 页按请求代次与会话隔离轮询及操作响应；autosave 异步完成路径使用最新延迟；中断失败显示错误并恢复 Run all 原计划；编辑态保存忽略 auto-repeat 与 AltGr。新增 4 项回归，当前 macOS 全量测试为 **420 tests / 414 pass / 6 skip / 0 fail**（约 11.8s）；本地 pinned DSH 0.2.2-rc.3 + Better Sidebar 0.32.1 浏览器 E2E 通过。
+> **2026-11-14 第一批客户端修复**：Kernels 页按请求代次与会话隔离轮询及操作响应；autosave 异步完成路径使用最新延迟；中断失败显示错误并恢复 Run all 原计划；编辑态保存忽略 auto-repeat 与 AltGr。新增 4 项回归，该批 macOS 全量测试为 **420 tests / 414 pass / 6 skip / 0 fail**（约 11.8s）；本地 pinned DSH 0.2.2-rc.3 + Better Sidebar 0.32.1 浏览器 E2E 通过。
+> **2026-11-14 第二批连接与图片修复**：输出队列超限后也启用有界强制关闭，真实 TCP 覆盖普通 drain 与超限组合；M-17 已修复，本地图片改走本插件 `/ipynb/image`，执行 workspace gate、打开句柄身份核验、MIME 白名单与 SVG CSP，覆盖绝对/相对路径与 symlink 逃逸。新增 3 项回归，当前 macOS 全量测试为 **423 tests / 417 pass / 6 skip / 0 fail**（约 11.5s）；本地 pinned 浏览器 E2E 已覆盖受控图片的真实加载。
 > **环境**：
 
 | 平台 | 环境 |
@@ -21,17 +22,17 @@
 | macOS（原始快照） | macOS APFS；Node v24.13.1；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.3 / nbformat 5.11）；DSH Desktop 0.2.2-rc.1；dsh-better-sidebar 0.30.1 |
 | Windows（复核与实测） | Windows 11 build `10.0.26300`（NTFS，大小写不敏感）；Node v24.19.0；Python 3.14.7（jupyter_client 8.10 / ipykernel 7.4 / nbformat 5.11）；控制台 cp936；同一 DSH/better-sidebar 版本 |
 
-> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 macOS 工作区全量测试为 **420 tests / 414 pass / 6 skip / 0 fail**（2026-11-14，约 11.8s），修复前 CI 三平台矩阵与 E2E 全绿。下文 **431 / 387 / 44** 为 2026-11-08 Windows 历史快照。
+> **验证依据**：macOS 快照时 `npm test` 292 pass / 0 fail / 0 skipped（约 23.5s），行覆盖 gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%，client.js 24.7%（仅作风险信号）。历史修复后测试集扩到 325 tests，三平台 CI 当时全绿；当前 macOS 工作区全量测试为 **423 tests / 417 pass / 6 skip / 0 fail**（2026-11-14，约 11.5s），修复前 CI 三平台矩阵与 E2E 全绿。下文 **431 / 387 / 44** 为 2026-11-08 Windows 历史快照。
 > **增量复核**：独立审查新增问题编号为 **M-13～M-17**（其中 M-15、M-16 已修复，M-13、M-14 仍有下述边界/残余）；此前及后续已经修复的问题按本文件约定不重复列入。
 > **证据等级**：【已验证】= 可重跑脚本或确定性路径复现；【契约核对】= 对照 DSH、better-sidebar、上游库源码；【推测】= 仅代码推理。
 > **平台标签**：【全平台】= macOS/Windows/Linux 均成立；【Windows 形态】= Windows 上表现/利用条件不同；【POSIX】= Windows 上不成立。
-> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。M-17 的行号也属于对应审核快照，当前请按函数名检索。
+> **行号说明**：历史条目中的 `file:line` 为原快照行号；多轮修复后行号已变化，按函数名/ID 检索更可靠。
 
 **问题总览（仅未修复）**
 
 | 级别 | 数量 | 条目 |
 | --- | --- | --- |
-| Medium | 6 | M-4、M-6、M-7、M-8、M-13（部分）、M-17 |
+| Medium | 5 | M-4、M-6、M-7、M-8、M-13（部分） |
 | Low | 5 | L-5、L-12、L-13、L-22、M-14（P3 残余） |
 | Nit | 约 5 类 | 存储、内核/桥、宿主、客户端/环境、测试/文档 |
 | 测试缺口 | 3 | T-1、T-3、T-5 |
@@ -40,7 +41,7 @@
 
 ---
 
-## 1. Medium（6 项，未修复或部分修复）
+## 1. Medium（5 项，未修复或部分修复）
 
 | ID | 平台 | 位置（快照时） | 问题与影响 | 证据 | 建议 |
 | --- | --- | --- | --- | --- | --- |
@@ -49,7 +50,6 @@
 | **M-7**（P2） | 全平台 | `lib/gate.js:16-53` | 工作区根只认 `ctx.get('workingDirectory').get(session)` / `session.header.cwd`，**不跟随 better-sidebar 的活动根**：文件树根是 `activeWorktreeRootOf(...)`（会采纳 linked git worktree，可能在会话 cwd 之外）。会话活动根为 linked worktree 时，`/ipynb/read`、`/ipynb/save`、`/ipynb/execute`、`/ipynb/status` 全部 403，核心功能不可用。Windows 下同样 403；跨盘 worktree 走 `path.relative` 返回绝对路径 → fail-closed（行为正确但仍是 403）。 | 【契约核对】better-sidebar 0.30.1：`src/index.ts:730-735`、`src/active-worktree.ts:466`；文件 viewer 收到绝对路径后本插件原样提交（`client.js:621,1586,1835`）。未在真实 worktree 会话端到端复现。 | 引入与 better-sidebar 对齐的「活动根集合」（主根 + 关联 worktree realpath，realpath 落在任一候选根内即允许）。 |
 | **M-8**（P2） | 全平台 | `lib/notebook.js:364-382,432-447`；`README.md`（保存可靠性一节） | 保存的 CAS 只在 `readFile→sha256→比较` 时检测冲突；第二次 `assertNotebookVersion` 返回后到 rename 之间仍有窗口：外部写者在窗口内写入会被静默覆盖，API 仍返回成功。README 已声明该竞态，但声明不能避免数据丢失；Windows 上同样成立。 | 【已验证】在 rename 钩子注入外部写：save fulfilled、`externalEditLost=true`，最终只有 PLUGIN_SAVE。 | 若必须提供强一致，使用覆盖读取—写入—提交的跨进程锁或支持 CAS 的提交协议，并保留冲突副本；rename 前核对 dev/ino、mtime、size 只能收窄窗口，单纯再加 hash 不能根治。 |
 | **M-13**（P2，部分） | 全平台 | `client.js` 的 `notebookRequests` / `readNotebook` / `reload`；服务端文件队列 | 同一插件实例内相同宿主/会话/路径已覆盖 Reload、宿主 Refresh、卸载后重新加载及读写交错；但跨页面/插件实例不共享客户端请求顺序，路径别名只在服务端 canonical 队列汇合。网络失败无法证明保存未提交，尚未进入文件队列的请求仍可能晚于后续读。卸载或 abort 不能撤销已发写入。 | 【契约核对】模块记录/服务端队列作用域；同模块路径有确定性回归，未宣称跨页面或失联请求端到端确认。 | 如需严格跨实例确认，加入操作 ID、提交结果查询及服务端受理顺序协议；维持现有 CAS 与明确边界。 |
-| **M-17**（P2） | 全平台 | `client.js:1187-1220`（`makeImageResolver`/`fileUrl`）；better-sidebar 0.30.1 `src/index.ts` `/sidebar/file`、`src/path-security.ts:1-14,65-76` | Markdown 与 `text/html` 图片不经过本插件 workspace gate，词法规范化后的相对 `..`、绝对盘符/UNC 直接交给上游 `/sidebar/file`；上游仅做 lexical resolve，明确无 realpath/containment。仅打开 notebook（无需执行 cell）即可请求并显示宿主工作区外可读图片，违背 README 的 contained access；当前证据仅覆盖图片读取/请求边界，未发现脚本执行或任意文本回读路径。 | 【已验证】Windows 示例 notebook `C:\workspace\nb\demo.ipynb` 中 `../../outside.png` 生成 `path=C:/outside.png` 的 `/sidebar/file` URL；【契约核对】上游 0.30.1 route 按解析路径流式返回文件。未做真实浏览器外联或任意文件内容 exfil 测试。 | 新增本插件受控图片路由：realpath + workspace 包含校验、流式图片响应、MIME/SVG CSP，并覆盖 `..`、绝对路径、UNC、symlink/junction；仅前端过滤 `..` 不足以封堵。 |
 
 ---
 
@@ -91,7 +91,7 @@
 | 优先级 | 项 | 说明 |
 | --- | --- | --- |
 | **P1** | T-1 | 安全关键清洗器的测试覆盖仍不完整。 |
-| **P2** | M-4、M-6、M-7、M-8、M-13、M-17 | 性能、路径与存储加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态），M-17 需由本插件增加受控图片路由。 |
+| **P2** | M-4、M-6、M-7、M-8、M-13 | 性能、路径与存储加固；其中 M-6 建议按 fd/dirfd 级加固（Windows 上同时覆盖 junction 形态）。 |
 | **P3** | §2 的 Low（按组批量）、M-14 残余、T-3/T-5、§3 Nit | 低成本、低风险，可合并处理。 |
 
 ---
@@ -101,7 +101,7 @@
 - **Windows 路径形态**：大小写变体、正/反斜杠混合、8.3 短名、盘符相对 `C:foo`、尾点/尾空格、ADS（默认/命名流）、保留设备名（`NUL`/`CON`/`COM1`）、`\\?\`/`\\.\` 前缀、根相对与 UNC 外部路径，实测均**不能**绕过 `.ipynb` 扩展名检查或工作区包含检查（403/404/400 或安全归一化）。长路径（实测 369/405 字符）、中文/emoji/空格文件名正常。这些结论支撑 L-22 的平台语境，不代表相应逻辑已加固。
 - **Windows 进程/信号语义**：SIGTERM/SIGKILL 均为 TerminateProcess，二次 kill 升级无意义；当前关闭仍先尝试显式 shutdown 协议，依赖进程退出事件及进程树回收确认清理，不把已发送信号视为成功。
 - **Windows 大小写回退边界（2026-11-08 修复 L-23 的已知范围）**：回退仅在 win32 启用、仅对已删除/missing 路径、仅匹配同 session + 同 realpath workspace，且多候选歧义一律 fail-closed；但 Windows per-directory case-sensitive NTFS 下缺失组件无法用 inode 校验，单 live 变体时 case 变体缺失拼写可能命中同 session/workspace 的该内核（无越权，默认 NTFS 不成立）。macOS APFS 默认大小写不敏感，但本回退未覆盖 macOS（原条目平台标注为 Windows 形态）。
-- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 macOS 工作区为 **420 / 414 pass / 6 skip / 0 fail**（2026-11-14，本地 pinned E2E 通过，修复前 CI 三平台 + pinned E2E 全绿）；历史 Windows 快照为 **431 / 387 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
+- **三平台基线**：历史修复后的测试集为 325 tests，CI 三平台 required 当时全绿；当前 macOS 工作区为 **423 / 417 pass / 6 skip / 0 fail**（2026-11-14，本地 pinned E2E 通过，修复前 CI 三平台 + pinned E2E 全绿）；历史 Windows 快照为 **431 / 387 pass / 44 skip / 0 fail**（skip 为无 symlink 权限与 POSIX 权限位用例）。
 
 ---
 
@@ -110,14 +110,13 @@
 | 实验 | 位置/命令 | 关键结果 |
 | --- | --- | --- |
 | 全量测试（快照） | `npm test`（macOS） | 快照时 **292 pass / 0 fail / 0 skipped**（约 23.5s）；历史修复后测试集 325 tests，三平台 CI 当时持续覆盖 |
-| 全量测试（当前工作区） | `npm test`（macOS） | **420 tests / 414 pass / 6 skip / 0 fail**（2026-11-14，约 11.8s）；本地 pinned E2E 通过，修复前 CI 三平台 + pinned E2E 全绿 |
+| 全量测试（当前工作区） | `npm test`（macOS） | **423 tests / 417 pass / 6 skip / 0 fail**（2026-11-14，约 11.5s）；本地 pinned E2E 通过，修复前 CI 三平台 + pinned E2E 全绿 |
 | 全量测试（历史 Windows 快照） | `npm test`（Windows） | **431 tests / 387 pass / 44 skip / 0 fail**（约 20.5s）；包含真实 Python/Jupyter 与真实 TCP 用例 |
 | 覆盖率（快照） | `node --experimental-test-coverage --test …` | gate 96.5% / routes 94.6% / kernel 93.0% / notebook 90.8% / env 82.8% / json 85.6%；client.js 24.7%（vm 沙箱用例未计入） |
 | M-4 | 本地 ANSI/reducer 微基准（脚本未随仓库提供） | 1/2/4/8MiB = 16/57/216/843ms，二次增长 |
 | M-6 | 本地按路由调用顺序注入（脚本未随仓库提供）；Windows junction 注入 | macOS：symlink 替换后读泄漏/写越界；Windows：预置 junction 被 403 拒绝，授权后父目录换 junction 可越界读/写 |
 | M-7 | better-sidebar 0.30.1 源码（`src/index.ts:730-735`、`src/active-worktree.ts:466`） | 文件树根用 `activeWorktreeRootOf`；Windows 同样 403 |
 | M-8 | 本地 rename 钩子注入（脚本未随仓库提供） | save fulfilled、外部编辑丢失 |
-| M-17 | 当前 `makeImageResolver` 路径复现 + better-sidebar 0.30.1 源码契约 | `C:\workspace\nb\demo.ipynb` 中 `../../outside.png` 解析为 `C:/outside.png` 并生成 `/sidebar/file` URL；上游明确不做 workspace containment，未声称真实浏览器 exfil 复现 |
 | L-12 | 当前源码最小 DOM 替身微基准 | 500/1000/2000/4000 标签约 17.8/55.5/165.0/653.4ms |
 | L-22 | Windows 真实 junction 实验 | 悬空 junction 控制路径退化为请求拼写（L-23 大小写拼写回退已修复，2026-11-08） |
 | Low 复现 | 本地各领域复现脚本（未随仓库提供） | 见各条【已验证】标注 |
