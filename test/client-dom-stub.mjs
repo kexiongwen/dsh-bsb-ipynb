@@ -41,6 +41,7 @@ class StubNode {
     this.nodeType = nodeType
     this.nodeName = nodeName
     this.parentNode = null
+    this._nextSibling = null
     this.childNodes = []
   }
 
@@ -48,8 +49,15 @@ class StubNode {
     return this.childNodes[0] || null
   }
 
+  get nextSibling() {
+    return this.parentNode ? this._nextSibling : null
+  }
+
   appendChild(child) {
     if (child.parentNode) child.parentNode.removeChild(child)
+    const previous = this.childNodes[this.childNodes.length - 1]
+    if (previous) previous._nextSibling = child
+    child._nextSibling = null
     child.parentNode = this
     this.childNodes.push(child)
     return child
@@ -57,7 +65,12 @@ class StubNode {
 
   removeChild(child) {
     const index = this.childNodes.indexOf(child)
-    if (index !== -1) this.childNodes.splice(index, 1)
+    if (index !== -1) {
+      const previous = this.childNodes[index - 1]
+      if (previous) previous._nextSibling = child._nextSibling
+      this.childNodes.splice(index, 1)
+    }
+    child._nextSibling = null
     child.parentNode = null
     return child
   }
@@ -71,16 +84,25 @@ class StubNode {
     if (!parent) return
     const index = parent.childNodes.indexOf(this)
     if (index === -1) return
+    const previous = parent.childNodes[index - 1]
+    const following = this._nextSibling
     if (replacement.nodeType === DOCUMENT_FRAGMENT_NODE) {
       const children = replacement.childNodes.slice()
       replacement.childNodes.length = 0
-      for (const child of children) child.parentNode = parent
+      for (let offset = 0; offset < children.length; offset += 1) {
+        children[offset].parentNode = parent
+        children[offset]._nextSibling = children[offset + 1] || following
+      }
+      if (previous) previous._nextSibling = children[0] || following
       parent.childNodes.splice(index, 1, ...children)
     } else {
       if (replacement.parentNode) replacement.parentNode.removeChild(replacement)
       replacement.parentNode = parent
+      replacement._nextSibling = following
+      if (previous) previous._nextSibling = replacement
       parent.childNodes.splice(index, 1, replacement)
     }
+    this._nextSibling = null
     this.parentNode = null
   }
 }

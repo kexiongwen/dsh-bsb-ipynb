@@ -726,7 +726,7 @@ test('html sanitizer fallback escapes markup without resolving images', async ()
       parseFromString() {
         return {
           body: {
-            get childNodes() {
+            get firstChild() {
               throw new RangeError('Maximum call stack size exceeded')
             },
           },
@@ -817,6 +817,56 @@ test('html sanitizer keeps the URL policy, strips disallowed attributes and only
     assert.doesNotMatch(html, /style=/, 'inline style attributes are removed from HTML outputs')
     assert.doesNotMatch(html, /onclick=/, 'inline event handlers are removed from HTML outputs')
   } finally {
+    restore()
+  }
+})
+
+test('html sanitizer drops unsafe containers, unwraps unknown elements and secures links', async () => {
+  const restore = installDomParser()
+  try {
+    const { exports } = await loadClient()
+    const { sanitizeHtml } = exports.__test
+    const html = sanitizeHtml(
+      '<div id="drop" title="keep" data-drop="yes">before' +
+        '<script>alert(1)</script><style>bad</style><iframe src="https://evil.example"></iframe>' +
+        '<custom><strong>inside</strong></custom>' +
+        '<a href="javascript:alert(1)" target="evil" rel="opener">bad</a>' +
+        '<a href="https://example.test" target="evil" rel="opener">safe</a>' +
+        '<!--comment--></div>',
+    )
+    assert.equal(
+      html,
+      '<div title="keep">before<strong>inside</strong>' +
+        '<a target="_blank" rel="noreferrer noopener">bad</a>' +
+        '<a href="https://example.test" target="_blank" rel="noreferrer noopener">safe</a></div>',
+    )
+  } finally {
+    restore()
+  }
+})
+
+test('html sanitizer unwrap is linear and pathological markup degrades to text', async () => {
+  const restore = installDomParser()
+  const originalArrayFrom = Array.from
+  try {
+    const { exports } = await loadClient()
+    const { sanitizeHtml, escapeHtml } = exports.__test
+    let scans = 0
+    Array.from = (...args) => {
+      scans += 1
+      return originalArrayFrom(...args)
+    }
+    const siblings = '<unknown></unknown>'.repeat(400)
+    assert.equal(sanitizeHtml(siblings), '')
+    assert.ok(scans < 100, `unwrap must not rescan the parent after every sibling (${scans} scans)`)
+    Array.from = originalArrayFrom
+
+    const deep = '<div>'.repeat(101) + 'x' + '</div>'.repeat(101)
+    assert.equal(sanitizeHtml(deep), escapeHtml(deep), 'excessive depth falls back to escaped text')
+    const wide = '<span></span>'.repeat(250001)
+    assert.equal(sanitizeHtml(wide), escapeHtml(wide), 'excessive node counts fall back to escaped text')
+  } finally {
+    Array.from = originalArrayFrom
     restore()
   }
 })
@@ -978,7 +1028,7 @@ test('notebook normalization and serialization strip nbformat-illegal output fie
 
 test('the save preflight measures the same serialized size the server caps', async () => {
   const { exports } = await loadClient()
-  const { notebookCapacity, serializeNotebook, normalizeNotebook, NOTEBOOK_CAP_BYTES, capacityText } = exports.__test
+  const { notebookCapacity, serializeNotebook, normalizeNotebook, NOTEBOOK_CAP_BYTES, capacityText, capacityNoOutputsText } = exports.__test
   assert.equal(NOTEBOOK_CAP_BYTES, 32 * 1024 * 1024)
   assert.deepEqual(notebookCapacity(null), { ok: true, bytes: 0 })
   const notebook = normalizeNotebook({
@@ -997,6 +1047,8 @@ test('the save preflight measures the same serialized size the server caps', asy
   assert.equal(notebookCapacity(notebook, exact).ok, true, 'the exact limit is still saveable')
   assert.equal(notebookCapacity(notebook, exact - 1).ok, false, 'one byte above the limit is blocked')
   assert.match(capacityText(exact), /32 MiB/)
+  assert.match(capacityText(exact), /at least/, 'the early byte-budget result is explicitly a lower bound')
+  assert.match(capacityNoOutputsText(exact), /at least/)
   assert.match(capacityText(exact), new RegExp((exact / 1048576).toFixed(1)))
 })
 

@@ -239,8 +239,8 @@ test('source line expansion obeys the whole-notebook node budget before serializ
   const stringify = JSON.stringify
   JSON.stringify = () => { throw new Error('source expansion must not stringify') }
   try {
-    assert.throws(() => serializeNotebook(result), (error) => error.status === 400)
-    assert.deepEqual(exports.__test.notebookCapacity(result), { ok: false, reason: 'json-too-complex', bytes: 0 })
+    assert.throws(() => serializeNotebook(result), (error) => error.status === 413 && error.code === 'too-large')
+    assert.deepEqual(exports.__test.notebookCapacity(result), { ok: false, reason: 'capacity', bytes: NOTEBOOK_CAP_BYTES })
   } finally {
     JSON.stringify = stringify
   }

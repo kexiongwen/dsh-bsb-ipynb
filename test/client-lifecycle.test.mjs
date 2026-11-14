@@ -89,6 +89,8 @@ function mountNotebook(t, options = {}) {
   let pendingEffects = [], pendingState = [], tree, moduleOptions, moduleExports, hostReloads = 0
   let confirmResult = true
   const confirmations = []
+  const localStorageWrites = []
+  const toolbarReports = []
   // Optional Host locale face: when requested, apply() binds the plugin's
   // namespace dictionaries and the viewer subscribes through
   // useSyncExternalStore, so a locale switch re-renders the same mounted tree.
@@ -129,6 +131,7 @@ function mountNotebook(t, options = {}) {
     visible: options.visible === undefined ? false : options.visible,
     customData: options.customData || notebookData(),
     onReload: options.hostReload === false ? undefined : () => { hostReloads += 1 },
+    onToolbarState: options.toolbarState ? (state) => toolbarReports.push(state) : undefined,
     store,
   }
   const sameDeps = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => Object.is(value, b[index]))
@@ -190,9 +193,16 @@ function mountNotebook(t, options = {}) {
   }
   const fetch = (url, init = {}) => {
     const route = new URL(url).pathname.split('/').pop()
-    if (route === 'interpreters') return Promise.resolve(response({ ok: true, value: { interpreters: [{ ok: true, path: '/python' }], default: '/python' } }))
+    if (route === 'interpreters') {
+      const interpreters = options.interpreters || [{ ok: true, path: '/python' }]
+      return Promise.resolve(response({ ok: true, value: { interpreters, default: interpreters[0]?.path } }))
+    }
     if (route === 'status' && !options.deferStatus) {
-      return Promise.resolve(response({ ok: true, value: { running: false, ready: false, busy: false, python: null, executionState: 'none' } }))
+      requests.push({ route, init, body: init.body ? JSON.parse(init.body) : undefined, immediate: true })
+      return Promise.resolve(response({
+        ok: true,
+        value: options.kernelStatus || { running: false, ready: false, busy: false, python: null, executionState: 'none' },
+      }))
     }
     const result = deferred()
     // Deliberately allow responses after abort: a queued response or transport
@@ -203,7 +213,10 @@ function mountNotebook(t, options = {}) {
   const context = vm.createContext({
     window: {
       __ModuleLoader__: { load(options) { moduleOptions = options } },
-      localStorage: { getItem() { return null }, setItem() {} },
+      localStorage: {
+        getItem() { return null },
+        setItem(key, value) { localStorageWrites.push([key, value]) },
+      },
       confirm(message) { confirmations.push(message); return confirmResult },
       addEventListener(type, listener) {
         if (!windowListeners.has(type)) windowListeners.set(type, new Set())
@@ -293,6 +306,8 @@ function mountNotebook(t, options = {}) {
     },
     get reloadCount() { return hostReloads },
     get confirmations() { return confirmations },
+    get localStorageWrites() { return localStorageWrites },
+    get toolbarReports() { return toolbarReports },
     setConfirm(value) { confirmResult = value },
     requests: (route) => requests.filter((request) => request.route === route),
     loadReplacement() { return moduleExports.__test.readNotebook(props.ctx, props.path, props.scope) },
@@ -1223,7 +1238,7 @@ test('an oversized notebook retranslates its dynamic banner and can be saved aft
   assert.match(english, new RegExp(size))
   app.setLocale('zh')
   assert.equal(app.banner.params.size, size, 'the measured size survives a locale switch')
-  assert.match(app.bannerText, /notebook 内容约/)
+  assert.match(app.bannerText, /notebook 内容至少/)
   assert.match(app.bannerText, new RegExp(size.replace('.', '\\.')))
   assert.equal(saveTitle(), '保存', 'the mounted toolbar follows the Host locale switch')
   app.setLocale('en')
@@ -1824,6 +1839,72 @@ test('editing save shortcuts ignore auto-repeat and AltGr text input', async (t)
   app.flush()
   assert.equal(altGr.defaultPrevented, false, 'AltGr text input is not prevented')
   assert.equal(app.requests('save').length, 1, 'AltGr does not trigger save')
+})
+
+test('default autosave fires after 1500ms and toolbar state follows the save lifecycle', async (t) => {
+  const app = mountNotebook(t, { toolbarState: true })
+  await app.settle()
+  assert.equal(app.toolbarReports.at(-1).dirty, false)
+  assert.equal(app.toolbarReports.at(-1).saveState, 'idle')
+
+  app.edit()
+  assert.equal(app.timersFor(1500).length, 1, 'the default autosave delay is armed')
+  assert.equal(app.toolbarReports.at(-1).dirty, true)
+  app.fireTimer(1500)
+  assert.equal(app.requests('save').length, 1, 'the autosave timer performs a real save')
+  assert.equal(app.toolbarReports.at(-1).saveState, 'saving')
+  app.requests('save')[0].resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await app.settle()
+  assert.equal(app.toolbarReports.at(-1).dirty, false)
+  assert.equal(app.toolbarReports.at(-1).saveState, 'saved')
+})
+
+test('kernel polling starts on visibility and stops when hidden', async (t) => {
+  const app = mountNotebook(t, { visible: false })
+  await app.settle()
+  const initial = app.requests('status').length
+  assert.equal(initial, 1, 'the initial status is fetched once')
+  assert.equal(app.timersFor(10000).length, 0, 'a hidden viewer has no polling interval')
+
+  app.setVisible(true)
+  await app.settle()
+  assert.equal(app.requests('status').length, initial + 1, 'becoming visible refreshes immediately')
+  assert.equal(app.timersFor(10000).length, 1)
+  app.fireTimer(10000)
+  await app.settle()
+  assert.equal(app.requests('status').length, initial + 2, 'the visible interval polls the kernel')
+
+  app.setVisible(false)
+  await app.settle()
+  assert.equal(app.timersFor(10000).length, 0, 'hiding clears the interval')
+  assert.equal(app.requests('status').length, initial + 3, 'hiding may refresh once, but must not keep polling')
+})
+
+test('interpreter switching honors confirmation and persists the accepted choice', async (t) => {
+  const app = mountNotebook(t, {
+    interpreters: [{ ok: true, path: '/python' }, { ok: true, path: '/python2' }],
+    kernelStatus: { running: true, ready: true, busy: false, python: '/python', executionState: 'idle' },
+  })
+  await app.settle()
+  assert.equal(app.toolbar.kernel.running, true)
+
+  app.setConfirm(false)
+  app.toolbar.onPython('/python2')
+  await app.settle()
+  assert.equal(app.confirmations.length, 1)
+  assert.equal(app.requests('restart').length, 0, 'cancelling never restarts the kernel')
+  assert.equal(app.localStorageWrites.length, 0, 'cancelling never persists the choice')
+
+  app.setConfirm(true)
+  app.toolbar.onPython('/python2')
+  await app.settle()
+  const restart = app.requests('restart')[0]
+  assert.ok(restart, 'the accepted interpreter change restarts the kernel')
+  assert.equal(restart.body.python, '/python2')
+  restart.resolve(response({ ok: true, value: { python: '/python2' } }))
+  await app.settle()
+  assert.deepEqual(app.localStorageWrites, [['dsh-bsb-ipynb:python:/workspace/demo.ipynb', '/python2']])
+  assert.equal(app.toolbar.python, '/python2')
 })
 
 // ---------------------------------------------------------------------------

@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
         saveFailed: 'Save failed',
         saveBlockedReadonly: 'The notebook file is read-only. Clear the read-only attribute and save again.',
         saveBlockedLocked: 'The notebook file is in use by another program. Close it and save again.',
-        capacityTooLarge: 'Notebook is {size} MiB; the save limit is 32 MiB. Clear outputs and save again.',
+        capacityTooLarge: 'Notebook is at least {size} MiB; the save limit is 32 MiB. Clear outputs and save again.',
         metadataTooComplex: 'Notebook metadata is too complex to save. Reduce its nesting or number of entries.',
         jsonTooComplex: 'Notebook JSON is too complex to save. Reduce its nesting or number of entries.',
         clearCellOutputs: 'Clear outputs',
@@ -84,7 +84,7 @@ window.__ModuleLoader__.load({
         viewerTitle: 'Jupyter Notebook',
         invalidResponse: 'Invalid server response',
         streamUnsupported: 'Streaming is not supported by this browser.',
-        capacityNoOutputs: 'Notebook is {size} MiB; the save limit is 32 MiB. There are no outputs to clear — remove cells or shorten the content.',
+        capacityNoOutputs: 'Notebook is at least {size} MiB; the save limit is 32 MiB. There are no outputs to clear — remove cells or shorten the content.',
         cellType: 'Cell type',
         settingsTitle: 'Notebook settings',
         settingsAutosave: 'Autosave delay',
@@ -155,7 +155,7 @@ window.__ModuleLoader__.load({
         saveFailed: '保存失败',
         saveBlockedReadonly: '文件为只读，请清除只读属性后再保存。',
         saveBlockedLocked: '文件正被其它程序占用，请关闭后重试。',
-        capacityTooLarge: 'notebook 内容约 {size} MiB，保存上限为 32 MiB。请清空输出后再保存。',
+        capacityTooLarge: 'notebook 内容至少 {size} MiB，保存上限为 32 MiB。请清空输出后再保存。',
         metadataTooComplex: 'notebook 的 metadata 过于复杂，无法保存。请减少嵌套层级或条目数量。',
         jsonTooComplex: 'notebook 的 JSON 数据过于复杂，无法保存。请减少嵌套层级或条目数量。',
         clearCellOutputs: '清空输出',
@@ -175,7 +175,7 @@ window.__ModuleLoader__.load({
         viewerTitle: 'Jupyter 笔记本',
         invalidResponse: '服务器响应无效',
         streamUnsupported: '当前浏览器不支持流式执行。',
-        capacityNoOutputs: 'notebook 约 {size} MiB，超过 32 MiB 上限；当前没有可清空的输出，请删除单元格或精简内容。',
+        capacityNoOutputs: 'notebook 至少 {size} MiB，超过 32 MiB 上限；当前没有可清空的输出，请删除单元格或精简内容。',
         cellType: '单元格类型',
         settingsTitle: 'Notebook 设置',
         settingsAutosave: '自动保存延迟',
@@ -351,6 +351,8 @@ window.__ModuleLoader__.load({
       'href', 'src', 'alt', 'title', 'class', 'colspan', 'rowspan', 'align', 'valign', 'width', 'height',
       'target', 'rel', 'start', 'type',
     ])
+    const HTML_DEPTH_LIMIT = 100
+    const HTML_NODE_LIMIT = 250_000
 
     function elementAttribute(element, name) {
       for (const attribute of Array.from(element.attributes || [])) {
@@ -360,24 +362,44 @@ window.__ModuleLoader__.load({
     }
 
     function cleanNode(node, resolveImage) {
-      for (const child of Array.from(node.childNodes || [])) {
-        if (child.nodeType === 3) continue
+      let visited = 0
+      // Each frame advances exactly once per child. Unwrapping resumes at the
+      // inserted content instead of recursively restarting the parent's list.
+      const stack = [{ node, child: node.firstChild || null, depth: 0 }]
+      while (stack.length) {
+        const frame = stack[stack.length - 1]
+        const child = frame.child
+        if (!child) {
+          stack.pop()
+          continue
+        }
+        visited += 1
+        if (visited > HTML_NODE_LIMIT) throw new RangeError('HTML output exceeds its node limit')
+        if (child.nodeType === 3) {
+          frame.child = child.nextSibling
+          continue
+        }
         if (child.nodeType !== 1) {
+          frame.child = child.nextSibling
           child.remove()
           continue
         }
         const tag = child.tagName.toLowerCase()
         if (DROP_TAGS.has(tag)) {
+          frame.child = child.nextSibling
           child.remove()
           continue
         }
         if (!ALLOWED_TAGS.has(tag)) {
-          const fragment = node.ownerDocument.createDocumentFragment()
+          const next = child.nextSibling
+          const fragment = frame.node.ownerDocument.createDocumentFragment()
           while (child.firstChild) fragment.appendChild(child.firstChild)
+          const inserted = fragment.firstChild || next
           child.replaceWith(fragment)
-          cleanNode(node, resolveImage)
+          frame.child = inserted
           continue
         }
+        frame.child = child.nextSibling
         let imageSrc = null
         for (const attribute of Array.from(child.attributes)) {
           const name = attribute.name.toLowerCase()
@@ -412,7 +434,7 @@ window.__ModuleLoader__.load({
             // Unresolvable references (e.g. a missing attachment) degrade to
             // the same marker the markdown renderer uses instead of a broken
             // image every time the output renders.
-            const document = node.ownerDocument
+            const document = frame.node.ownerDocument
             const marker = document.createElement('span')
             marker.setAttribute('class', 'dsh-bsb-ipynb-missing-image')
             marker.textContent = elementAttribute(child, 'alt')
@@ -424,7 +446,10 @@ window.__ModuleLoader__.load({
           child.setAttribute('target', '_blank')
           child.setAttribute('rel', 'noreferrer noopener')
         }
-        cleanNode(child, resolveImage)
+        if (child.firstChild) {
+          if (frame.depth + 1 > HTML_DEPTH_LIMIT) throw new RangeError('HTML output exceeds its depth limit')
+          stack.push({ node: child, child: child.firstChild, depth: frame.depth + 1 })
+        }
       }
     }
 
@@ -1481,9 +1506,7 @@ window.__ModuleLoader__.load({
       let start = 0
       while (start < source.length) {
         if (++budget.lines > NOTEBOOK_NODE_LIMIT) {
-          const error = new Error('Notebook exceeds its maximum node count')
-          error.code = 'json-too-complex'
-          throw error
+          throw new RangeError('Notebook exceeds its maximum source line count')
         }
         const newline = source.indexOf('\n', start)
         const end = newline === -1 ? source.length : newline + 1
