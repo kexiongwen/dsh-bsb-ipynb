@@ -39,24 +39,31 @@ const mimes = ['application/json', 'application/vnd.example+json']
 const structureError = (error) => error.code === 'bad-request' && error.status === 400
 const oversizedJsonArray = new Array(JSON_NODE_LIMIT).fill(null)
 
-// Every placement and MIME must reach the common structural checks. Exercise
-// the expensive exact array/object node boundaries once below.
-for (const placement of placements) {
-  for (const mime of mimes) {
-    test(`${placement} ${mime} enforces JSON structure limits`, () => {
+// Every placement and MIME must reach the common structural checks. Keep the
+// matrix together so a failure still names the placement and MIME; exercise the
+// expensive exact array/object node boundaries once below.
+test('every JSON placement and MIME enforces structure limits', () => {
+  for (const placement of placements) {
+    for (const mime of mimes) {
+      const label = `${placement} ${mime}`
       for (const array of [false, true]) {
         const valid = notebookWith(nested(JSON_DEPTH_LIMIT, array), placement, mime)
-        assert.doesNotThrow(() => serializeNotebook(valid))
+        assert.doesNotThrow(() => serializeNotebook(valid), `${label}: depth boundary is accepted`)
         const invalid = notebookWith(nested(JSON_DEPTH_LIMIT + 1, array), placement, mime)
-        assert.throws(() => normalizeNotebook(invalid), (error) => structureError(error) && /JSON data.*maximum depth/.test(error.message))
+        assert.throws(
+          () => normalizeNotebook(invalid),
+          (error) => structureError(error) && /JSON data.*maximum depth/.test(error.message),
+          `${label}: depth overflow is rejected`,
+        )
       }
       assert.throws(
         () => normalizeNotebook(notebookWith(oversizedJsonArray, placement, mime)),
         (error) => structureError(error) && /JSON data.*maximum node count/.test(error.message),
+        `${label}: node overflow is rejected`,
       )
-    })
+    }
   }
-}
+})
 
 test('JSON payload arrays and objects enforce the exact node boundary', () => {
   for (const object of [false, true]) {

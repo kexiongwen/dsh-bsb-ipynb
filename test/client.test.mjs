@@ -590,6 +590,10 @@ test('markdown refuses javascript links and keeps relative images', async () => 
   assert.equal(sanitizeUrl('https://example.com/a'), 'https://example.com/a')
   assert.equal(sanitizeUrl('data:image/png;base64,aaaa', { image: true }), 'data:image/png;base64,aaaa')
   assert.equal(sanitizeUrl('data:text/html;base64,aaaa', { image: true }), null)
+  for (const target of ['java\nscript:alert(1)', 'java\tscript:alert(1)', 'java\rscript:alert(1)', '\u0000javascript:alert(1)']) {
+    assert.equal(sanitizeUrl(target), null, `control characters must not bypass the scheme check: ${JSON.stringify(target)}`)
+  }
+  assert.equal(sanitizeUrl('  https://example.com/a\n'), 'https://example.com/a')
 })
 
 test('protocol-relative images are refused while links keep working', async () => {
@@ -820,27 +824,6 @@ test('reading-mode shortcut resolver handles modifiers, IME and already-handled 
   assert.equal(cellIdFromEventTarget(null), null)
 })
 
-test('stream output and text MIME values join array parts without comma separators', async () => {
-  const { exports } = await loadClient()
-  const { OutputView, mimeText } = exports.__test
-  const tree = OutputView({
-    output: { output_type: 'stream', name: 'stdout', text: ['alpha\n', 'beta\n'] },
-    resolveImage: () => null,
-  })
-  assert.equal(tree.type, 'pre')
-  const html = tree.props.dangerouslySetInnerHTML.__html
-  assert.match(html, /alpha\nbeta/)
-  assert.doesNotMatch(html, /alpha,beta|,beta/)
-  const scenarios = [
-    { name: 'array lines', input: ['line one\n', 'line two'], expected: 'line one\nline two' },
-    { name: 'scalar string', input: 'plain', expected: 'plain' },
-    { name: 'null value', input: null, expected: '' },
-  ]
-  for (const scenario of scenarios) {
-    assert.equal(mimeText(scenario.input), scenario.expected, `${scenario.name}: unexpected text MIME join`)
-  }
-})
-
 test('python highlighting marks keywords, strings and comments', async () => {
   const { exports } = await loadClient()
   const { highlightPython } = exports.__test
@@ -849,21 +832,14 @@ test('python highlighting marks keywords, strings and comments', async () => {
   assert.match(html, /dsh-bsb-ipynb-tok-keyword">return</)
   assert.match(html, /dsh-bsb-ipynb-tok-string">&quot;x&quot;<\/span>/)
   assert.match(html, /dsh-bsb-ipynb-tok-comment"># note</)
-})
-
-test('sanitizeUrl strips control characters before the scheme check', async () => {
-  const { exports } = await loadClient()
-  const { sanitizeUrl } = exports.__test
-  assert.equal(sanitizeUrl('java\nscript:alert(1)'), null)
-  assert.equal(sanitizeUrl('java\tscript:alert(1)'), null)
-  assert.equal(sanitizeUrl('java\rscript:alert(1)'), null)
-  assert.equal(sanitizeUrl('\u0000javascript:alert(1)'), null)
-  assert.equal(sanitizeUrl('  https://example.com/a\n'), 'https://example.com/a')
+  const crlf = highlightPython('# note\r\nprint(1)\r\n')
+  assert.doesNotMatch(crlf, /\r/, 'carriage returns must not survive in token spans')
+  assert.match(crlf, /tok-comment/)
 })
 
 test('notebook normalization and serialization round-trip source lines', async () => {
   const { exports } = await loadClient()
-  const { normalizeNotebook, serializeNotebook, emptyNotebook } = exports.__test
+  const { normalizeNotebook, serializeNotebook, emptyNotebook, splitSourceLines } = exports.__test
   const notebook = normalizeNotebook({
     cells: [{ cell_type: 'code', source: ['a = 1\n', 'a + 1'], outputs: [], execution_count: 2 }],
     metadata: {},
@@ -880,6 +856,9 @@ test('notebook normalization and serialization round-trip source lines', async (
   const empty = JSON.parse(serializeNotebook(emptyNotebook()))
   assert.deepEqual(empty.cells[0].source, [])
   assert.equal(empty.cells[0].cell_type, 'code')
+  assert.deepEqual(splitSourceLines('a\nb\n'), ['a\n', 'b\n'])
+  assert.deepEqual(splitSourceLines('a'), ['a'])
+  assert.deepEqual(splitSourceLines(''), [])
 })
 
 test('notebook normalization and serialization strip nbformat-illegal output fields', async () => {
@@ -1013,25 +992,25 @@ function nestedMetadata(depth) {
   return metadata
 }
 
-test('metadata depth preflight covers notebook, cell and output metadata', async () => {
+test('metadata depth and node preflight covers every location and exact boundary', async () => {
   const { exports } = await loadClient()
   const { serializeNotebook, notebookCapacity, METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT } = exports.__test
   assert.equal(METADATA_DEPTH_LIMIT, 100)
   assert.equal(METADATA_NODE_LIMIT, 10_000)
+
   for (const location of ['notebook', 'cell', 'output']) {
     const notebook = notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT + 1), location)
     assert.throws(() => serializeNotebook(notebook), (error) => {
       assert.equal(error.code, 'metadata-too-complex')
       assert.match(error.message, /maximum depth of 100/)
       return true
-    })
-    assert.deepEqual(notebookCapacity(notebook), { ok: false, reason: 'metadata-too-complex', bytes: 0 })
+    }, `${location}: depth overflow is rejected`)
+    assert.deepEqual(
+      notebookCapacity(notebook),
+      { ok: false, reason: 'metadata-too-complex', bytes: 0 },
+      `${location}: capacity reports metadata-too-complex`,
+    )
   }
-})
-
-test('metadata node limits and normal depth and node boundaries are enforced exactly', async () => {
-  const { exports } = await loadClient()
-  const { serializeNotebook, notebookCapacity, METADATA_DEPTH_LIMIT, METADATA_NODE_LIMIT } = exports.__test
   assert.doesNotThrow(() => serializeNotebook(notebookWithMetadata(nestedMetadata(METADATA_DEPTH_LIMIT))))
   assert.doesNotThrow(() => serializeNotebook(notebookWithMetadata(new Array(METADATA_NODE_LIMIT - 1).fill(null))))
 
@@ -1047,21 +1026,17 @@ test('metadata node limits and normal depth and node boundaries are enforced exa
   assert.doesNotThrow(() => serializeNotebook(notebookWithMetadata({ left: shared, right: shared })))
 })
 
-test('metadata cycles keep the original TypeError serialization behavior', async () => {
+test('save preflight rejects circular metadata and toJSON hooks without invoking them', async () => {
   const { exports } = await loadClient()
   const { serializeNotebook, notebookCapacity } = exports.__test
   for (const location of ['notebook', 'cell', 'output']) {
     const metadata = {}
     metadata.circular = metadata
     const notebook = notebookWithMetadata(metadata, location)
-    assert.throws(() => serializeNotebook(notebook), TypeError)
-    assert.throws(() => notebookCapacity(notebook), TypeError)
+    assert.throws(() => serializeNotebook(notebook), TypeError, `${location}: circular metadata keeps TypeError behavior`)
+    assert.throws(() => notebookCapacity(notebook), TypeError, `${location}: capacity keeps TypeError behavior`)
   }
-})
 
-test('save preflight rejects toJSON hooks without executing them', async () => {
-  const { exports } = await loadClient()
-  const { notebookCapacity } = exports.__test
   let called = false
   const notebook = notebookWithMetadata({})
   notebook.cells[0].outputs[0].data = {
@@ -1693,14 +1668,6 @@ test('cell shortcuts ignore IME composition and accept CapsLock Ctrl+S', async (
   assert.equal(isImeKeyEvent({}), false)
 })
 
-test('python highlighting normalizes CRLF source', async () => {
-  const { exports } = await loadClient()
-  const { highlightPython } = exports.__test
-  const html = highlightPython('# note\r\nprint(1)\r\n')
-  assert.doesNotMatch(html, /\r/, 'carriage returns must not survive in token spans')
-  assert.match(html, /tok-comment/)
-})
-
 test('dedentSourceLine removes one indent unit from the caret line', async () => {
   const { exports } = await loadClient()
   const { dedentSourceLine } = exports.__test
@@ -1709,23 +1676,20 @@ test('dedentSourceLine removes one indent unit from the caret line', async () =>
   assert.deepEqual(dedentSourceLine('abc', 1), { source: 'abc', caret: 1 })
 })
 
-test('splitSourceLines keeps trailing newlines like the old lookbehind split', async () => {
-  const { exports } = await loadClient()
-  const { splitSourceLines } = exports.__test
-  assert.deepEqual(splitSourceLines('a\nb\n'), ['a\n', 'b\n'])
-  assert.deepEqual(splitSourceLines('a'), ['a'])
-  assert.deepEqual(splitSourceLines(''), [])
-})
-
 test('output rendering covers MIME priority, fallbacks, image aliases and sanitization', async () => {
   const { exports } = await loadClient()
-  const { OutputView } = exports.__test
+  const { OutputView, mimeText } = exports.__test
   const render = (output) => OutputView({ output, resolveImage: () => null })
   assert.equal(render(null), null)
 
   const stream = render({ output_type: 'stream', name: 'stderr', text: 'oops\n' })
   assert.match(stream.props.className, /stream-stderr/)
   assert.match(stream.props.dangerouslySetInnerHTML.__html, /oops/)
+  const arrayStream = render({ output_type: 'stream', name: 'stdout', text: ['alpha\n', 'beta\n'] })
+  assert.equal(arrayStream.type, 'pre')
+  const arrayStreamHtml = arrayStream.props.dangerouslySetInnerHTML.__html
+  assert.match(arrayStreamHtml, /alpha\nbeta/)
+  assert.doesNotMatch(arrayStreamHtml, /alpha,beta|,beta/)
 
   const error = render({ output_type: 'error', ename: 'ValueError', evalue: 'bad', traceback: ['Traceback'] })
   assert.match(error.props.className, /is-error|dsh-bsb-ipynb-error/)
@@ -1766,6 +1730,14 @@ test('output rendering covers MIME priority, fallbacks, image aliases and saniti
 
   const unknown = render({ output_type: 'display_data', data: { 'application/x-custom': 1 } })
   assert.match(unknown.props.children[0], /application\/x-custom/)
+
+  for (const scenario of [
+    { name: 'array lines', input: ['line one\n', 'line two'], expected: 'line one\nline two' },
+    { name: 'scalar string', input: 'plain', expected: 'plain' },
+    { name: 'null value', input: null, expected: '' },
+  ]) {
+    assert.equal(mimeText(scenario.input), scenario.expected, `${scenario.name}: unexpected text MIME join`)
+  }
 })
 
 test('ansi output handles carriage returns and strips OSC sequences', async () => {

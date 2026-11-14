@@ -90,8 +90,8 @@ function nestedMetadata(depth) {
   return value
 }
 
-test('metadata depth limits cover notebook, cell and output metadata', () => {
-  const placements = [
+test('metadata depth and node limits cover notebook, cell and output metadata', () => {
+  for (const place of [
     (notebook) => { notebook.metadata = nestedMetadata(METADATA_DEPTH_LIMIT + 1) },
     (notebook) => { notebook.cells[0].metadata = nestedMetadata(METADATA_DEPTH_LIMIT + 1) },
     (notebook) => {
@@ -101,8 +101,7 @@ test('metadata depth limits cover notebook, cell and output metadata', () => {
         metadata: nestedMetadata(METADATA_DEPTH_LIMIT + 1),
       }]
     },
-  ]
-  for (const place of placements) {
+  ]) {
     const notebook = emptyNotebook()
     place(notebook)
     assert.throws(
@@ -110,19 +109,17 @@ test('metadata depth limits cover notebook, cell and output metadata', () => {
       (error) => error.code === 'bad-request' && error.status === 400 && /maximum depth/.test(error.message),
     )
   }
-  const valid = emptyNotebook()
-  valid.metadata = nestedMetadata(METADATA_DEPTH_LIMIT)
-  assert.doesNotThrow(() => serializeNotebook(valid))
-})
+  const validDepth = emptyNotebook()
+  validDepth.metadata = nestedMetadata(METADATA_DEPTH_LIMIT)
+  assert.doesNotThrow(() => serializeNotebook(validDepth))
 
-test('metadata node limit rejects broad trees before pretty serialization', () => {
-  const valid = emptyNotebook()
-  valid.metadata = { values: new Array(METADATA_NODE_LIMIT - 2).fill(0) }
-  assert.doesNotThrow(() => serializeNotebook(valid))
-  const invalid = emptyNotebook()
-  invalid.metadata = { values: new Array(METADATA_NODE_LIMIT - 1).fill(0) }
+  const validNodes = emptyNotebook()
+  validNodes.metadata = { values: new Array(METADATA_NODE_LIMIT - 2).fill(0) }
+  assert.doesNotThrow(() => serializeNotebook(validNodes))
+  const tooManyNodes = emptyNotebook()
+  tooManyNodes.metadata = { values: new Array(METADATA_NODE_LIMIT - 1).fill(0) }
   assert.throws(
-    () => serializeNotebook(invalid),
+    () => serializeNotebook(tooManyNodes),
     (error) => error.code === 'bad-request' && error.status === 400 && /maximum node count/.test(error.message),
   )
 })

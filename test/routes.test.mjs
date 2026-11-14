@@ -260,7 +260,7 @@ test('kernels requires a known session', async () => {
   assert.equal(json.error.code, 'workspace-unknown')
 })
 
-test('config reads and updates the kernel idle timeout', async () => {
+test('config reads, updates and validates the kernel idle timeout', async () => {
   const kernels = makeKernels()
   const initial = await invoke(makeCtx(), kernels, makeReq({ url: '/ipynb/config' }))
   assert.equal(initial.state.status, 200)
@@ -274,27 +274,15 @@ test('config reads and updates the kernel idle timeout', async () => {
   assert.equal(updated.state.status, 200)
   assert.deepEqual(updated.json.value, { idleMinutes: 5 })
   assert.deepEqual(kernels.calls.filter((call) => 'config' in call), [{ config: 5 }])
-})
 
-test('config rejects an invalid idle timeout', async () => {
-  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({
-    method: 'POST',
-    url: '/ipynb/config',
-    body: { idleMinutes: -1 },
-  }))
-  assert.equal(state.status, 400)
-  assert.equal(json.error.code, 'bad-request')
-})
-
-test('config requires a numeric idle timeout', async () => {
-  for (const body of [{}, { idleMinutes: '5' }, { idleMinutes: null }]) {
+  for (const body of [{ idleMinutes: -1 }, {}, { idleMinutes: '5' }, { idleMinutes: null }]) {
     const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({
       method: 'POST',
       url: '/ipynb/config',
       body,
     }))
-    assert.equal(state.status, 400)
-    assert.equal(json.error.code, 'bad-request')
+    assert.equal(state.status, 400, `${JSON.stringify(body)} must be rejected`)
+    assert.equal(json.error.code, 'bad-request', `${JSON.stringify(body)} must be a bad request`)
   }
 })
 
