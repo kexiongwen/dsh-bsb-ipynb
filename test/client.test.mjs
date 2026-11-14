@@ -517,9 +517,20 @@ test('markdown escapes code, URLs and image attributes exactly once', async () =
     renderMarkdownWithImages('![a&b](img/a&b.png)', (source) => '/sidebar/file?src=' + encodeURIComponent(source)),
     '<p><img src="/sidebar/file?src=img%2Fa%26b.png" alt="a&amp;b" loading="lazy"></p>',
   )
+
+  for (const payload of [
+    '[x](https://example.test/"><img src=x onerror=alert(1)>)',
+    '![x" onerror="alert(1)](img.png)',
+    '[x" onmouseover="alert(1)](https://example.test)',
+  ]) {
+    const html = renderMarkdown(payload)
+    assert.doesNotMatch(html, /\son(?:error|mouseover|load|click)="/i, payload)
+    assert.doesNotMatch(html, /<img src=x/i, payload)
+    assert.doesNotMatch(html, /<script/i, payload)
+  }
 })
 
-test('inline emphasis never rewrites link attributes or image names', async () => {
+test('inline emphasis applies to text without rewriting link attributes or image names', async () => {
   const { exports } = await loadClient()
   const { renderMarkdown, renderMarkdownWithImages } = exports.__test
   assert.equal(
@@ -542,11 +553,7 @@ test('inline emphasis never rewrites link attributes or image names', async () =
     renderMarkdownWithImages('![alt_a_b](img/my_image_v2.png)', (source) => '/sidebar/file?path=' + encodeURIComponent(source)),
     '<p><img src="/sidebar/file?path=img%2Fmy_image_v2.png" alt="alt_a_b" loading="lazy"></p>',
   )
-})
 
-test('inline emphasis still applies to plain text and code spans stay literal', async () => {
-  const { exports } = await loadClient()
-  const { renderMarkdown } = exports.__test
   assert.equal(
     renderMarkdown('**bold** and __strong__ and ~~gone~~'),
     '<p><strong>bold</strong> and <strong>strong</strong> and <del>gone</del></p>',
@@ -564,22 +571,6 @@ test('inline emphasis still applies to plain text and code spans stay literal', 
   )
 })
 
-test('hostile markup cannot add attributes to generated links or images', async () => {
-  const { exports } = await loadClient()
-  const { renderMarkdown } = exports.__test
-  const payloads = [
-    '[x](https://example.test/"><img src=x onerror=alert(1)>)',
-    '![x" onerror="alert(1)](img.png)',
-    '[x" onmouseover="alert(1)](https://example.test)',
-  ]
-  for (const payload of payloads) {
-    const html = renderMarkdown(payload)
-    assert.doesNotMatch(html, /\son(?:error|mouseover|load|click)="/i, payload)
-    assert.doesNotMatch(html, /<img src=x/i, payload)
-    assert.doesNotMatch(html, /<script/i, payload)
-  }
-})
-
 test('markdown refuses javascript links and keeps relative images', async () => {
   const { exports } = await loadClient()
   const { renderMarkdown, sanitizeUrl } = exports.__test
@@ -594,16 +585,11 @@ test('markdown refuses javascript links and keeps relative images', async () => 
     assert.equal(sanitizeUrl(target), null, `control characters must not bypass the scheme check: ${JSON.stringify(target)}`)
   }
   assert.equal(sanitizeUrl('  https://example.com/a\n'), 'https://example.com/a')
-})
-
-test('protocol-relative images are refused while links keep working', async () => {
-  const { exports } = await loadClient()
-  const { sanitizeUrl, renderMarkdown } = exports.__test
   assert.equal(sanitizeUrl('//evil.example/pixel.png', { image: true }), null)
   assert.equal(sanitizeUrl('//example.com/page'), '//example.com/page')
-  const html = renderMarkdown('![pixel](//evil.example/pixel.png)')
-  assert.doesNotMatch(html, /<img/)
-  assert.match(html, /pixel/)
+  const protocolHtml = renderMarkdown('![pixel](//evil.example/pixel.png)')
+  assert.doesNotMatch(protocolHtml, /<img/)
+  assert.match(protocolHtml, /pixel/)
 })
 
 test('markdown image resolver rewrites local images and drops missing ones', async () => {
@@ -632,9 +618,22 @@ test('markdown image resolver rewrites local images and drops missing ones', asy
   }
 })
 
-test('html sanitizer degrades to escaped text when DOM cleaning throws', async () => {
+test('html sanitizer fallback escapes markup without resolving images', async () => {
   const { exports } = await loadClient()
   const { sanitizeHtml } = exports.__test
+  assert.equal(typeof globalThis.DOMParser, 'undefined', 'this environment has no DOMParser')
+  const resolved = []
+  const html = sanitizeHtml('<img src="attachment:plot.png"><b>x</b><script>alert(1)</script>', {
+    resolveImage(src) {
+      resolved.push(src)
+      return 'http://host/file'
+    },
+  })
+  assert.deepEqual(resolved, [], 'there is no DOM to rewrite in the fallback path')
+  assert.doesNotMatch(html, /<img|<script/)
+  assert.match(html, /&lt;img src=&quot;attachment:plot\.png&quot;&gt;/)
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/, 'the no-DOM fallback escapes ordinary markup in full')
+
   const original = globalThis.DOMParser
   try {
     globalThis.DOMParser = class {
@@ -655,7 +654,7 @@ test('html sanitizer degrades to escaped text when DOM cleaning throws', async (
   }
 })
 
-test('html sanitizer resolves attachment and local images through the image resolver', async () => {
+test('html sanitizer resolves safe images and degrades missing or failing ones', async () => {
   const restore = installDomParser()
   try {
     const { exports } = await loadClient()
@@ -689,6 +688,16 @@ test('html sanitizer resolves attachment and local images through the image reso
         '<img src="http://host/sidebar/file?path=C%3A%5Cpics%5Ca.png" alt="win">' +
         '<img src="http://host/sidebar/file?path=%5C%5Cserver%5Cshare%5Ca.png" alt="unc"></p>',
     )
+
+    const missing = sanitizeHtml('<p>before <img src="attachment:missing.png" alt="gone"> after</p>', { resolveImage: () => null })
+    assert.equal(missing, '<p>before <span class="dsh-bsb-ipynb-missing-image">gone</span> after</p>')
+    const thrown = sanitizeHtml('<p><img src="attachment:bad.png" alt="bad">x</p>', {
+      resolveImage() {
+        throw new Error('boom')
+      },
+    })
+    assert.equal(thrown, '<p><span class="dsh-bsb-ipynb-missing-image">bad</span>x</p>',
+      'a failing resolver only degrades its image, not the whole output')
   } finally {
     restore()
   }
@@ -724,42 +733,6 @@ test('html sanitizer keeps the URL policy, strips disallowed attributes and only
   } finally {
     restore()
   }
-})
-
-test('html sanitizer degrades unresolvable images to the missing-image marker', async () => {
-  const restore = installDomParser()
-  try {
-    const { exports } = await loadClient()
-    const { sanitizeHtml } = exports.__test
-    const html = sanitizeHtml('<p>before <img src="attachment:missing.png" alt="gone"> after</p>', { resolveImage: () => null })
-    assert.equal(html, '<p>before <span class="dsh-bsb-ipynb-missing-image">gone</span> after</p>')
-    const thrown = sanitizeHtml('<p><img src="attachment:bad.png" alt="bad">x</p>', {
-      resolveImage() {
-        throw new Error('boom')
-      },
-    })
-    assert.equal(thrown, '<p><span class="dsh-bsb-ipynb-missing-image">bad</span>x</p>',
-      'a failing resolver only degrades its image, not the whole output')
-  } finally {
-    restore()
-  }
-})
-
-test('html sanitizer fallback ignores the image resolver and still escapes markup', async () => {
-  const { exports } = await loadClient()
-  const { sanitizeHtml } = exports.__test
-  assert.equal(typeof globalThis.DOMParser, 'undefined', 'this environment has no DOMParser')
-  const resolved = []
-  const html = sanitizeHtml('<img src="attachment:plot.png"><b>x</b><script>alert(1)</script>', {
-    resolveImage(src) {
-      resolved.push(src)
-      return 'http://host/file'
-    },
-  })
-  assert.deepEqual(resolved, [], 'there is no DOM to rewrite in the fallback path')
-  assert.doesNotMatch(html, /<img|<script/)
-  assert.match(html, /&lt;img src=&quot;attachment:plot\.png&quot;&gt;/)
-  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/, 'the no-DOM fallback escapes ordinary markup in full')
 })
 
 test('html output images are rewritten before rendering', async () => {
@@ -1328,8 +1301,8 @@ async function loadOutputReducer() {
   return api
 }
 
-test('output byte accounting includes JSON structure, escaping, metadata and error details', async () => {
-  const { outputsSize } = await loadOutputReducer()
+test('output byte accounting and stream merging match serialized UTF-8 bytes', async () => {
+  const { reduceOutputs, outputsSize } = await loadOutputReducer()
   const outputs = freezeOutputFixture([
     { output_type: 'stream', name: 'stdout', text: 'ASCII 中文 😀 " \\ \n\r\t\b\f\u0000 \ud800 \udc00' },
     {
@@ -1349,11 +1322,8 @@ test('output byte accounting includes JSON structure, escaping, metadata and err
   }
   assertOutputBytes(outputsSize, outputs)
   assertOutputBytes(outputsSize, outputs, 're-reading a frozen snapshot must not increment its accounting')
-})
 
-test('stream merging matches UTF-8 JSON bytes for Unicode, escaping and split surrogate pairs', async () => {
-  const { reduceOutputs, outputsSize } = await loadOutputReducer()
-  const cases = [
+  for (const chunks of [
     ['ASCII', ' text'],
     ['中', '文', '😀'],
     ['"', '\\', '\n', '\r\t\b\f\u0000\u001f'],
@@ -1363,23 +1333,19 @@ test('stream merging matches UTF-8 JSON bytes for Unicode, escaping and split su
     ['\udc00', '\ud800'],
     ['\ud83d', '\ude00', '\ud83d', '\ude00'],
     ['"\ud83d', '\ude00\\', '\ud800'],
-  ]
-  for (const chunks of cases) {
-    let outputs = []
+  ]) {
+    let merged = []
     let text = ''
     for (const chunk of chunks) {
       text += chunk
-      outputs = reduceOutputs(outputs, { type: 'stream', name: 'stdout', text: chunk })
-      assert.equal(outputs.length, 1)
-      assert.equal(outputs[0].text, text)
-      assertOutputBytes(outputsSize, outputs, 'bytes after chunk ' + JSON.stringify(chunk))
+      merged = reduceOutputs(merged, { type: 'stream', name: 'stdout', text: chunk })
+      assert.equal(merged.length, 1)
+      assert.equal(merged[0].text, text)
+      assertOutputBytes(outputsSize, merged, 'bytes after chunk ' + JSON.stringify(chunk))
     }
   }
-})
 
-test('only adjacent streams with the same name merge and every event keeps exact accounting', async () => {
-  const { reduceOutputs, outputsSize } = await loadOutputReducer()
-  let outputs = []
+  let adjacent = []
   for (const event of [
     { type: 'stream', name: 'stdout', text: 'one' },
     { type: 'stream', name: 'stdout', text: '中文' },
@@ -1387,28 +1353,28 @@ test('only adjacent streams with the same name merge and every event keeps exact
     { type: 'stream', name: 'stdout', text: 'three' },
     { type: 'stream', name: 'stdout', text: '😀' },
   ]) {
-    outputs = reduceOutputs(outputs, event)
-    assertOutputBytes(outputsSize, outputs)
+    adjacent = reduceOutputs(adjacent, event)
+    assertOutputBytes(outputsSize, adjacent)
   }
-  assert.deepEqual(outputs.map(({ name, text }) => ({ name, text })), [
+  assert.deepEqual(adjacent.map(({ name, text }) => ({ name, text })), [
     { name: 'stdout', text: 'one中文' },
     { name: 'stderr', text: 'error\n' },
     { name: 'stdout', text: 'three😀' },
   ])
 })
 
-test('display updates account for every matching slot and subtract replaced data and metadata', async () => {
+test('display updates and reducer replay stay immutable and correctly charged', async () => {
   const { reduceOutputs, outputsSize } = await loadOutputReducer()
-  let outputs = []
+  let displays = []
   for (const event of [
     { type: 'display_data', display_id: 'shared', data: { 'text/plain': 'first' }, metadata: { old: 'large'.repeat(20) } },
     { type: 'display_data', display_id: 'other', data: { 'text/plain': 'untouched' }, metadata: { keep: true } },
     { type: 'execute_result', display_id: 'shared', execution_count: 7, data: { 'text/plain': 'second' }, metadata: { old: 'different' } },
   ]) {
-    outputs = reduceOutputs(outputs, event)
-    assertOutputBytes(outputsSize, outputs)
+    displays = reduceOutputs(displays, event)
+    assertOutputBytes(outputsSize, displays)
   }
-  const before = freezeOutputFixture(outputs)
+  const before = freezeOutputFixture(displays)
   const update = freezeOutputFixture({
     type: 'update_display_data', display_id: 'shared',
     data: { 'text/plain': '中文😀'.repeat(30), 'application/json': { quotes: '"\\\n', lone: '\ud800' } },
@@ -1432,10 +1398,7 @@ test('display updates account for every matching slot and subtract replaced data
   const unmatched = reduceOutputs(shrunk, { type: 'update_display_data', display_id: 'missing', data: update.data, metadata: update.metadata })
   assert.deepEqual(unmatched, shrunk)
   assertOutputBytes(outputsSize, unmatched, 'unknown display IDs do not consume retained-output budget')
-})
 
-test('replaying an output reducer never mutates the input or accumulates charges', async () => {
-  const { reduceOutputs, outputsSize } = await loadOutputReducer()
   const initial = freezeOutputFixture([{ output_type: 'stream', name: 'stdout', text: 'prefix\ud83d' }])
   const original = JSON.stringify(initial)
   for (const event of [
