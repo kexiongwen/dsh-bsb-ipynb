@@ -353,6 +353,56 @@ test('Content-Type must be JSON: parameters are accepted, look-alike media types
   }
 })
 
+test('read, save, execute and controls share the linked worktree root', async (t) => {
+  const root = await tempDir(t, 'dsh-bsb-ipynb-worktree-routes-')
+  const main = path.join(root, 'main')
+  const linked = path.join(root, 'linked')
+  await mkdir(main)
+  await mkdir(linked)
+  await writeFile(path.join(linked, 'demo.ipynb'), serializeNotebook(emptyNotebook()))
+  const linkedReal = await realpath(linked)
+  const target = path.join(linkedReal, 'demo.ipynb')
+  const previous = process.env.DSH_SIDEBAR_WORKTREE_ROOT
+  process.env.DSH_SIDEBAR_WORKTREE_ROOT = linked
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_SIDEBAR_WORKTREE_ROOT
+    else process.env.DSH_SIDEBAR_WORKTREE_ROOT = previous
+  })
+  const ctx = makeCtx({ cwd: main })
+  const kernels = makeKernels()
+
+  const read = await invoke(ctx, kernels, makeReq({
+    method: 'POST', url: '/ipynb/read', body: { sessionId: 's1', path: 'demo.ipynb' },
+  }))
+  assert.equal(read.state.status, 200)
+  assert.equal(read.json.value.status, 'ok')
+
+  const document = emptyNotebook()
+  document.cells[0].source = 'print("linked")'
+  const saved = await invoke(ctx, kernels, makeReq({
+    method: 'POST', url: '/ipynb/save',
+    body: { sessionId: 's1', path: 'demo.ipynb', notebook: document, baseVersion: read.json.value.version },
+  }))
+  assert.equal(saved.state.status, 200)
+  const onDisk = JSON.parse(await readFile(target, 'utf8'))
+  assert.equal(onDisk.cells[0].source.join(''), 'print("linked")')
+
+  const executed = await invoke(ctx, kernels, makeReq({
+    method: 'POST', url: '/ipynb/execute',
+    body: { sessionId: 's1', path: 'demo.ipynb', cellId: 'cell-1', code: 'print("linked")' },
+  }))
+  assert.equal(executed.state.status, 200)
+  assert.ok(kernels.calls.some((call) => call.target === target), 'execution starts the kernel on the linked target')
+
+  const status = await invoke(ctx, kernels, makeReq({ url: '/ipynb/status?sessionId=s1&path=demo.ipynb' }))
+  assert.equal(status.state.status, 200)
+  const shutdown = await invoke(ctx, kernels, makeReq({
+    method: 'POST', url: '/ipynb/shutdown', body: { sessionId: 's1', path: 'demo.ipynb' },
+  }))
+  assert.equal(shutdown.state.status, 200)
+  assert.ok(kernels.calls.some((call) => call.shutdown && call.target === target))
+})
+
 test('read rejects paths outside the session workspace', async (t) => {
   const root = await tempDir(t, 'dsh-bsb-ipynb-routes-')
   const dir = path.join(root, 'session')

@@ -14,6 +14,13 @@ This product includes software derived from:
     algorithms were reimplemented in plain JavaScript after studying
     the corresponding MIT-licensed client modules of that project.
 
+  dsh-better-sidebar
+  https://github.com/omdsh-dev/DSH-better-sidebar
+  MIT License, Copyright (c) 2026 dsh-external
+
+  - lib/active-worktree.js — linked-worktree selection was reimplemented
+    after studying the session-event and Git-identity algorithm of that project.
+
 Design reference (no code copied):
 
   kikulmj/dsh-jupyter — Apache License 2.0
@@ -26,6 +33,7 @@ Upstream license text:
   The MIT License (MIT)
 
   Copyright (c) dong-victor
+  Copyright (c) 2026 dsh-external
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal

@@ -294,7 +294,12 @@ async function main() {
   const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-e2e-'))
   const profileDir = path.join(home, 'profiles', PROFILE)
   const workspaceDir = path.join(home, 'workspace')
-  const notebookPath = path.join(workspaceDir, notebookName)
+  // Optional local compatibility lane: both Better Sidebar and this plugin
+  // must follow the host-selected root while the workspace registry retains
+  // the original directory. This does not replace the normal E2E lane.
+  const linkedRoot = process.env.DSH_IPYNB_E2E_WORKTREE === '1'
+  const contentDir = linkedRoot ? path.join(home, 'linked-workspace') : workspaceDir
+  const notebookPath = path.join(contentDir, notebookName)
   let server = null
   let browser = null
   let page = null
@@ -343,6 +348,7 @@ async function main() {
     // workspace. Seed one isolated registry entry instead so the file tree is
     // rooted inside this temporary home.
     await mkdir(workspaceDir, { recursive: true })
+    if (linkedRoot) await mkdir(contentDir, { recursive: true })
     const workspaceId = randomUUID()
     const workspacePath = await realpath(workspaceDir)
     const now = new Date().toISOString()
@@ -369,13 +375,13 @@ async function main() {
       },
     }, null, 1), 'utf8')
     await writeFile(notebookPath, JSON.stringify(notebookFor(marker), null, 1), 'utf8')
-    await writeFile(path.join(workspaceDir, 'e2e-image.png'), Buffer.from(
+    await writeFile(path.join(contentDir, 'e2e-image.png'), Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
       'base64',
     ))
     // A visible subdirectory gives the file-action lane a directory row to
     // right-click; the action creates its notebook inside it.
-    const notesDir = path.join(workspaceDir, 'notes')
+    const notesDir = path.join(contentDir, 'notes')
     await mkdir(notesDir, { recursive: true })
     await writeFile(path.join(notesDir, 'readme.md'), '# notes\n', 'utf8')
     log(`opening ${notebookName} in the isolated e2e-workspace`)
@@ -383,7 +389,12 @@ async function main() {
     log('booting dsh web')
     server = spawn(cli.command, [...cli.prefix, '--profile', PROFILE, '--no-open', '--port', '0'], {
       cwd: ROOT,
-      env: { ...process.env, ...cli.env, DSH_HOME: home },
+      env: {
+        ...process.env,
+        ...cli.env,
+        DSH_HOME: home,
+        ...(linkedRoot ? { DSH_SIDEBAR_WORKTREE_ROOT: contentDir } : {}),
+      },
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     })

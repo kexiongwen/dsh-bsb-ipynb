@@ -38,7 +38,7 @@
 - **文件/标签页操作**：在 Better Sidebar 文件树中右键目录可新建 notebook；打开的 notebook 可在编辑器头部执行全部运行、中断与重启。
 - **内核页面**：Better Sidebar 的独立标签页列出当前工作区中的运行中内核，显示状态、解释器、空闲时间，并提供打开/停止/重启与新建 notebook 操作。
 - **与 DSH 集成**：所有颜色跟随 DSH 主题——状态色、banner、链接与 Python 语法高亮消费 `--dsw-alias-*` 与 Shiki 变量，单元格/编辑器/输出字号跟随 DSH 的正文与代码字号设置（暗色即宿主按「主题设置 × 系统配色」解析出的调色板，插件侧不做主题侦测）；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
-- **访问边界**：路径限制在会话工作区内（realpath + 相对路径校验）；HTTP 路由复用 DSH 的 admission fence（请求准入校验）；HTML 输出经 DOMParser 白名单清洗，`<script>` 不会执行。
+- **访问边界**：路径限制在 Better Sidebar 的会话活动根内，包括由宿主 session 事件证明的 linked git worktree（realpath + 相对路径校验）；HTTP 路由复用 DSH 的 admission fence（请求准入校验）；HTML 输出经 DOMParser 白名单清洗，`<script>` 不会执行。
 
 ## 🚀 快速开始
 
@@ -94,7 +94,8 @@ dsh-bsb-ipynb/
 │   ├── routes.js     # /ipynb/* HTTP API
 │   ├── kernel.js     # 每个 notebook 一个 bridge 进程、事件队列与空闲回收
 │   ├── notebook.js   # nbformat 4 解析/规范化/序列化、sha256 版本、原子写入
-│   ├── gate.js       # 会话工作区解析与路径逃逸防护
+│   ├── gate.js       # 活动工作区解析与路径逃逸防护
+│   ├── active-worktree.js # 基于宿主证据的 linked worktree 选择
 │   ├── env.js        # Python 解释器发现与探测
 │   └── json.js       # JSON envelope、请求体读取、ApiError
 ├── python/bridge.py  # jupyter_client + ipykernel 的 JSONL 内核桥
@@ -173,7 +174,6 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 - 中断后约 3 秒内核仍未响应会被强制重启，所有变量与内核状态都会清空。
 - 执行结果由客户端回写并在保存时落盘；服务端不会在后台追加输出。
 - 暂无「新建 notebook」向导：可在文件树中新建空 `.ipynb`，或直接打开已有文件。
-- 工作区边界基于会话 cwd 校验；会话活动根为 linked git worktree 时可能返回 403（暂不支持）。
 - **路径错误信息侧信道**：工作区外已存在且可访问的目标通常返回 403，不存在或不可访问的目标返回 404（可能附 reason）。已通过准入校验的同用户客户端可借此探测宿主路径的存在性/可访问性；该行为不会放开工作区外的读取或写入。
 - **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409），被独占锁定的文件读取返回 `read-blocked`（409）。
 - 输出特别大时会拖慢浏览器渲染，建议及时清空输出或分段执行。

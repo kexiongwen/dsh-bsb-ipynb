@@ -38,7 +38,7 @@
 - **File and tab actions** — right-click a directory in the Better Sidebar tree to create a new notebook, and drive an open notebook from its editor header (Run all, Interrupt, Restart).
 - **Kernels page** — a Better Sidebar tab lists the live kernels in the current workspace with state, interpreter, idle time, Open/Stop/Restart controls and a New notebook action.
 - **DSH integration** — every colour follows the DSH theme: state colours, banners, links and Python syntax highlighting consume `--dsw-alias-*` and Shiki variables, and cell/editor/output type follows the DSH text and code font settings (dark mode is the host palette for the theme setting × OS scheme, with no plugin-side theme detection). UI strings are registered under the `dsh-bsb-ipynb` locale namespace and follow DSH's Chinese/English language preference.
-- **Contained access** — paths are confined to the session workspace (realpath + relative checks); HTTP routes reuse DSH's admission fence; HTML output is sanitized with a DOMParser allow-list, and `<script>` never runs.
+- **Contained access** — paths are confined to Better Sidebar's active session root, including a linked git worktree evidenced by host-side session events (realpath + relative checks); HTTP routes reuse DSH's admission fence; HTML output is sanitized with a DOMParser allow-list, and `<script>` never runs.
 
 ## 🚀 Quick Start
 
@@ -94,7 +94,8 @@ dsh-bsb-ipynb/
 │   ├── routes.js     # /ipynb/* HTTP API
 │   ├── kernel.js     # one bridge process per notebook, event queue, idle sweep
 │   ├── notebook.js   # nbformat 4 parse/normalize/serialize, sha256 versions, atomic writes
-│   ├── gate.js       # session workspace resolution and path escape protection
+│   ├── gate.js       # active workspace resolution and path escape protection
+│   ├── active-worktree.js # host-evidenced linked worktree selection
 │   ├── env.js        # Python interpreter discovery and probing
 │   └── json.js       # JSON envelope, request body reader, ApiError
 ├── python/bridge.py  # JSONL kernel bridge over jupyter_client + ipykernel
@@ -173,7 +174,6 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 - If the kernel is still unresponsive about 3 s after an interrupt, it is force-restarted and all variables and kernel state are lost.
 - Results are written back by the client and persisted on save; the server never appends output in the background.
 - No "new notebook" wizard yet: create an empty `.ipynb` in the file tree or open an existing file.
-- Workspace containment uses the session cwd; when the active root is a linked git worktree, requests may return 403 (not supported yet).
 - **Path-error side channel** — for a path outside the session workspace, an existing and accessible target generally returns 403, while a missing or inaccessible target returns 404 (possibly with a reason). An already-admitted same-user client can use this distinction to probe host path existence or accessibility; it does not allow reading or writing outside the workspace.
 - **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409) and locked files fail reads with `read-blocked` (409).
 - Very large outputs make browser rendering slow; clear outputs or run in smaller chunks.
