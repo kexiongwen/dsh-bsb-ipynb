@@ -104,6 +104,15 @@ window.__ModuleLoader__.load({
         createNotebookFailed: 'Could not create the notebook.',
         notebookNotOpen: 'Open the notebook in the editor first.',
         notebookActionFailed: 'The notebook action failed.',
+        kernelsTab: 'Kernels',
+        kernelsTabDesc: 'Running notebooks and their kernels',
+        refresh: 'Refresh',
+        openNotebook: 'Open',
+        stopKernel: 'Stop',
+        noKernels: 'No kernels are running in this workspace.',
+        kernelsError: 'Could not load the kernels.',
+        starting: 'starting',
+        idleFor: 'idle {time}',
       },
       zh: {
         runAll: '全部运行',
@@ -185,6 +194,15 @@ window.__ModuleLoader__.load({
         createNotebookFailed: '无法创建 Notebook。',
         notebookNotOpen: '请先在编辑器中打开该 Notebook。',
         notebookActionFailed: 'Notebook 操作失败。',
+        kernelsTab: '内核',
+        kernelsTabDesc: '运行中的 Notebook 与内核',
+        refresh: '刷新',
+        openNotebook: '打开',
+        stopKernel: '停止',
+        noKernels: '当前工作区没有运行中的内核。',
+        kernelsError: '无法加载内核列表。',
+        starting: '启动中',
+        idleFor: '空闲 {time}',
       },
     }
 
@@ -3350,6 +3368,185 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function formatKernelIdle(idleMs) {
+      const minutes = Math.max(0, Math.floor(Number(idleMs || 0) / 60_000))
+      if (minutes < 1) return '<1m'
+      if (minutes < 60) return minutes + 'm'
+      const hours = Math.floor(minutes / 60)
+      const rest = minutes % 60
+      return rest ? hours + 'h ' + rest + 'm' : hours + 'h'
+    }
+
+    function kernelStateLabel(kernel) {
+      if (kernel.busy || kernel.executionState === 'busy') return t('busy')
+      if (kernel.executionState === 'starting') return t('starting')
+      if (kernel.executionState === 'stopping') return t('stopping')
+      if (kernel.ready || kernel.running) return t('idle')
+      return t('off')
+    }
+
+    function kernelDotClass(kernel) {
+      if (kernel.busy || kernel.executionState === 'busy') return 'is-busy'
+      if (kernel.executionState === 'starting') return 'is-starting'
+      if (kernel.executionState === 'stopping') return 'is-stopping'
+      if (kernel.ready || kernel.running) return 'is-ready'
+      return 'is-idle'
+    }
+
+    // A sidebar page listing the live kernels for this Session's workspace.
+    // The page never talks to a kernel directly: it uses the same /ipynb
+    // control routes as the notebook toolbar.
+    function KernelsPage(props) {
+      const { ctx, scope, visible } = props
+      const sessionId = scope && scope.sessionId
+      const [kernels, setKernels] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState('')
+      const [pending, setPending] = useState('')
+
+      const load = useCallback(async () => {
+        if (!sessionId) {
+          setLoading(false)
+          return
+        }
+        try {
+          const value = await getJson(ctx, 'kernels', { sessionId })
+          setKernels(Array.isArray(value.kernels) ? value.kernels : [])
+          setError('')
+        } catch (loadError) {
+          setError(loadError && loadError.message ? loadError.message : t('kernelsError'))
+        } finally {
+          setLoading(false)
+        }
+      }, [ctx, sessionId])
+
+      useEffect(() => {
+        if (!sessionId) {
+          setLoading(false)
+          return undefined
+        }
+        let cancelled = false
+        const poll = () => {
+          if (!cancelled) void load()
+        }
+        poll()
+        if (visible === false) return () => { cancelled = true }
+        const timer = setInterval(poll, 5000)
+        return () => {
+          cancelled = true
+          clearInterval(timer)
+        }
+      }, [load, sessionId, visible])
+
+      const act = async (kind, kernel) => {
+        const key = kind + ':' + kernel.path
+        setPending(key)
+        setError('')
+        try {
+          const body = { sessionId, path: kernel.path }
+          if (kind === 'restart' && typeof kernel.python === 'string' && kernel.python) body.python = kernel.python
+          await postJson(ctx, kind === 'stop' ? 'shutdown' : 'restart', body)
+          await load()
+        } catch (actionError) {
+          setError(actionError && actionError.message ? actionError.message : t('notebookActionFailed'))
+        } finally {
+          setPending('')
+        }
+      }
+
+      const createNotebook = async () => {
+        if (!sessionId) return
+        setPending('create')
+        setError('')
+        try {
+          const value = await postJson(ctx, 'create', { sessionId, path: scope.cwd || '.' })
+          ctx.betterSidebar.openFile(scope, value.path, value.name)
+          await load()
+        } catch (createError) {
+          setError(createError && createError.message ? createError.message : t('createNotebookFailed'))
+        } finally {
+          setPending('')
+        }
+      }
+
+      const openKernel = (kernel) => {
+        try {
+          ctx.betterSidebar.openFile(scope, kernel.path, kernel.name)
+        } catch (openError) {
+          setError(openError && openError.message ? openError.message : t('notebookActionFailed'))
+        }
+      }
+
+      return h(
+        'div',
+        { className: 'dsh-bsb-ipynb-kernels' },
+        h('div', { className: 'dsh-bsb-ipynb-kernels-header' },
+          h('span', { className: 'dsh-bsb-ipynb-kernels-title' }, t('kernelsTab')),
+          h('span', { className: 'dsh-bsb-ipynb-kernels-count' }, String(kernels.length)),
+          h('div', { className: 'dsh-bsb-ipynb-kernels-actions' },
+            h('button', {
+              type: 'button',
+              className: 'dsh-bsb-ipynb-button',
+              disabled: pending !== '' || !sessionId,
+              onClick: () => { void load() },
+            }, t('refresh')),
+            h('button', {
+              type: 'button',
+              className: 'dsh-bsb-ipynb-button',
+              disabled: pending !== '' || !sessionId,
+              onClick: () => { void createNotebook() },
+            }, t('newNotebook')),
+          ),
+        ),
+        error ? h('div', { className: 'dsh-bsb-ipynb-kernels-error', role: 'alert' }, error) : null,
+        loading
+          ? h('div', { className: 'dsh-bsb-ipynb-kernels-empty' }, t('settingsLoading'))
+          : kernels.length === 0
+            ? h('div', { className: 'dsh-bsb-ipynb-kernels-empty' }, t('noKernels'))
+            : h('div', { className: 'dsh-bsb-ipynb-kernels-list' },
+                ...kernels.map((kernel) => h('div', {
+                  className: 'dsh-bsb-ipynb-kernel',
+                  key: kernel.path,
+                  title: kernel.path,
+                },
+                  h('span', { className: 'dsh-bsb-ipynb-kernel-dot ' + kernelDotClass(kernel) }),
+                  h('div', { className: 'dsh-bsb-ipynb-kernel-main' },
+                    h('div', { className: 'dsh-bsb-ipynb-kernel-name' }, kernel.name || kernel.path),
+                    h('div', { className: 'dsh-bsb-ipynb-kernel-meta' },
+                      kernelStateLabel(kernel),
+                      ' · ',
+                      t('idleFor').replace('{time}', formatKernelIdle(kernel.idleMs)),
+                      kernel.python ? ' · ' + kernel.python : '',
+                    ),
+                    kernel.lastError
+                      ? h('div', { className: 'dsh-bsb-ipynb-kernel-error' }, String(kernel.lastError))
+                      : null,
+                  ),
+                  h('div', { className: 'dsh-bsb-ipynb-kernel-actions' },
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-bsb-ipynb-button',
+                      disabled: pending !== '',
+                      onClick: () => openKernel(kernel),
+                    }, t('openNotebook')),
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-bsb-ipynb-button',
+                      disabled: pending !== '' || kernel.executionState === 'busy',
+                      onClick: () => { void act('stop', kernel) },
+                    }, t('stopKernel')),
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-bsb-ipynb-button',
+                      disabled: pending !== '',
+                      onClick: () => { void act('restart', kernel) },
+                    }, t('restart')),
+                  ),
+                )),
+              ),
+      )
+    }
+
     const STYLES = `
 .dsh-bsb-ipynb-root {
   /* One theme layer: every colour and type size resolves from the host theme.
@@ -3651,6 +3848,74 @@ window.__ModuleLoader__.load({
 .dsh-bsb-ipynb-settings-error { color: var(--dsw-alias-state-error-primary, #cf222e); overflow-wrap: anywhere; }
 .dsh-bsb-ipynb-settings-actions { display: flex; align-items: center; gap: 6px; }
 .dsh-bsb-ipynb-settings-saved { color: var(--dsw-alias-state-success-primary, #2ea043); }
+/* Sidebar Kernels page; it renders outside the notebook root. */
+.dsh-bsb-ipynb-kernels {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+}
+.dsh-bsb-ipynb-kernels-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.28));
+}
+.dsh-bsb-ipynb-kernels-title { font-weight: 600; }
+.dsh-bsb-ipynb-kernels-count {
+  color: var(--dsw-alias-label-tertiary, rgba(127, 127, 127, 0.55));
+  font-variant-numeric: tabular-nums;
+}
+.dsh-bsb-ipynb-kernels-actions { display: flex; gap: 6px; margin-left: auto; }
+.dsh-bsb-ipynb-kernels-list { flex: 1; min-height: 0; overflow-y: auto; }
+.dsh-bsb-ipynb-kernel {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.28));
+}
+.dsh-bsb-ipynb-kernel-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--dsw-alias-label-tertiary, rgba(127, 127, 127, 0.55));
+}
+.dsh-bsb-ipynb-kernel-dot.is-ready { background: var(--dsw-alias-state-success-primary, #2ea043); }
+.dsh-bsb-ipynb-kernel-dot.is-busy { background: var(--dsw-alias-state-warn-primary, #d29922); }
+.dsh-bsb-ipynb-kernel-dot.is-starting { background: var(--dsw-alias-state-business-primary, #4c8dff); }
+.dsh-bsb-ipynb-kernel-dot.is-stopping { background: var(--dsw-alias-label-secondary, rgba(127, 127, 127, 0.95)); }
+.dsh-bsb-ipynb-kernel-main { flex: 1; min-width: 0; }
+.dsh-bsb-ipynb-kernel-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-bsb-ipynb-kernel-meta {
+  color: var(--dsw-alias-label-secondary, rgba(127, 127, 127, 0.95));
+  overflow-wrap: anywhere;
+  font-size: calc(11px + var(--dsh-content-font-delta-secondary, 0px));
+}
+.dsh-bsb-ipynb-kernel-error {
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+  overflow-wrap: anywhere;
+  font-size: calc(11px + var(--dsh-content-font-delta-secondary, 0px));
+  margin-top: 2px;
+}
+.dsh-bsb-ipynb-kernel-actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.dsh-bsb-ipynb-kernels-empty,
+.dsh-bsb-ipynb-kernels-error {
+  padding: 12px 10px;
+  color: var(--dsw-alias-label-tertiary, rgba(127, 127, 127, 0.55));
+}
+.dsh-bsb-ipynb-kernels-error { color: var(--dsw-alias-state-error-primary, #cf222e); }
 `
 
     /** Compare the stable `major.minor.patch` part of two service versions. */
@@ -3821,6 +4086,13 @@ window.__ModuleLoader__.load({
         }),
       )
       ctx.effect(() => registerNotebookActions(ctx))
+      ctx.effect(() => ctx.betterSidebar.registerTab({
+        id: 'dsh-bsb-ipynb:kernels',
+        title: () => t('kernelsTab'),
+        description: () => t('kernelsTabDesc'),
+        order: 200,
+        component: KernelsPage,
+      }))
     }
 
     const __test = {
@@ -3836,6 +4108,8 @@ window.__ModuleLoader__.load({
       SettingsPanel,
       notebookControls,
       notebookControlKey,
+      KernelsPage,
+      formatKernelIdle,
       isMacPlatform,
       shortcutText,
       bannerText,

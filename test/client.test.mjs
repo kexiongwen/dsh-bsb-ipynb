@@ -10,7 +10,7 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
     effect(effect) {
       return effect()
     },
-    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
+    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
       hostRouteUrl(path) {
         return 'http://127.0.0.1:61099/' + path
       },
@@ -54,6 +54,7 @@ test('the viewer settings panel renders without touching the host until saved', 
       registerFileViewer(descriptor) { viewers.push(descriptor); return () => {} },
       registerFileAction: () => () => {},
       registerTabAction: () => () => {},
+      registerTab: () => () => {},
     },
   }
   exports.apply(ctx)
@@ -86,6 +87,7 @@ test('the New notebook file action creates and opens a notebook', async () => {
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
       registerTabAction: () => () => {},
+      registerTab: () => () => {},
       registerFileAction(descriptor) { fileActions.push(descriptor); return () => {} },
       openFile(scope, filePath, title) { opened.push({ scope, path: filePath, title }) },
     },
@@ -143,6 +145,7 @@ test('notebook tab actions dispatch to live viewer controls', async () => {
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
       registerFileAction: () => () => {},
+      registerTab: () => () => {},
       registerTabAction(descriptor) { tabActions.push(descriptor); return () => {} },
     },
   }
@@ -183,6 +186,45 @@ test('notebook tab actions dispatch to live viewer controls', async () => {
   } finally {
     exports.__test.notebookControls.delete(key)
   }
+})
+
+test('registers the Kernels sidebar tab and formats idle durations', async () => {
+  const { exports } = await loadClient({
+    useState(initial) { return [initial, () => {}] },
+    useEffect() {},
+    useCallback(callback) { return callback },
+  })
+  const tabs = []
+  const ctx = {
+    effect(effect) { return effect() },
+    betterSidebar: {
+      version: '0.32.1',
+      features: ['hostRouteUrl', 'fileActions', 'tabActions'],
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer: () => () => {},
+      registerFileAction: () => () => {},
+      registerTabAction: () => () => {},
+      registerTab(descriptor) { tabs.push(descriptor); return () => {} },
+    },
+  }
+  exports.apply(ctx)
+  assert.equal(tabs.length, 1)
+  assert.equal(tabs[0].id, 'dsh-bsb-ipynb:kernels')
+  assert.equal(tabs[0].title(), exports.__test.translate('kernelsTab'))
+  assert.equal(tabs[0].description(), exports.__test.translate('kernelsTabDesc'))
+  assert.equal(tabs[0].component.name, 'KernelsPage')
+  assert.equal(exports.__test.formatKernelIdle(0), '<1m')
+  assert.equal(exports.__test.formatKernelIdle(60_000), '1m')
+  assert.equal(exports.__test.formatKernelIdle(3_600_000), '1h')
+  assert.equal(exports.__test.formatKernelIdle(3_900_000), '1h 5m')
+  const tree = exports.__test.KernelsPage({
+    ctx,
+    scope: { sessionId: 's1', cwd: '/workspace' },
+    visible: false,
+    store: {},
+  })
+  assert.equal(tree.type, 'div')
+  assert.match(tree.props.className, /dsh-bsb-ipynb-kernels/)
 })
 
 test('normalizes persisted plugin settings and reads them from the BSB store', async () => {
@@ -272,7 +314,7 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
     effect(effect) {
       return effect()
     },
-    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
+    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
     },
@@ -353,7 +395,7 @@ test('NotebookView subscribes to the locale registry for live language switches'
     effect(effect) {
       return effect()
     },
-    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
+    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
     },
@@ -423,7 +465,7 @@ test('load posts the session and path and converts host failures into an error p
         effect(effect) {
           return effect()
         },
-        betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
+        betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
           hostRouteUrl(path) {
             return 'http://host/' + path
           },
@@ -1188,7 +1230,7 @@ test('raw and source editors have keyboard focus rings without changing source f
   const { exports, styles } = await loadClient()
   exports.apply({
     effect: (effect) => effect(),
-    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
+    betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
     },
@@ -1580,7 +1622,7 @@ test('sanitizeUrl keeps Windows local image paths for the local resolver', async
 test('makeImageResolver resolves images next to a Windows absolute notebook path', async () => {
   const { exports } = await loadClient()
   const { makeImageResolver, normalizePosix } = exports.__test
-  const ctx = { betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'], hostRouteUrl: (route) => 'http://host/' + route } }
+  const ctx = { betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'], hostRouteUrl: (route) => 'http://host/' + route } }
   const scope = { sessionId: 's1', cwd: 'C:\\Users\\me\\notes' }
   const filePath = (resolved) => new URL(resolved).searchParams.get('path')
   const resolve = makeImageResolver(ctx, scope, 'C:\\Users\\me\\notes\\nb\\demo.ipynb', { attachments: {} })

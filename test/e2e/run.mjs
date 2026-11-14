@@ -412,6 +412,15 @@ async function main() {
     await page.locator('.dsh-bsb-ipynb-root').getByText(marker, { exact: false }).first().waitFor({ timeout: 90_000 })
     await waitForSavedOutput(notebookPath, marker)
 
+    log('opening the Kernels sidebar page')
+    await page.getByRole('button', { name: /^(New tab|新建标签页)$/ }).first().click()
+    const kernelsCard = page.getByRole('button', { name: /^(Kernels|内核)\b/ })
+    await kernelsCard.first().waitFor({ state: 'visible', timeout: 20_000 })
+    await kernelsCard.first().click()
+    const kernelsPage = page.locator('.dsh-bsb-ipynb-kernels')
+    await kernelsPage.waitFor({ state: 'visible', timeout: 20_000 })
+    await kernelsPage.getByText(notebookName, { exact: false }).first().waitFor({ timeout: 20_000 })
+
     log('creating a notebook from the directory row action')
     await openFilesPage(page)
     const notesRow = page.getByText('notes', { exact: true }).last()

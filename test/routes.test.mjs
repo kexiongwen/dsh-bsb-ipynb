@@ -117,6 +117,10 @@ function makeKernels() {
     entry,
     kernelCount: 1,
     idleMinutes: 30,
+    list(cwd) {
+      calls.push({ list: cwd })
+      return [{ path: path.join(cwd, 'demo.ipynb'), name: 'demo.ipynb', busy: false, ready: true, running: true, python: '/fake/python', executionState: 'idle', lastActivity: Date.now(), idleMs: 0, lastError: null }]
+    },
     config() {
       return { idleMinutes: this.idleMinutes }
     },
@@ -234,6 +238,26 @@ test('create rejects files and paths outside the workspace', async (t) => {
   }))
   assert.equal(outside.state.status, 403)
   assert.equal(outside.json.error.code, 'path-outside-root')
+})
+
+test('kernels lists the live kernels inside the session workspace', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-kernels-route-')
+  const kernels = makeKernels()
+  const { state, json } = await invoke(makeCtx({ cwd: dir }), kernels, makeReq({
+    url: '/ipynb/kernels?sessionId=s1',
+  }))
+  assert.equal(state.status, 200)
+  assert.equal(json.value.kernels.length, 1)
+  assert.equal(json.value.kernels[0].name, 'demo.ipynb')
+  assert.equal(kernels.calls.filter((call) => 'list' in call).length, 1)
+})
+
+test('kernels requires a known session', async () => {
+  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({
+    url: '/ipynb/kernels?sessionId=missing',
+  }))
+  assert.equal(state.status, 400)
+  assert.equal(json.error.code, 'workspace-unknown')
 })
 
 test('config reads and updates the kernel idle timeout', async () => {

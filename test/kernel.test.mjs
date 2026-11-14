@@ -150,6 +150,35 @@ test('restart settles the running cell and exec ids keep the restarted cell from
 // fake-child tests (64 MiB boundary, UTF-8 accounting and restart-only-once),
 // which do not need a real Python kernel to produce the byte flood.
 
+test('the kernel manager lists only kernels inside the requested workspace', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-kernel-list-')
+  const manager = new KernelManager({}, bridgePath)
+  const makeEntry = (name) => ({
+    lastActivity: Date.now(),
+    status: () => ({
+      running: true,
+      ready: true,
+      busy: false,
+      python: '/fake/' + name,
+      executionState: 'idle',
+      lastError: null,
+    }),
+  })
+  const inside = path.join(dir, 'inside.ipynb')
+  manager.entries.set(inside, makeEntry('inside'))
+  manager.entries.set(path.join(path.dirname(dir), 'outside.ipynb'), makeEntry('outside'))
+  try {
+    const kernels = manager.list(dir)
+    assert.equal(kernels.length, 1)
+    assert.equal(kernels[0].name, 'inside.ipynb')
+    assert.equal(kernels[0].path, inside)
+    assert.equal(kernels[0].python, '/fake/inside')
+  } finally {
+    manager.entries.clear()
+    await manager.disposeAll()
+  }
+})
+
 test('the kernel manager accepts an idle-timeout override and rejects invalid values', async () => {
   const manager = new KernelManager({}, bridgePath)
   try {
