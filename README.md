@@ -46,7 +46,7 @@
 | dsh-better-sidebar | **0.32.x** (verified with **0.32.1**; older lines are rejected by the runtime guard) |
 | Python | `jupyter_client` + `ipykernel`; verify with `python3 -c "import jupyter_client, ipykernel"` (macOS/Linux) or `python -c "import jupyter_client, ipykernel"` (Windows) |
 
-> **Version pairing:** this build targets DSH **0.2.2-rc.2+** and `dsh-better-sidebar` **0.32.x**. The sidebar version and required features are checked at startup, so a stale installation fails with a clear message instead of a missing-method error. The latest verified combination is DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`; the unit suite passes.
+> **Version pairing:** this build targets DSH **0.2.2-rc.2+** and `dsh-better-sidebar` **0.32.x**. The sidebar version and required features are checked at startup, so a stale installation fails with a clear message instead of a missing-method error. The latest verified combination is DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`; the unit suite and the pinned browser E2E pass.
 >
 > **Upgrading from 0.30.x?** The 0.30/older-sidebar line is intentionally no longer supported: update `dsh-better-sidebar` to **0.32.x** first, then reload the plugin.
 
@@ -97,7 +97,7 @@ dsh-bsb-ipynb/
 │   └── json.js       # JSON envelope, request body reader, ApiError
 ├── python/bridge.py  # JSONL kernel bridge over jupyter_client + ipykernel
 ├── locale/{en,zh}.json
-└── test/             # node:test unit/integration tests (including real kernels)
+└── test/             # node:test suite (including real kernels) + e2e/ browser smoke test
 ```
 
 Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` routes → `KernelManager` → `python/bridge.py` (JSONL) ↔ `ipykernel`.
@@ -199,7 +199,11 @@ There is no build step. DSH caches registered bundles, so after changing `client
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
 npm test          # run the complete unit and integration suite
+npm install       # Playwright (dev-only) for the pinned browser E2E
+npm run test:e2e  # isolated DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1
 ```
+
+The browser E2E creates a temporary `DSH_HOME`, installs this checkout plus the pinned `dsh-better-sidebar` into a fresh Web profile, boots `dsh` on a free port, opens a generated notebook through the real Better Sidebar file tree, runs one cell with the real Python kernel and asserts the autosaved output. It needs Google Chrome, network access for the first pnpm install, and a DSH CLI (`DSH_E2E_DSH_BIN`, or `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE` when run inside DSH Desktop). Update `PINNED_DSH` / `PINNED_BSB` in `test/e2e/run.mjs` when upgrading deliberately; the client runtime guard rejects older Better Sidebar builds. Set `DSH_E2E_KEEP=1` to keep the temporary DSH home for inspection. Run it after any DSH / Better Sidebar bump and before a release; CI runs the three-OS unit matrix plus this pinned E2E lane.
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
 

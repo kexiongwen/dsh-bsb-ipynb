@@ -7,7 +7,9 @@ welcome. For security issues use [SECURITY.md](SECURITY.md), not the issue track
 
 - Node.js >= 20
 - Python with `jupyter_client`, `ipykernel` and `nbformat`
-- DSH with dsh-better-sidebar only for manual UI checks
+- DSH **0.2.2-rc.2+** with **dsh-better-sidebar 0.32.x** for the E2E lane
+  (the client guard rejects older sidebar builds)
+- Google Chrome and the dev-only `playwright` package for `npm run test:e2e`
 
 There is no build step: `client.js` is loaded as-is and the host side is plain ESM.
 
@@ -20,7 +22,14 @@ python -m pip install jupyter_client ipykernel nbformat
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
 npm test
+npm install          # Playwright is dev-only; the unit suite needs no dependencies
+npm run test:e2e     # pinned DSH + Better Sidebar browser smoke test
 ```
+
+`npm run test:e2e` creates an isolated `DSH_HOME`, boots the pinned DSH Web
+profile and drives the real file tree. It accepts `DSH_E2E_DSH_BIN`, or uses
+`DSH_INSTALL_DIR` / `DSH_NODE_EXECUTABLE` when run inside DSH Desktop. Keep
+`PINNED_DSH` and `PINNED_BSB` in `test/e2e/run.mjs` in sync when upgrading.
 
 After changing `client.js`, reload the plugin and hard-refresh the page
 (`Ctrl/Cmd+Shift+R`). UI strings live in the `STRINGS` table in `client.js`;

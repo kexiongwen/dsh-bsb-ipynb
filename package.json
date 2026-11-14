@@ -28,7 +28,11 @@
     "deepseek-harness"
   ],
   "scripts": {
-    "test": "node --test --test-timeout=180000 test/*.test.mjs"
+    "test": "node --test --test-timeout=180000 test/*.test.mjs",
+    "test:e2e": "node test/e2e/run.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1"
   },
   "main": "./index.js",
   "exports": {

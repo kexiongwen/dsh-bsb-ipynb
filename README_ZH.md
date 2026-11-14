@@ -46,7 +46,7 @@
 | dsh-better-sidebar | **0.32.x**（当前验证 **0.32.1**；旧版本会被运行时护栏拒绝） |
 | Python | 安装 `jupyter_client` + `ipykernel`，可用 `python3 -c "import jupyter_client, ipykernel"`（macOS/Linux）或 `python -c "import jupyter_client, ipykernel"`（Windows）自检 |
 
-> **版本配对**：本构建面向 DSH **0.2.2-rc.2+** 与 `dsh-better-sidebar` **0.32.x**；启动时会检查侧边栏版本与所需特性，旧版会得到明确错误，而不是在缺方法时才崩溃。当前验证组合为 DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`，单元测试通过。
+> **版本配对**：本构建面向 DSH **0.2.2-rc.2+** 与 `dsh-better-sidebar` **0.32.x**；启动时会检查侧边栏版本与所需特性，旧版会得到明确错误，而不是在缺方法时才崩溃。当前验证组合为 DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`，单元测试与固定版本浏览器 E2E 均通过。
 >
 > **从 0.30.x 升级？** 本构建有意不再支持 0.30/旧侧边栏线：请先把 `dsh-better-sidebar` 升级到 **0.32.x**，再重载插件。
 
@@ -97,7 +97,7 @@ dsh-bsb-ipynb/
 │   └── json.js       # JSON envelope、请求体读取、ApiError
 ├── python/bridge.py  # jupyter_client + ipykernel 的 JSONL 内核桥
 ├── locale/{en,zh}.json
-└── test/             # node:test 单元/集成测试（含真实内核）
+└── test/             # node:test 单元/集成测试（含真实内核）+ e2e/ 浏览器冒烟测试
 ```
 
 请求链路：浏览器 `client.js` → better-sidebar `webServer` → `/ipynb/*` 路由 → `KernelManager` → `python/bridge.py`（JSONL）↔ `ipykernel`。
@@ -199,7 +199,11 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 for file in index.js lib/*.js client.js; do node --check "$file"; done
 python -m py_compile python/bridge.py
 npm test          # 运行完整单元测试与集成测试
+npm install       # 安装仅开发期使用的 Playwright，供固定版本浏览器 E2E
+npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1 上运行 E2E
 ```
+
+浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，通过真实的 Better Sidebar 文件树打开生成的 notebook，用真实 Python 内核运行一个 cell，并校验自动保存后的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
 
 主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
 
