@@ -5,7 +5,7 @@
   "type": "module",
   "engines": {
     "node": ">=20",
-    "dsh": ">=0.2.2-rc.1"
+    "dsh": ">=0.2.2-rc.2"
   },
   "description": "Preview and run Jupyter notebooks (.ipynb) in the DSH better-sidebar file tree.",
   "license": "MIT",
@@ -55,6 +55,7 @@
     "NOTICE"
   ],
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

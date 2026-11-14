@@ -116,6 +116,17 @@ function makeKernels() {
     calls,
     entry,
     kernelCount: 1,
+    idleMinutes: 30,
+    config() {
+      return { idleMinutes: this.idleMinutes }
+    },
+    setIdleMinutes(value) {
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 1440) {
+        throw new ApiError('bad-request', 400, 'idleMinutes must be an integer from 0 to 1440')
+      }
+      calls.push({ config: value })
+      this.idleMinutes = value
+    },
     status() {
       return { running: true, ready: true, busy: false, python: entry.python, executionState: 'idle', lastError: null }
     },
@@ -182,6 +193,44 @@ test('interpreters lists discovered entries with a default', async () => {
   assert.equal(state.status, 200)
   assert.ok(Array.isArray(json.value.interpreters))
   assert.ok('default' in json.value)
+})
+
+test('config reads and updates the kernel idle timeout', async () => {
+  const kernels = makeKernels()
+  const initial = await invoke(makeCtx(), kernels, makeReq({ url: '/ipynb/config' }))
+  assert.equal(initial.state.status, 200)
+  assert.deepEqual(initial.json.value, { idleMinutes: 30 })
+
+  const updated = await invoke(makeCtx(), kernels, makeReq({
+    method: 'POST',
+    url: '/ipynb/config',
+    body: { idleMinutes: 5 },
+  }))
+  assert.equal(updated.state.status, 200)
+  assert.deepEqual(updated.json.value, { idleMinutes: 5 })
+  assert.deepEqual(kernels.calls.filter((call) => 'config' in call), [{ config: 5 }])
+})
+
+test('config rejects an invalid idle timeout', async () => {
+  const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({
+    method: 'POST',
+    url: '/ipynb/config',
+    body: { idleMinutes: -1 },
+  }))
+  assert.equal(state.status, 400)
+  assert.equal(json.error.code, 'bad-request')
+})
+
+test('config requires a numeric idle timeout', async () => {
+  for (const body of [{}, { idleMinutes: '5' }, { idleMinutes: null }]) {
+    const { state, json } = await invoke(makeCtx(), makeKernels(), makeReq({
+      method: 'POST',
+      url: '/ipynb/config',
+      body,
+    }))
+    assert.equal(state.status, 400)
+    assert.equal(json.error.code, 'bad-request')
+  }
 })
 
 test('unknown endpoints and wrong methods return protocol errors with routing details', async () => {

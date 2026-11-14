@@ -150,6 +150,20 @@ test('restart settles the running cell and exec ids keep the restarted cell from
 // fake-child tests (64 MiB boundary, UTF-8 accounting and restart-only-once),
 // which do not need a real Python kernel to produce the byte flood.
 
+test('the kernel manager accepts an idle-timeout override and rejects invalid values', async () => {
+  const manager = new KernelManager({}, bridgePath)
+  try {
+    manager.setIdleMinutes(5)
+    assert.equal(manager.getIdleMinutes(), 5)
+    manager.setIdleMinutes(0)
+    assert.equal(manager.getIdleMinutes(), 0)
+    assert.throws(() => manager.setIdleMinutes(1441), /idleMinutes/)
+    assert.throws(() => manager.setIdleMinutes(-1), /idleMinutes/)
+  } finally {
+    await manager.disposeAll()
+  }
+})
+
 test('DSH_IPYNB_KERNEL_IDLE_MS=0 disables the idle sweep', async (t) => {
   const previous = process.env.DSH_IPYNB_KERNEL_IDLE_MS
   const manager = new KernelManager({}, bridgePath)

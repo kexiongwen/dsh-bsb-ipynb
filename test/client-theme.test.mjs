@@ -22,7 +22,7 @@ const fixture = JSON.parse(
 const { exports, styles } = await loadClient()
 exports.apply({
   effect: (effect) => effect(),
-  betterSidebar: {
+  betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
     hostRouteUrl: (path) => 'http://127.0.0.1:1/' + path,
     registerFileViewer: () => () => {},
   },

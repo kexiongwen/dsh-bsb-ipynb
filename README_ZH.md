@@ -13,8 +13,8 @@
   <a href="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml"><img alt="CI" src="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.1+" src="https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-4C8DFF"></a>
-  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.30.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.30.x-8A2BE2"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.2+" src="https://img.shields.io/badge/DSH-0.2.2--rc.2%2B-4C8DFF"></a>
+  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
 </p>
 
 <p align="center">
@@ -32,8 +32,9 @@
 - **渲染**：Markdown、代码与 raw cell（原始单元格），显示执行计数；流式 stdout/stderr、`text/html`（白名单清洗）、PNG/JPEG/SVG（接受 `image/jpg` 作为 `image/jpeg` 的别名）、Markdown、JSON 与 ANSI 彩色 traceback。Markdown 与 `text/html` 输出中的图片按同一规则解析：`attachment:`、相对路径与 Windows 盘符/UNC 路径经宿主文件路由加载，`http(s)` 与 `data:image` 保持原地址直连（远程图片由源站加载）。
 - **编辑**：点击单元格进入编辑；插入/删除、上移/下移、切换类型、Markdown 预览、清空单个或全部输出。
 - **执行**：每个 notebook 一个按文件路径共享的常驻内核，变量跨单元格保留；支持全部运行、中断、重启与关闭。
-- **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后 1.5 秒自动保存。
+- **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后默认 1.5 秒自动保存（可在设置面板调整）。
 - **解释器发现**：按 `DSH_IPYNB_PYTHON` → conda 环境 → PATH 上的 `python3`/`python` → DSH 内置 Python 的顺序查找，且只选择安装了 `jupyter_client` + `ipykernel` 的环境；`DSH_IPYNB_PYTHON` 必须是**绝对路径**，相对路径或不可用的值仍会出现在 `/ipynb/interpreters` 列表中并附原因，但不会被使用；启动配置在插件进程内构造，同名系统 kernelspec 不会改变所选解释器。
+- **设置面板**：可在「设置 → 侧边卡片」的 viewer 齿轮面板中调整自动保存延迟、默认解释器、内核空闲超时，以及带可用性说明的解释器列表；设置对所有已打开的 notebook 生效；无头部署仍以 `DSH_IPYNB_KERNEL_IDLE_MS` 为默认值。
 - **与 DSH 集成**：所有颜色跟随 DSH 主题——状态色、banner、链接与 Python 语法高亮消费 `--dsw-alias-*` 与 Shiki 变量，单元格/编辑器/输出字号跟随 DSH 的正文与代码字号设置（暗色即宿主按「主题设置 × 系统配色」解析出的调色板，插件侧不做主题侦测）；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
 - **访问边界**：路径限制在会话工作区内（realpath + 相对路径校验）；HTTP 路由复用 DSH 的 admission fence（请求准入校验）；HTML 输出经 DOMParser 白名单清洗，`<script>` 不会执行。
 
@@ -41,9 +42,13 @@
 
 | 依赖 | 要求 |
 | --- | --- |
-| DSH | Web GUI **0.2.2-rc.1** 或更新 |
-| dsh-better-sidebar | **0.30.x**（当前验证 0.30.1；0.28.x 面向 DSH 0.2.1，不推荐） |
+| DSH | Web GUI **0.2.2-rc.2** 或更新（当前验证 **0.2.2-rc.3**） |
+| dsh-better-sidebar | **0.32.x**（当前验证 **0.32.1**；旧版本会被运行时护栏拒绝） |
 | Python | 安装 `jupyter_client` + `ipykernel`，可用 `python3 -c "import jupyter_client, ipykernel"`（macOS/Linux）或 `python -c "import jupyter_client, ipykernel"`（Windows）自检 |
+
+> **版本配对**：本构建面向 DSH **0.2.2-rc.2+** 与 `dsh-better-sidebar` **0.32.x**；启动时会检查侧边栏版本与所需特性，旧版会得到明确错误，而不是在缺方法时才崩溃。当前验证组合为 DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`，单元测试通过。
+>
+> **从 0.30.x 升级？** 本构建有意不再支持 0.30/旧侧边栏线：请先把 `dsh-better-sidebar` 升级到 **0.32.x**，再重载插件。
 
 ```bash
 # 如缺少依赖
@@ -142,6 +147,8 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | --- | --- | --- |
 | GET | `/ipynb/health` | 版本、内核数、解释器统计（不阻塞探测；未预热时 `interpreters.checked=false`） |
 | GET | `/ipynb/interpreters` | 解释器列表与默认项 |
+| GET | `/ipynb/config` | 当前内核空闲超时（`idleMinutes`；0 表示不回收） |
+| POST | `/ipynb/config` | `{idleMinutes}`；更新内核空闲超时 |
 | GET | `/ipynb/status?sessionId=&path=` | notebook 的内核状态 |
 | POST | `/ipynb/read` | 读取并解析 notebook |
 | POST | `/ipynb/save` | `{notebook, baseVersion}`；版本过期返回 409 |
@@ -150,7 +157,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | POST | `/ipynb/restart` | 重启内核，可同时切换 `python` |
 | POST | `/ipynb/shutdown` | 关闭内核 |
 
-除 `/health`、`/interpreters` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
+除 `/health`、`/interpreters`、`/config` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
 
 错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`read-blocked`、`not-notebook`、`too-large`、`write-conflict`、`write-blocked`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
 
@@ -177,10 +184,10 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | metadata | 每个值 100 层 / 10,000 个节点 |
 | JSON MIME 值（输出 / 附件） | 每个值 100 层 / 250,000 个节点 |
 | 整本 notebook 结构上限 | 128 层 / 1,000,000 个节点，保存时包含拆分后的源码行 |
-| 自动保存 / 内核状态轮询 / NDJSON ping | 1.5 秒 / 10 秒 / 15 秒 |
+| 自动保存（默认）/ 内核状态轮询 / NDJSON ping | 1.5 秒 / 10 秒 / 15 秒 |
 | ready / shutdown 宽限 / 中断宽限 | 30 秒 / 2 秒 + 2 秒 + 500ms 退出确认 / 3 秒 |
 | 执行流 drain 超时 | 10 秒（客户端停止读取时主动断开） |
-| 内核空闲回收 | 默认 30 分钟；可用 `DSH_IPYNB_KERNEL_IDLE_MS` 调整（设为 `0` 表示不回收） |
+| 内核空闲回收 | 默认 30 分钟；可用 viewer 设置或 `DSH_IPYNB_KERNEL_IDLE_MS` 调整（设为 `0` 表示不回收） |
 
 客户端保存预检与服务端序列化会先统计格式化后 JSON 的 UTF-8 字节数（含末尾换行），确认容量合规后才分配完整字符串和编码缓冲区。节点预算跨单元格累计容器与值，共享引用按每次出现分别计数。实时 JSON 输出及其显示文本也会在格式化前检查。JSON MIME 的 250,000 节点是结构预算，不承诺任意 Plotly 数据都能打开：x/y 双数组形状下 124,994 点可读、124,995 点会被拒绝；compact 形态低于 32 MiB 但 pretty-print 超过 32 MiB 的 notebook 可以打开、不能保存。
 

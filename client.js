@@ -7,6 +7,11 @@ window.__ModuleLoader__.load({
 
     const STYLE_ID = 'dsh-bsb-ipynb-styles'
     const AUTOSAVE_MS = 1500
+    // The compatibility floor is the dsh-better-sidebar line this build is
+    // tested against. The service exposes both fields, so a stale installation
+    // fails here with an actionable message instead of on a missing method.
+    const MIN_BETTER_SIDEBAR_VERSION = '0.32.0'
+    const REQUIRED_BETTER_SIDEBAR_FEATURES = ['hostRouteUrl']
     const SAVE_BANNER_REASONS = new Set(['write-blocked', 'write-conflict', 'save-failed', 'capacity', 'metadata-too-complex', 'json-too-complex', 'empty-file'])
     const STATUS_POLL_MS = 10000
     const MAX_MARKDOWN_QUOTE_DEPTH = 64
@@ -80,6 +85,21 @@ window.__ModuleLoader__.load({
         streamUnsupported: 'Streaming is not supported by this browser.',
         capacityNoOutputs: 'Notebook is {size} MiB; the save limit is 32 MiB. There are no outputs to clear — remove cells or shorten the content.',
         cellType: 'Cell type',
+        settingsTitle: 'Notebook settings',
+        settingsAutosave: 'Autosave delay',
+        settingsAutosaveHint: 'Seconds after the last edit; 0.3–30 s.',
+        settingsDefaultPython: 'Default interpreter',
+        settingsServerDefault: 'Server default',
+        settingsIdle: 'Kernel idle timeout',
+        settingsIdleHint: 'Minutes without use before the kernel is shut down; 0 keeps it running.',
+        settingsInterpreters: 'Discovered interpreters',
+        settingsAvailable: 'available',
+        settingsUnavailable: 'unavailable',
+        settingsLoading: 'Loading…',
+        settingsSaved: 'Saved',
+        settingsSave: 'Save',
+        settingsClose: 'Close',
+        settingsError: 'Could not load the notebook settings.',
       },
       zh: {
         runAll: '全部运行',
@@ -142,6 +162,21 @@ window.__ModuleLoader__.load({
         streamUnsupported: '当前浏览器不支持流式执行。',
         capacityNoOutputs: 'notebook 约 {size} MiB，超过 32 MiB 上限；当前没有可清空的输出，请删除单元格或精简内容。',
         cellType: '单元格类型',
+        settingsTitle: 'Notebook 设置',
+        settingsAutosave: '自动保存延迟',
+        settingsAutosaveHint: '最后一次编辑后的秒数；0.3–30 秒。',
+        settingsDefaultPython: '默认解释器',
+        settingsServerDefault: '服务器默认',
+        settingsIdle: '内核空闲超时',
+        settingsIdleHint: '无操作多少分钟后关闭内核；0 表示不自动关闭。',
+        settingsInterpreters: '已发现的解释器',
+        settingsAvailable: '可用',
+        settingsUnavailable: '不可用',
+        settingsLoading: '加载中…',
+        settingsSaved: '已保存',
+        settingsSave: '保存',
+        settingsClose: '关闭',
+        settingsError: '无法加载 Notebook 设置。',
       },
     }
 
@@ -152,6 +187,67 @@ window.__ModuleLoader__.load({
     // Host-backed translate once the optional DSH locale service is bound (see
     // bindHostLocale); the browser language is only the standalone fallback.
     let t = browserT
+
+    const VIEWER_ID = 'dsh-bsb-ipynb:notebook'
+    const AUTOSAVE_MIN_MS = 300
+    const AUTOSAVE_MAX_MS = 30_000
+    const IDLE_MAX_MINUTES = 1440
+    const SETTINGS_DEFAULTS = Object.freeze({
+      autosaveMs: AUTOSAVE_MS,
+      defaultPython: '',
+      // `null` means "not set by the user": the settings panel seeds this from
+      // the host's current timeout and only an explicit value is pushed back.
+      idleMinutes: null,
+    })
+
+    function numberInRange(value, minimum, maximum, fallback) {
+      const numeric = typeof value === 'number' ? value : NaN
+      if (!Number.isFinite(numeric)) return fallback
+      return Math.min(Math.max(numeric, minimum), maximum)
+    }
+
+    /** Normalize one persisted plugin-settings blob; unknown/corrupt values fall back. */
+    function normalizePluginSettings(raw) {
+      const value = raw && typeof raw === 'object' ? raw : {}
+      const idle = value.idleMinutes
+      return {
+        autosaveMs: Math.round(numberInRange(value.autosaveMs, AUTOSAVE_MIN_MS, AUTOSAVE_MAX_MS, SETTINGS_DEFAULTS.autosaveMs)),
+        defaultPython: typeof value.defaultPython === 'string' ? value.defaultPython : SETTINGS_DEFAULTS.defaultPython,
+        idleMinutes: typeof idle === 'number' && Number.isInteger(idle) && idle >= 0 && idle <= IDLE_MAX_MINUTES ? idle : SETTINGS_DEFAULTS.idleMinutes,
+      }
+    }
+
+    function readPluginSettings(store) {
+      try {
+        const prefs = store && typeof store.getPrefs === 'function' ? store.getPrefs() : undefined
+        const all = prefs && prefs.pluginSettings
+        return normalizePluginSettings(all && all[VIEWER_ID])
+      } catch {
+        return { ...SETTINGS_DEFAULTS }
+      }
+    }
+
+    function samePluginSettings(left, right) {
+      return left.autosaveMs === right.autosaveMs &&
+        left.defaultPython === right.defaultPython &&
+        left.idleMinutes === right.idleMinutes
+    }
+
+    // The viewer and the settings panel share BSB's persisted plugin settings.
+    // Subscribe to the sidebar store so a save applies to already-open notebooks.
+    function usePluginSettings(store) {
+      const [settings, setSettings] = useState(() => readPluginSettings(store))
+      useEffect(() => {
+        if (!store || typeof store.subscribe !== 'function') return undefined
+        const sync = () => {
+          const next = readPluginSettings(store)
+          setSettings((current) => (samePluginSettings(current, next) ? current : next))
+        }
+        sync()
+        return store.subscribe(sync)
+      }, [store])
+      return settings
+    }
 
     function isMacPlatform(nav = (typeof navigator !== 'undefined' ? navigator : null)) {
       const platform = nav && (nav.userAgentData?.platform || nav.platform || nav.userAgent) || ''
@@ -744,6 +840,9 @@ window.__ModuleLoader__.load({
     // accepted saves outside component refs so that replacement viewers and
     // other open views of this document still wait for their result.
     const notebookRequests = new Map()
+    // One host-wide kernel manager backs every open notebook, so the idle
+    // setting needs only one successful push per value.
+    let lastSyncedIdleMinutes = null
 
     function notebookRequestState(ctx, path, sessionId) {
       const key = JSON.stringify([routeUrl(ctx, 'save'), sessionId, path])
@@ -991,8 +1090,8 @@ window.__ModuleLoader__.load({
 
     // A blocked save (read-only or locked file) must not retry every autosave
     // tick while the user keeps typing: back off up to 30 seconds.
-    function blockedAutosaveDelay(current) {
-      return Math.min(Math.max(current, AUTOSAVE_MS) * 4, 30_000)
+    function blockedAutosaveDelay(current, base = AUTOSAVE_MS) {
+      return Math.min(Math.max(current, base) * 4, 30_000)
     }
 
     // Ordinary failures wait for another edit; retryable write-blocked failures
@@ -1995,6 +2094,9 @@ window.__ModuleLoader__.load({
 
     function NotebookView(props) {
       const { ctx, scope, path, customData, onToolbarState, visible } = props
+      const pluginSettings = usePluginSettings(props.store)
+      const autosaveMs = pluginSettings.autosaveMs
+      const defaultPython = pluginSettings.defaultPython
       // Re-render when the host locale preference (or a late dictionary
       // registration) changes, so the bound translate yields the new strings.
       // The locale service is optional: without it the browser fallback stands
@@ -2021,7 +2123,7 @@ window.__ModuleLoader__.load({
       const [conflict, setConflict] = useState(null)
       const [banner, setBanner] = useState(null)
       const [autosaveBlocked, setAutosaveBlocked] = useState(false)
-      const [autosaveDelay, setAutosaveDelay] = useState(AUTOSAVE_MS)
+      const [autosaveDelay, setAutosaveDelay] = useState(autosaveMs)
       const [capacityBlocked, setCapacityBlocked] = useState(false)
       const [reloading, setReloading] = useState(false)
       const [editingCell, setEditingCell] = useState(null)
@@ -2030,6 +2132,23 @@ window.__ModuleLoader__.load({
       const [kernel, setKernel] = useState({ running: false, ready: false, busy: false, python: null, executionState: 'none', lastError: null })
       const [interpreters, setInterpreters] = useState([])
       const [python, setPython] = useState('')
+      // A settings save applies to already-open notebooks without a remount.
+      useEffect(() => {
+        setAutosaveDelay(autosaveMs)
+      }, [autosaveMs])
+      // The host owns the idle sweep; push an explicitly configured value once
+      // (the settings panel does the same) so a reloaded host recovers it.
+      useEffect(() => {
+        const idle = pluginSettings.idleMinutes
+        if (!Number.isInteger(idle) || idle < 0 || idle > IDLE_MAX_MINUTES) return undefined
+        if (lastSyncedIdleMinutes === idle) return undefined
+        const previous = lastSyncedIdleMinutes
+        lastSyncedIdleMinutes = idle
+        postJson(ctx, 'config', { idleMinutes: idle }).catch(() => {
+          if (lastSyncedIdleMinutes === idle) lastSyncedIdleMinutes = previous
+        })
+        return undefined
+      }, [ctx, pluginSettings.idleMinutes])
       const customRef = useRef(customData)
       const dirtyRef = useRef(false)
       const notebookRef = useRef(notebook)
@@ -2147,7 +2266,7 @@ window.__ModuleLoader__.load({
         setDirty(false)
         setConflict(null)
         setAutosaveBlocked(false)
-        setAutosaveDelay(AUTOSAVE_MS)
+        setAutosaveDelay(autosaveMs)
         failedSnapshotRef.current = null
         setEditingCell(null)
         setEmptyFile(false)
@@ -2180,7 +2299,7 @@ window.__ModuleLoader__.load({
         setLoadStatus(data.status || 'error')
         setLoadError(data.error || null)
         setLoadMessage(data.message || null)
-      }, [invalidateDocumentWork])
+      }, [invalidateDocumentWork, autosaveMs])
 
       useEffect(() => {
         if (customData === customRef.current) return
@@ -2246,14 +2365,14 @@ window.__ModuleLoader__.load({
         setDirty(false)
         setConflict(null)
         setAutosaveBlocked(true)
-        setAutosaveDelay(AUTOSAVE_MS)
+        setAutosaveDelay(autosaveMs)
         failedSnapshotRef.current = null
         setEditingCell(null)
         setEmptyFile(false)
         // Keep version/versionRef from the failed read: the first save must CAS
         // against the invalid/unsupported file that is still on disk.
         setBanner({ kind: 'info', reason: 'empty-file', key: 'emptyHint' })
-      }, [invalidateDocumentWork])
+      }, [invalidateDocumentWork, autosaveMs])
 
       const save = useCallback(async () => {
         // All entry points (including Ctrl+S and an already queued autosave)
@@ -2331,7 +2450,7 @@ window.__ModuleLoader__.load({
             setDirty(true)
           }
           setSaveState('saved')
-          setAutosaveDelay(AUTOSAVE_MS)
+          setAutosaveDelay(autosaveMs)
           setEmptyFile(false)
           setConflict(null)
           setBanner((current) => (current && SAVE_BANNER_REASONS.has(current.reason) ? null : current))
@@ -2357,7 +2476,7 @@ window.__ModuleLoader__.load({
             })
             // Retry with backoff instead of hitting the same filesystem error
             // on every autosave tick.
-            setAutosaveDelay((current) => blockedAutosaveDelay(current))
+            setAutosaveDelay((current) => blockedAutosaveDelay(current, autosaveMs))
           } else {
             setBanner({ kind: 'error', reason: 'save-failed', key: 'saveFailed', text: error && error.message })
           }
@@ -2365,7 +2484,7 @@ window.__ModuleLoader__.load({
           if (isCurrentSave()) savingRef.current = null
           settleSave()
         }
-      }, [ctx, path, scope, loadStatus, conflict])
+      }, [ctx, path, scope, loadStatus, conflict, autosaveMs])
 
       saveRef.current = save
 
@@ -2421,9 +2540,11 @@ window.__ModuleLoader__.load({
               }
               const chosen = usable.some((entry) => entry.path === stored)
                 ? stored
-                : usable.some((entry) => entry.path === value.default)
-                  ? value.default
-                  : usable[0] && usable[0].path
+                : usable.some((entry) => entry.path === defaultPython)
+                  ? defaultPython
+                  : usable.some((entry) => entry.path === value.default)
+                    ? value.default
+                    : usable[0] && usable[0].path
               if (chosen) setPython(chosen)
             })
             .catch(() => {
@@ -2438,7 +2559,7 @@ window.__ModuleLoader__.load({
           cancelled = true
           if (retryTimer) clearTimeout(retryTimer)
         }
-      }, [ctx, path])
+      }, [ctx, path, defaultPython])
 
       useEffect(() => {
         if (loadStatus !== 'ok') return undefined
@@ -3057,6 +3178,127 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // The viewer's gear panel. It deliberately uses BSB's plugin settings as
+    // the single source of truth: the same blob the open notebook watches.
+    function SettingsPanel(props) {
+      const { ctx, pluginSettings, updatePluginSetting, close } = props
+      const [draft, setDraft] = useState(() => normalizePluginSettings(pluginSettings))
+      const [interpreters, setInterpreters] = useState([])
+      const [failed, setFailed] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState('')
+      const [saved, setSaved] = useState(false)
+
+      useEffect(() => {
+        let cancelled = false
+        Promise.all([
+          getJson(ctx, 'interpreters'),
+          getJson(ctx, 'config').catch(() => null),
+        ]).then(([value, config]) => {
+          if (cancelled) return
+          const all = value && Array.isArray(value.interpreters) ? value.interpreters : []
+          setInterpreters(all.filter((entry) => entry.ok))
+          setFailed(all.filter((entry) => !entry.ok))
+          setDraft((current) => ({
+            ...current,
+            idleMinutes: config && Number.isInteger(config.idleMinutes) ? config.idleMinutes : (current.idleMinutes ?? 30),
+          }))
+          setLoading(false)
+        }).catch((loadError) => {
+          if (cancelled) return
+          setError(loadError && loadError.message ? loadError.message : t('settingsError'))
+          setLoading(false)
+        })
+        return () => {
+          cancelled = true
+        }
+      }, [ctx])
+
+      const change = (key, value) => {
+        setSaved(false)
+        setError('')
+        setDraft((current) => ({ ...current, [key]: value }))
+      }
+
+      const save = () => {
+        const autosaveMs = Math.round(numberInRange(draft.autosaveMs, AUTOSAVE_MIN_MS, AUTOSAVE_MAX_MS, SETTINGS_DEFAULTS.autosaveMs))
+        // Do not overwrite the host timeout with a guessed 30 when the config
+        // read failed and the user never chose a value.
+        const idleMinutes = Number.isInteger(draft.idleMinutes) ? draft.idleMinutes : null
+        updatePluginSetting('autosaveMs', autosaveMs)
+        updatePluginSetting('defaultPython', draft.defaultPython || '')
+        if (idleMinutes === null) {
+          setSaved(true)
+          return
+        }
+        updatePluginSetting('idleMinutes', idleMinutes)
+        postJson(ctx, 'config', { idleMinutes })
+          .then(() => setSaved(true))
+          .catch((saveError) => setError(saveError && saveError.message ? saveError.message : t('saveFailed')))
+      }
+
+      const idleValue = Number.isInteger(draft.idleMinutes) ? draft.idleMinutes : 30
+      return h(
+        'div',
+        { className: 'dsh-bsb-ipynb-settings' },
+        h('div', { className: 'dsh-bsb-ipynb-settings-title' }, t('settingsTitle')),
+        h('label', { className: 'dsh-bsb-ipynb-settings-row' },
+          h('span', { className: 'dsh-bsb-ipynb-settings-label' }, t('settingsAutosave')),
+          h('input', {
+            className: 'dsh-bsb-ipynb-settings-input',
+            type: 'number',
+            min: AUTOSAVE_MIN_MS / 1000,
+            max: AUTOSAVE_MAX_MS / 1000,
+            step: 0.5,
+            value: draft.autosaveMs / 1000,
+            onChange: (event) => change('autosaveMs', Number(event.target.value) * 1000),
+          }),
+          h('span', { className: 'dsh-bsb-ipynb-settings-hint' }, t('settingsAutosaveHint')),
+        ),
+        h('label', { className: 'dsh-bsb-ipynb-settings-row' },
+          h('span', { className: 'dsh-bsb-ipynb-settings-label' }, t('settingsDefaultPython')),
+          h('select', {
+            className: 'dsh-bsb-ipynb-settings-input',
+            value: draft.defaultPython,
+            onChange: (event) => change('defaultPython', event.target.value),
+          },
+            h('option', { value: '' }, t('settingsServerDefault')),
+            ...interpreters.map((entry) => h('option', { value: entry.path, key: entry.path }, entry.label || entry.path)),
+          ),
+        ),
+        h('label', { className: 'dsh-bsb-ipynb-settings-row' },
+          h('span', { className: 'dsh-bsb-ipynb-settings-label' }, t('settingsIdle')),
+          h('input', {
+            className: 'dsh-bsb-ipynb-settings-input',
+            type: 'number',
+            min: 0,
+            max: IDLE_MAX_MINUTES,
+            step: 1,
+            value: idleValue,
+            onChange: (event) => change('idleMinutes', Number(event.target.value)),
+          }),
+          h('span', { className: 'dsh-bsb-ipynb-settings-hint' }, t('settingsIdleHint')),
+        ),
+        h('div', { className: 'dsh-bsb-ipynb-settings-status' },
+          h('span', { className: 'dsh-bsb-ipynb-settings-label' }, t('settingsInterpreters')),
+          h('span', {}, loading
+            ? t('settingsLoading')
+            : interpreters.length + ' ' + t('settingsAvailable') + (failed.length ? ' · ' + failed.length + ' ' + t('settingsUnavailable') : '')),
+          ...failed.slice(0, 5).map((entry) => h('span', {
+            className: 'dsh-bsb-ipynb-settings-failure',
+            key: entry.path,
+            title: entry.detail || entry.path,
+          }, entry.label || entry.path)),
+        ),
+        error ? h('div', { className: 'dsh-bsb-ipynb-settings-error', role: 'alert' }, error) : null,
+        h('div', { className: 'dsh-bsb-ipynb-settings-actions' },
+          saved ? h('span', { className: 'dsh-bsb-ipynb-settings-saved' }, t('settingsSaved')) : null,
+          h('button', { type: 'button', className: 'dsh-bsb-ipynb-button', onClick: save }, t('settingsSave')),
+          h('button', { type: 'button', className: 'dsh-bsb-ipynb-button', onClick: close }, t('settingsClose')),
+        ),
+      )
+    }
+
     const STYLES = `
 .dsh-bsb-ipynb-root {
   /* One theme layer: every colour and type size resolves from the host theme.
@@ -3318,7 +3560,84 @@ window.__ModuleLoader__.load({
 .dsh-bsb-ipynb-tok-number { color: var(--dsh-bsb-ipynb-tok-number); }
 .dsh-bsb-ipynb-tok-builtin { color: var(--dsh-bsb-ipynb-tok-builtin); }
 .dsh-bsb-ipynb-tok-class { color: var(--dsh-bsb-ipynb-tok-class); }
+/* The settings panel renders in BSB's gear popup, outside the notebook root,
+   so it resolves the host tokens directly instead of the root token layer. */
+.dsh-bsb-ipynb-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 0;
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+}
+.dsh-bsb-ipynb-settings-title { font-weight: 600; }
+.dsh-bsb-ipynb-settings-row {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) minmax(120px, 1fr);
+  align-items: center;
+  gap: 4px 8px;
+}
+.dsh-bsb-ipynb-settings-label { color: var(--dsw-alias-label-secondary, inherit); }
+.dsh-bsb-ipynb-settings-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.28));
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: inherit;
+  font: inherit;
+}
+.dsh-bsb-ipynb-settings-hint,
+.dsh-bsb-ipynb-settings-status {
+  grid-column: 1 / -1;
+  color: var(--dsw-alias-label-tertiary, rgba(127, 127, 127, 0.55));
+  font-size: calc(11px + var(--dsh-content-font-delta-secondary, 0px));
+}
+.dsh-bsb-ipynb-settings-status { display: flex; flex-direction: column; gap: 2px; }
+.dsh-bsb-ipynb-settings-failure { overflow-wrap: anywhere; color: var(--dsw-alias-state-warn-primary, #d29922); }
+.dsh-bsb-ipynb-settings-error { color: var(--dsw-alias-state-error-primary, #cf222e); overflow-wrap: anywhere; }
+.dsh-bsb-ipynb-settings-actions { display: flex; align-items: center; gap: 6px; }
+.dsh-bsb-ipynb-settings-saved { color: var(--dsw-alias-state-success-primary, #2ea043); }
 `
+
+    /** Compare the stable `major.minor.patch` part of two service versions. */
+    function versionAtLeast(actual, minimum) {
+      const parse = (value) => String(value).trim().split('-')[0].split('.').map((part) => Number(part))
+      const left = parse(actual)
+      const right = parse(minimum)
+      if (left.length < 3 || right.length < 3 || left.some(Number.isNaN) || right.some(Number.isNaN)) return false
+      for (let index = 0; index < 3; index += 1) {
+        if (left[index] !== right[index]) return left[index] > right[index]
+      }
+      return true
+    }
+
+    // Fail fast on a stale Better Sidebar. The service has reported its version
+    // and feature list since long before 0.32, so a real older installation is
+    // rejected here rather than throwing inside registerFileViewer.
+    function assertBetterSidebar(ctx) {
+      const service = ctx && ctx.betterSidebar
+      if (!service) {
+        throw new Error('[dsh-bsb-ipynb] dsh-better-sidebar is not mounted; this plugin requires it')
+      }
+      const version = typeof service.version === 'string' ? service.version : ''
+      if (!versionAtLeast(version, MIN_BETTER_SIDEBAR_VERSION)) {
+        throw new Error(
+          '[dsh-bsb-ipynb] dsh-better-sidebar ' + (version || '(unknown version)') +
+          ' is not supported; this build requires >= ' + MIN_BETTER_SIDEBAR_VERSION,
+        )
+      }
+      const features = Array.isArray(service.features) ? service.features : []
+      const missing = REQUIRED_BETTER_SIDEBAR_FEATURES.filter((feature) => !features.includes(feature))
+      if (missing.length) {
+        throw new Error(
+          '[dsh-bsb-ipynb] dsh-better-sidebar ' + version +
+          ' is missing required feature(s): ' + missing.join(', '),
+        )
+      }
+    }
 
     /** The optional DSH locale face; a composition without it keeps the browser fallback. */
     function localeFaceOf(ctx) {
@@ -3352,6 +3671,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      assertBetterSidebar(ctx)
       bindHostLocale(ctx)
       ctx.effect(() => {
         if (typeof document === 'undefined') return undefined
@@ -3368,12 +3688,15 @@ window.__ModuleLoader__.load({
       })
       ctx.effect(() =>
         ctx.betterSidebar.registerFileViewer({
-          id: 'dsh-bsb-ipynb:notebook',
+          id: VIEWER_ID,
           title: () => t('viewerTitle'),
           exts: ['ipynb'],
           priority: 10,
           fetchStrategy: 'custom',
           load: (path, scope, signal) => readNotebook(ctx, path, scope, signal),
+          settings: {
+            render: (props) => h(SettingsPanel, { ...props, ctx }),
+          },
           component: NotebookView,
         }),
       )
@@ -3383,6 +3706,13 @@ window.__ModuleLoader__.load({
       STRINGS,
       LOCALE_NS,
       translate: (key) => t(key),
+      versionAtLeast,
+      assertBetterSidebar,
+      VIEWER_ID,
+      SETTINGS_DEFAULTS,
+      normalizePluginSettings,
+      readPluginSettings,
+      SettingsPanel,
       isMacPlatform,
       shortcutText,
       bannerText,

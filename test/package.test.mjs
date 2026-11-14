@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 test('npm pack ships examples and linked documentation with the documented DSH minimum', async (t) => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.engines.dsh, '>=0.2.2-rc.1')
+  assert.equal(manifest.engines.dsh, '>=0.2.2-rc.2')
+  assert.equal(manifest.dsh.manifestVersion, 1)
   const cache = await mkdtemp(path.join(os.tmpdir(), 'dsh-bsb-ipynb-pack-'))
   t.after(async () => { await rm(cache, { recursive: true, force: true }) })
   const options = {

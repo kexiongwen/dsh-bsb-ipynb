@@ -113,7 +113,7 @@ function mountNotebook(t, options = {}) {
     : undefined
   let props = {
     ctx: {
-      betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route },
+      betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'], hostRouteUrl: (route) => 'http://host/' + route },
       ...(localeFace ? { get: (name) => (name === 'locale' ? localeFace : undefined) } : {}),
     },
     scope: { sessionId: 'session-1' }, path: '/workspace/demo.ipynb',
@@ -217,7 +217,7 @@ function mountNotebook(t, options = {}) {
     moduleExports.apply({
       effect: (effect) => effect(),
       inject: (names, callback) => callback({ locale: localeFace, effect: (effect) => effect() }),
-      betterSidebar: { registerFileViewer: () => () => {}, hostRouteUrl: (route) => 'http://host/' + route },
+      betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'], registerFileViewer: () => () => {}, hostRouteUrl: (route) => 'http://host/' + route },
     })
   }
   function flush() {

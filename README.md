@@ -13,8 +13,8 @@
   <a href="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml"><img alt="CI" src="https://github.com/kexiongwen/dsh-bsb-ipynb/actions/workflows/test.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.1+" src="https://img.shields.io/badge/DSH-0.2.2--rc.1%2B-4C8DFF"></a>
-  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.30.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.30.x-8A2BE2"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.2+" src="https://img.shields.io/badge/DSH-0.2.2--rc.2%2B-4C8DFF"></a>
+  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
 </p>
 
 <p align="center">
@@ -32,8 +32,9 @@
 - **Notebook rendering** — Markdown, code and raw cells with execution counts; streaming stdout/stderr, `text/html` (sanitized against an allow-list), PNG/JPEG/SVG (`image/jpg` is accepted as an alias for `image/jpeg`), Markdown, JSON and ANSI-colored tracebacks. Images in Markdown and `text/html` outputs resolve the same way: `attachment:`, relative and Windows drive/UNC paths go through the host file route, while `http(s)` and `data:image` sources load as-is (remote images are fetched from their origin).
 - **Cell editing** — click a cell to edit it; insert or delete cells, move them up/down, switch cell types, preview Markdown, and clear one cell's or all outputs.
 - **Execution** — one persistent kernel per notebook, keyed by file path, keeps variables alive across cells; Run all, interrupt, restart and shut down.
-- **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits.
+- **Saving** — writes nbformat 4.5 with sha256-based optimistic concurrency (conflicts return 409 and never overwrite); atomic writes through a same-directory temp file and rename; autosave 1.5 s after edits by default (configurable in the settings panel).
 - **Interpreter discovery** — checks `DSH_IPYNB_PYTHON`, conda environments, `python3`/`python` on `PATH`, then DSH's bundled Python, and selects only environments that provide `jupyter_client` + `ipykernel`. `DSH_IPYNB_PYTHON` must be an absolute path; a relative or unusable value is still listed by `/ipynb/interpreters` with a reason but is never used. The launch config is built in-process, so a same-named system kernelspec cannot redirect the selected interpreter.
+- **Settings** — the viewer's gear panel (Settings → Side card) exposes the autosave delay, a default interpreter, and the kernel idle timeout, plus the discovered interpreter list with availability details. Settings are shared by every open notebook; `DSH_IPYNB_KERNEL_IDLE_MS` remains the deployment default for headless hosts.
 - **DSH integration** — every colour follows the DSH theme: state colours, banners, links and Python syntax highlighting consume `--dsw-alias-*` and Shiki variables, and cell/editor/output type follows the DSH text and code font settings (dark mode is the host palette for the theme setting × OS scheme, with no plugin-side theme detection). UI strings are registered under the `dsh-bsb-ipynb` locale namespace and follow DSH's Chinese/English language preference.
 - **Contained access** — paths are confined to the session workspace (realpath + relative checks); HTTP routes reuse DSH's admission fence; HTML output is sanitized with a DOMParser allow-list, and `<script>` never runs.
 
@@ -41,9 +42,13 @@
 
 | Requirement | Version / notes |
 | --- | --- |
-| DSH | Web GUI **0.2.2-rc.1** or newer |
-| dsh-better-sidebar | **0.30.x** (verified with 0.30.1; 0.28.x targets DSH 0.2.1 and is not recommended) |
+| DSH | Web GUI **0.2.2-rc.2** or newer (verified with **0.2.2-rc.3**) |
+| dsh-better-sidebar | **0.32.x** (verified with **0.32.1**; older lines are rejected by the runtime guard) |
 | Python | `jupyter_client` + `ipykernel`; verify with `python3 -c "import jupyter_client, ipykernel"` (macOS/Linux) or `python -c "import jupyter_client, ipykernel"` (Windows) |
+
+> **Version pairing:** this build targets DSH **0.2.2-rc.2+** and `dsh-better-sidebar` **0.32.x**. The sidebar version and required features are checked at startup, so a stale installation fails with a clear message instead of a missing-method error. The latest verified combination is DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`; the unit suite passes.
+>
+> **Upgrading from 0.30.x?** The 0.30/older-sidebar line is intentionally no longer supported: update `dsh-better-sidebar` to **0.32.x** first, then reload the plugin.
 
 ```bash
 # if the dependencies are missing
@@ -142,6 +147,8 @@ All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false
 | --- | --- | --- |
 | GET | `/ipynb/health` | Version, kernel count, interpreter stats (non-blocking; `interpreters.checked=false` until warm) |
 | GET | `/ipynb/interpreters` | Interpreter list and default |
+| GET | `/ipynb/config` | Current kernel idle timeout (`idleMinutes`; 0 disables the sweep) |
+| POST | `/ipynb/config` | `{idleMinutes}`; updates the kernel idle timeout |
 | GET | `/ipynb/status?sessionId=&path=` | Kernel status for a notebook |
 | POST | `/ipynb/read` | Read and parse a notebook |
 | POST | `/ipynb/save` | `{notebook, baseVersion}`; a stale version returns 409 |
@@ -150,7 +157,7 @@ All routes are mounted under `/ipynb` and return `{ok:true,value}` or `{ok:false
 | POST | `/ipynb/restart` | Restart the kernel, optionally switching `python` |
 | POST | `/ipynb/shutdown` | Shut the kernel down |
 
-All routes except `/health` and `/interpreters` require a non-empty `sessionId` and `path` (query parameters for `/status`, JSON body for the rest). `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
+All routes except `/health`, `/interpreters` and `/config` require a non-empty `sessionId` and `path` (query parameters for `/status`, JSON body for the rest). `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
 
 Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root`, `not-found`, `read-blocked`, `not-notebook`, `too-large`, `write-conflict`, `write-blocked`, `write-failed`, `kernel-busy`, `kernel-unavailable`, `interpreter-unknown`, `method-not-allowed`, `internal`.
 
@@ -177,10 +184,10 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Metadata | 100 levels / 10,000 nodes per value |
 | JSON MIME values (outputs / attachments) | 100 levels / 250,000 nodes per value |
 | Complete notebook structure | 128 levels / 1,000,000 nodes, including source lines on save |
-| Autosave / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
+| Autosave (default) / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
 | Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s + 500 ms exit confirmation / 3 s |
 | Execute stream drain timeout | 10 s (a client that stops reading is disconnected) |
-| Kernel idle sweep | 30 minutes by default; `DSH_IPYNB_KERNEL_IDLE_MS` changes it (`0` disables the sweep) |
+| Kernel idle sweep | 30 minutes by default; the viewer settings or `DSH_IPYNB_KERNEL_IDLE_MS` change it (`0` disables the sweep) |
 
 Save preflight and server serialization count the pretty-printed UTF-8 bytes, including the final newline, before allocating the complete JSON string or encoded buffer. Node budgets count containers and values across cells; shared values count at every occurrence. Live JSON outputs and their rendered text are also checked before formatting. The 250,000-node JSON MIME limit is a structural budget, not a promise to open arbitrary Plotly payloads: in the x/y two-array shape, 124,994 points are accepted and 124,995 are rejected. A notebook whose compact form fits 32 MiB but whose pretty-printed form exceeds it can be opened but not saved.
 

@@ -10,7 +10,7 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
     effect(effect) {
       return effect()
     },
-    betterSidebar: {
+    betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
       hostRouteUrl(path) {
         return 'http://127.0.0.1:61099/' + path
       },
@@ -31,9 +31,95 @@ test('registers a custom ipynb file viewer through betterSidebar', async () => {
   assert.equal(viewer.title(), 'Jupyter Notebook')
   assert.equal(typeof viewer.load, 'function')
   assert.equal(typeof viewer.component, 'function')
+  assert.equal(typeof viewer.settings.render, 'function', 'the viewer exposes a BSB settings panel')
   assert.equal(styles.length, 1)
   assert.equal(styles[0].id, 'dsh-bsb-ipynb-styles')
   assert.match(styles[0].textContent, /\.dsh-bsb-ipynb-root/)
+})
+
+test('the viewer settings panel renders without touching the host until saved', async () => {
+  const { exports } = await loadClient({
+    useState(initial) { return [initial, () => {}] },
+    useEffect() {},
+    useRef(value) { return { current: value } },
+    useCallback(callback) { return callback },
+  })
+  const viewers = []
+  const ctx = {
+    effect(effect) { return effect() },
+    betterSidebar: {
+      version: '0.32.1',
+      features: ['hostRouteUrl'],
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer(descriptor) { viewers.push(descriptor); return () => {} },
+    },
+  }
+  exports.apply(ctx)
+  const props = {
+    store: {},
+    service: ctx.betterSidebar,
+    prefs: {},
+    pluginSettings: { autosaveMs: 2000, defaultPython: '', idleMinutes: 10 },
+    updatePluginSetting() {},
+    close() {},
+    ctx,
+  }
+  const factory = viewers[0].settings.render(props)
+  assert.equal(factory.type.name, 'SettingsPanel')
+  const tree = exports.__test.SettingsPanel(props)
+  assert.equal(tree.type, 'div')
+  assert.match(tree.props.className, /dsh-bsb-ipynb-settings/)
+  assert.deepEqual(tree.props.children[0].props.children, [exports.__test.translate('settingsTitle')])
+})
+
+test('normalizes persisted plugin settings and reads them from the BSB store', async () => {
+  const { exports } = await loadClient()
+  const { SETTINGS_DEFAULTS, VIEWER_ID, normalizePluginSettings, readPluginSettings } = exports.__test
+  const normalized = normalizePluginSettings({
+    autosaveMs: 50,
+    defaultPython: '/opt/python',
+    idleMinutes: 9999,
+  })
+  assert.deepEqual(normalized, {
+    autosaveMs: 300,
+    defaultPython: '/opt/python',
+    idleMinutes: null,
+  })
+  assert.deepEqual(normalizePluginSettings(null), SETTINGS_DEFAULTS)
+  assert.deepEqual(normalizePluginSettings({ autosaveMs: null, idleMinutes: null }), SETTINGS_DEFAULTS)
+  const read = readPluginSettings({
+    getPrefs: () => ({ pluginSettings: { [VIEWER_ID]: { autosaveMs: 2000, defaultPython: '', idleMinutes: 5 } } }),
+  })
+  assert.deepEqual(read, { autosaveMs: 2000, defaultPython: '', idleMinutes: 5 })
+  assert.deepEqual(readPluginSettings({}), SETTINGS_DEFAULTS)
+})
+
+test('rejects a dsh-better-sidebar below the supported version', async () => {
+  const { exports } = await loadClient()
+  const ctx = {
+    effect(effect) { return effect() },
+    betterSidebar: {
+      version: '0.30.1',
+      features: ['hostRouteUrl'],
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer: () => () => {},
+    },
+  }
+  assert.throws(() => exports.apply(ctx), /0\.32\.0/)
+})
+
+test('rejects a dsh-better-sidebar without the required hostRouteUrl feature', async () => {
+  const { exports } = await loadClient()
+  const ctx = {
+    effect(effect) { return effect() },
+    betterSidebar: {
+      version: '0.32.1',
+      features: [],
+      hostRouteUrl: (path) => 'http://host/' + path,
+      registerFileViewer: () => () => {},
+    },
+  }
+  assert.throws(() => exports.apply(ctx), /hostRouteUrl/)
 })
 
 test('registers the en/zh dictionaries and follows the host locale preference', async () => {
@@ -73,7 +159,7 @@ test('registers the en/zh dictionaries and follows the host locale preference', 
     effect(effect) {
       return effect()
     },
-    betterSidebar: {
+    betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
     },
@@ -154,7 +240,7 @@ test('NotebookView subscribes to the locale registry for live language switches'
     effect(effect) {
       return effect()
     },
-    betterSidebar: {
+    betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
     },
@@ -224,7 +310,7 @@ test('load posts the session and path and converts host failures into an error p
         effect(effect) {
           return effect()
         },
-        betterSidebar: {
+        betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
           hostRouteUrl(path) {
             return 'http://host/' + path
           },
@@ -989,7 +1075,7 @@ test('raw and source editors have keyboard focus rings without changing source f
   const { exports, styles } = await loadClient()
   exports.apply({
     effect: (effect) => effect(),
-    betterSidebar: {
+    betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
       hostRouteUrl: (path) => 'http://host/' + path,
       registerFileViewer: () => () => {},
     },
@@ -1381,7 +1467,7 @@ test('sanitizeUrl keeps Windows local image paths for the local resolver', async
 test('makeImageResolver resolves images next to a Windows absolute notebook path', async () => {
   const { exports } = await loadClient()
   const { makeImageResolver, normalizePosix } = exports.__test
-  const ctx = { betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route } }
+  const ctx = { betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'], hostRouteUrl: (route) => 'http://host/' + route } }
   const scope = { sessionId: 's1', cwd: 'C:\\Users\\me\\notes' }
   const filePath = (resolved) => new URL(resolved).searchParams.get('path')
   const resolve = makeImageResolver(ctx, scope, 'C:\\Users\\me\\notes\\nb\\demo.ipynb', { attachments: {} })
