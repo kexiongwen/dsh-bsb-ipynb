@@ -14,14 +14,14 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.2+" src="https://img.shields.io/badge/DSH-0.2.2--rc.2%2B-4C8DFF"></a>
-  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
+  <a href="https://github.com/omdsh-dev/DSH-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
 </p>
 
 <p align="center">
   <a href="README.md">English</a> · 中文
 </p>
 
-`dsh-bsb-ipynb` 是一个 [DSH Better Sidebar](https://github.com/dong-victor/dsh-better-sidebar) 插件，把侧边栏文件树变成可用的 Jupyter Notebook 工作区：点开任意 `.ipynb` 即可阅读、编辑、运行并保存，操作体验与 Jupyter 一致。内核由宿主进程通过 `jupyter_client` + `ipykernel` 启动，浏览器端不运行 Python，也无需构建。
+`dsh-bsb-ipynb` 是一个 [DSH Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 插件，把侧边栏文件树变成可用的 Jupyter Notebook 工作区：点开任意 `.ipynb` 即可阅读、编辑、运行并保存，操作体验与 Jupyter 一致。内核由宿主进程通过 `jupyter_client` + `ipykernel` 启动，浏览器端不运行 Python，也无需构建。
 
 <p align="center">
   <img src="docs/screenshot.png" width="100%" alt="在 DSH Better Sidebar 中打开的 Notebook：Markdown、已执行代码与内联 matplotlib 图">
@@ -163,7 +163,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | POST | `/ipynb/restart` | 重启内核，可同时切换 `python` |
 | POST | `/ipynb/shutdown` | 关闭内核 |
 
-除 `/health`、`/interpreters`、`/config` 外，所有接口都需要非空 `sessionId` 与 `path`（`/status` 与 `/image` 使用查询参数，其余使用 JSON body）。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
+Notebook 相关接口需要非空 `sessionId` 与 `path`（`/status` 与 `/image` 使用查询参数，其余使用 JSON body）；`/kernels` 只需 `sessionId`，`/health`、`/interpreters`、`/config` 不需要会话参数。`/execute` 在响应头写入前的错误返回 JSON envelope；写入后失败则以 `{type:'fatal',code,message}` NDJSON 事件结束。
 
 错误码：`bad-request`、`forbidden`、`workspace-unknown`、`path-outside-root`、`not-found`、`read-blocked`、`not-notebook`、`too-large`、`write-conflict`、`write-blocked`、`write-failed`、`kernel-busy`、`kernel-unavailable`、`interpreter-unknown`、`method-not-allowed`、`internal`。
 
@@ -173,7 +173,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 - 不支持 `input()`：内核以 `allow_stdin=False` 启动，调用会立即报错而非挂起。`%%` cell magic 与 `!cmd`、`%pip`、`%cd`、`%pwd` 可用。
 - 中断后约 3 秒内核仍未响应会被强制重启，所有变量与内核状态都会清空。
 - 执行结果由客户端回写并在保存时落盘；服务端不会在后台追加输出。
-- 暂无「新建 notebook」向导：可在文件树中新建空 `.ipynb`，或直接打开已有文件。
+- 暂无需要单独配置的新建向导：可通过目录的「新建 Notebook」操作直接创建，或打开已有文件。
 - **路径错误信息侧信道**：工作区外已存在且可访问的目标通常返回 403，不存在或不可访问的目标返回 404（可能附 reason）。已通过准入校验的同用户客户端可借此探测宿主路径的存在性/可访问性；该行为不会放开工作区外的读取或写入。
 - **Windows**：中断无法送达 ipykernel，约 3 秒后强制重启内核并清空变量（即上文的中断超时行为）；只读或被占用的 notebook 保存返回 `write-blocked`（409），被独占锁定的文件读取返回 `read-blocked`（409）。
 - 输出特别大时会拖慢浏览器渲染，建议及时清空输出或分段执行。
@@ -188,6 +188,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | NDJSON 待发队列 / 单行内核输出 | 64 MiB / 64 MiB |
 | metadata | 每个值 100 层 / 10,000 个节点 |
 | JSON MIME 值（输出 / 附件） | 每个值 100 层 / 250,000 个节点 |
+| HTML 输出清洗 | 100 层 / 250,000 个节点；超限片段显示为转义文本 |
 | 整本 notebook 结构上限 | 128 层 / 1,000,000 个节点，保存时包含拆分后的源码行 |
 | 自动保存（默认）/ 内核状态轮询 / NDJSON ping | 1.5 秒 / 10 秒 / 15 秒 |
 | ready / shutdown 宽限 / 中断宽限 | 30 秒 / 2 秒 + 2 秒 + 500ms 退出确认 / 3 秒 |
@@ -208,11 +209,13 @@ npm install       # 安装仅开发期使用的 Playwright，供固定版本浏�
 npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1 上运行 E2E
 ```
 
+上述默认 E2E 命令使用普通工作区根。需要验证宿主指定的备用根兼容路径时，在 macOS/Linux 运行 `DSH_IPYNB_E2E_WORKTREE=1 npm run test:e2e`；Windows PowerShell 使用 `$env:DSH_IPYNB_E2E_WORKTREE='1'; npm run test:e2e`。
+
 浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，检查 viewer 设置面板，通过真实文件树打开生成的 notebook，经受限路由渲染本地图片，再用编辑器头部的 **全部运行** 操作执行，检查内核页面，再从目录行操作新建另一个 notebook，并校验第一个 notebook 在真实 Python 内核下自动保存的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
 
 主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
 
-版本变更见 [CHANGELOG.md](CHANGELOG.md)；合并的 macOS + Windows 审核与已知问题记录见 [CODE_REVIEW.md](CODE_REVIEW.md)。
+版本变更见 [CHANGELOG.md](CHANGELOG.md)；当前未解决问题与验证证据见 [CODE_REVIEW.md](CODE_REVIEW.md)。
 
 ## 🤝 贡献
 

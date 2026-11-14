@@ -14,14 +14,14 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.2+" src="https://img.shields.io/badge/DSH-0.2.2--rc.2%2B-4C8DFF"></a>
-  <a href="https://github.com/dong-victor/dsh-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
+  <a href="https://github.com/omdsh-dev/DSH-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
 </p>
 
 <p align="center">
   <a href="README_ZH.md">中文</a> · English
 </p>
 
-`dsh-bsb-ipynb` is a [DSH Better Sidebar](https://github.com/dong-victor/dsh-better-sidebar) plugin that turns the sidebar's file tree into a Jupyter notebook workspace. Click any `.ipynb` to read, edit, run and save it as you would in Jupyter. Kernels run in the host process through `jupyter_client` + `ipykernel`, so nothing Python-related runs in the browser and there is no build step.
+`dsh-bsb-ipynb` is a [DSH Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) plugin that turns the sidebar's file tree into a Jupyter notebook workspace. Click any `.ipynb` to read, edit, run and save it as you would in Jupyter. Kernels run in the host process through `jupyter_client` + `ipykernel`, so nothing Python-related runs in the browser and there is no build step.
 
 <p align="center">
   <img src="docs/screenshot.png" width="100%" alt="A notebook in the DSH Better Sidebar: markdown cells, executed code cells and an inline matplotlib plot">
@@ -163,7 +163,7 @@ All routes are mounted under `/ipynb`. JSON APIs return `{ok:true,value}` or `{o
 | POST | `/ipynb/restart` | Restart the kernel, optionally switching `python` |
 | POST | `/ipynb/shutdown` | Shut the kernel down |
 
-All routes except `/health`, `/interpreters` and `/config` require a non-empty `sessionId` and `path` (query parameters for `/status` and `/image`, JSON body for the rest). `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
+Notebook routes require a non-empty `sessionId` and `path` (query parameters for `/status` and `/image`, JSON body for the rest). `/kernels` requires only `sessionId`; `/health`, `/interpreters` and `/config` do not require session parameters. `/execute` reports pre-header errors as the JSON envelope; after headers, failures arrive as `{type:'fatal',code,message}` NDJSON events.
 
 Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root`, `not-found`, `read-blocked`, `not-notebook`, `too-large`, `write-conflict`, `write-blocked`, `write-failed`, `kernel-busy`, `kernel-unavailable`, `interpreter-unknown`, `method-not-allowed`, `internal`.
 
@@ -173,7 +173,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 - No `input()`: kernels start with `allow_stdin=False`, so calls fail immediately rather than hanging. `%%` cell magics and `!cmd`, `%pip`, `%cd`, `%pwd` work.
 - If the kernel is still unresponsive about 3 s after an interrupt, it is force-restarted and all variables and kernel state are lost.
 - Results are written back by the client and persisted on save; the server never appends output in the background.
-- No "new notebook" wizard yet: create an empty `.ipynb` in the file tree or open an existing file.
+- No separate configuration wizard: use a directory's **New notebook** action to create a file directly, or open an existing notebook.
 - **Path-error side channel** — for a path outside the session workspace, an existing and accessible target generally returns 403, while a missing or inaccessible target returns 404 (possibly with a reason). An already-admitted same-user client can use this distinction to probe host path existence or accessibility; it does not allow reading or writing outside the workspace.
 - **Windows**: an interrupt cannot reach ipykernel, so it force-restarts the kernel after about 3 s and clears all variables (the generic interrupt timeout above); read-only or locked notebooks reject saves with `write-blocked` (409) and locked files fail reads with `read-blocked` (409).
 - Very large outputs make browser rendering slow; clear outputs or run in smaller chunks.
@@ -188,6 +188,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 | Pending NDJSON queue / single kernel output line | 64 MiB / 64 MiB |
 | Metadata | 100 levels / 10,000 nodes per value |
 | JSON MIME values (outputs / attachments) | 100 levels / 250,000 nodes per value |
+| HTML output sanitization | 100 levels / 250,000 nodes; larger fragments are shown as escaped text |
 | Complete notebook structure | 128 levels / 1,000,000 nodes, including source lines on save |
 | Autosave (default) / kernel status polling / NDJSON ping | 1.5 s / 10 s / 15 s |
 | Ready timeout / shutdown grace / interrupt grace | 30 s / 2 s + 2 s + 500 ms exit confirmation / 3 s |
@@ -208,11 +209,13 @@ npm install       # Playwright (dev-only) for the pinned browser E2E
 npm run test:e2e  # isolated DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1
 ```
 
+The default E2E command above uses the normal workspace root. To exercise the host-selected alternate-root compatibility lane, run `DSH_IPYNB_E2E_WORKTREE=1 npm run test:e2e` on macOS/Linux; in Windows PowerShell, use `$env:DSH_IPYNB_E2E_WORKTREE='1'; npm run test:e2e`.
+
 The browser E2E creates a temporary `DSH_HOME`, installs this checkout plus the pinned `dsh-better-sidebar` into a fresh Web profile, boots `dsh` on a free port, checks the viewer settings panel, opens a generated notebook through the real file tree, renders a local image through the confined route, and runs it through the editor-header **Run all** action, checks the Kernels page, creates another notebook from a directory row action and asserts the first notebook's autosaved output with the real Python kernel. It needs Google Chrome, network access for the first pnpm install, and a DSH CLI (`DSH_E2E_DSH_BIN`, or `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE` when run inside DSH Desktop). Update `PINNED_DSH` / `PINNED_BSB` in `test/e2e/run.mjs` when upgrading deliberately; the client runtime guard rejects older Better Sidebar builds. Set `DSH_E2E_KEEP=1` to keep the temporary DSH home for inspection. Run it after any DSH / Better Sidebar bump and before a release; CI runs the three-OS unit matrix plus this pinned E2E lane.
 
 The theme tests in `test/client-theme.test.mjs` resolve the injected stylesheet against the stock palette fixture in `test/fixtures/dsh-theme-tokens.json`; update that fixture deliberately when the DSH palette changes. Real-kernel tests skip automatically when no candidate interpreter provides `jupyter_client`/`ipykernel`; schema tests that need `nbformat` skip as well. Set `DSH_IPYNB_TEST_PYTHON` to choose the interpreter used by tests; in CI, set it explicitly and check for unexpected skips. CI runs the suite on `ubuntu-latest`, `windows-latest` and `macos-latest`. The ~28 case-sensitivity regression tests in `test/control-symlink.test.mjs` run only on case-insensitive file systems (macOS APFS, Windows NTFS) that also allow symlink creation; on Linux or a Windows account without Developer Mode they skip through the capability probe. The access-control cases in `test/routes.test.mjs` that need a non-root user skip automatically when the suite runs as root.
 
-See [CHANGELOG.md](CHANGELOG.md) for release notes and [CODE_REVIEW.md](CODE_REVIEW.md) for the combined macOS + Windows review and known-issue log.
+See [CHANGELOG.md](CHANGELOG.md) for release notes and [CODE_REVIEW.md](CODE_REVIEW.md) for current unresolved issues and verification evidence.
 
 ## 🤝 Contributing
 
