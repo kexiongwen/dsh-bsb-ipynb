@@ -111,6 +111,15 @@ function mountNotebook(t, options = {}) {
         },
       }
     : undefined
+  const settingListeners = new Set()
+  let pluginSettings = { autosaveMs: options.autosaveMs || 1500 }
+  const store = options.settings ? {
+    getPrefs: () => ({ pluginSettings: { 'dsh-bsb-ipynb:notebook': pluginSettings } }),
+    subscribe(listener) {
+      settingListeners.add(listener)
+      return () => settingListeners.delete(listener)
+    },
+  } : undefined
   let props = {
     ctx: {
       betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, registerTab: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'], hostRouteUrl: (route) => 'http://host/' + route },
@@ -120,6 +129,7 @@ function mountNotebook(t, options = {}) {
     visible: options.visible === undefined ? false : options.visible,
     customData: options.customData || notebookData(),
     onReload: options.hostReload === false ? undefined : () => { hostReloads += 1 },
+    store,
   }
   const sameDeps = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => Object.is(value, b[index]))
   const memo = (factory, deps) => {
@@ -301,6 +311,12 @@ function mountNotebook(t, options = {}) {
     receive(data) {
       props = { ...props, customData: data }
       needsRender = true
+      flush()
+    },
+    setAutosaveMs(value) {
+      assert.ok(store, 'the settings store is enabled for this fixture')
+      pluginSettings = { ...pluginSettings, autosaveMs: value }
+      for (const listener of [...settingListeners]) listener()
       flush()
     },
     cancelReload() { confirmResult = false; api.toolbar.onReload(); flush(); confirmResult = true },
@@ -777,6 +793,29 @@ test('write-blocked saves retry unchanged snapshots with backoff and stop after 
   for (const delay of [1500, 6000, 24000, 30000]) {
     assert.equal(app.timersFor(delay).length, 0, 'a clean notebook leaves no retry armed')
   }
+})
+
+test('save completions use the latest autosave setting', async (t) => {
+  const successful = mountNotebook(t, { settings: true, autosaveMs: 1500 })
+  await successful.settle()
+  successful.edit()
+  const save = successful.save()
+  successful.setAutosaveMs(10000)
+  save.resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await successful.settle()
+  successful.edit('print("new delay")')
+  assert.equal(successful.timersFor(10000).length, 1, 'the next edit uses the new delay')
+  assert.equal(successful.timersFor(1500).length, 0, 'the old save cannot restore its captured delay')
+
+  const blocked = mountNotebook(t, { settings: true, autosaveMs: 10000 })
+  await blocked.settle()
+  blocked.edit()
+  const failure = blocked.save()
+  blocked.setAutosaveMs(300)
+  failure.resolve(response({ ok: false, error: { code: 'write-blocked', message: 'locked', details: { reason: 'locked' } } }, 409))
+  await blocked.settle()
+  assert.equal(blocked.timersFor(1200).length, 1, 'retry backoff is based on the latest 300ms setting')
+  assert.equal(blocked.timersFor(30000).length, 0, 'the failed save cannot reuse its old 10s setting')
 })
 
 test('ordinary save failures wait for an edit and clear their banner after the next success', async (t) => {
@@ -1456,6 +1495,35 @@ test('a hidden notebook keeps a stopped kernel off through execution preflight f
   assert.equal(app.bannerText, chinese)
 })
 
+test('a failed interrupt is visible and does not partially stop Run all', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  const twoCells = notebookData()
+  twoCells.notebook.cells.push({ ...twoCells.notebook.cells[0], id: 'cell-2', source: 'print("second")' })
+  await app.reload(twoCells)
+  app.toolbar.onRunAll()
+  app.flush()
+  const first = app.requests('execute')[0]
+  const stream = executionStream()
+  first.resolve(stream.response)
+  await app.settle()
+
+  app.toolbar.onInterrupt()
+  await app.settle()
+  const interrupt = app.requests('interrupt')[0]
+  assert.ok(interrupt)
+  interrupt.resolve(response({ ok: false, error: { code: 'internal', message: 'INTERRUPT_FAILED' } }, 500))
+  await app.settle()
+  assert.equal(app.banner?.kind, 'error')
+  assert.equal(app.banner?.key, 'interruptFailed')
+  assert.match(app.bannerText, /INTERRUPT_FAILED/)
+
+  stream.emit({ type: 'execute_reply', cell_id: 'cell-1', ok: true, execution_count: 2 })
+  stream.end()
+  await app.settle()
+  assert.equal(app.requests('execute').length, 2, 'a failed interrupt leaves the batch plan unchanged')
+})
+
 test('a kernel death is not undone by the terminal reply it precedes', async (t) => {
   const app = mountNotebook(t)
   await app.settle()
@@ -1717,6 +1785,45 @@ test('editing shortcuts do not double-fire and the window listener follows the v
   hidden.flush()
   assert.equal(shown.defaultPrevented, true, 'the now-active viewer handles the shortcut again')
   assert.equal(hidden.requests('save').length, 1)
+})
+
+test('editing save shortcuts ignore auto-repeat and AltGr text input', async (t) => {
+  const app = mountNotebook(t, { visible: true })
+  await app.settle()
+  app.cell.onEdit('cell-1')
+  app.flush()
+  const editor = () => {
+    const view = app.component('CellView')
+    return findElement(view.type(view.props), (value) => value.type === 'textarea')
+  }
+  const makeEvent = (key, extra = {}) => ({
+    key,
+    target: { tagName: 'TEXTAREA' },
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true },
+    ...extra,
+  })
+
+  const first = makeEvent('s', { code: 'KeyS', ctrlKey: true })
+  editor().props.onKeyDown(first)
+  app.flush()
+  assert.equal(app.requests('save').length, 1)
+  app.requests('save')[0].resolve(response({ ok: true, value: { version: 'v2', size: 42 } }))
+  await app.settle()
+  assert.equal(app.toolbar.dirty, false)
+  assert.equal(app.cell.editing, true)
+
+  const repeat = makeEvent('s', { code: 'KeyS', ctrlKey: true, repeat: true })
+  editor().props.onKeyDown(repeat)
+  app.flush()
+  assert.equal(repeat.defaultPrevented, false, 'a repeated key is left to the editor')
+  assert.equal(app.requests('save').length, 1, 'a clean notebook is not written again by key repeat')
+
+  const altGr = makeEvent('š', { code: 'KeyS', ctrlKey: true, altKey: true })
+  editor().props.onKeyDown(altGr)
+  app.flush()
+  assert.equal(altGr.defaultPrevented, false, 'AltGr text input is not prevented')
+  assert.equal(app.requests('save').length, 1, 'AltGr does not trigger save')
 })
 
 // ---------------------------------------------------------------------------

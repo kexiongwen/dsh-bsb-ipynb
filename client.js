@@ -28,6 +28,7 @@ window.__ModuleLoader__.load({
         runAll: 'Run all',
         run: 'Run',
         interrupt: 'Interrupt',
+        interruptFailed: 'The interrupt request failed. Check the kernel status and try again.',
         restart: 'Restart',
         save: 'Save',
         reload: 'Reload',
@@ -118,6 +119,7 @@ window.__ModuleLoader__.load({
         runAll: '全部运行',
         run: '运行',
         interrupt: '中断',
+        interruptFailed: '中断请求失败，请检查内核状态后重试。',
         restart: '重启',
         save: '保存',
         reload: '重新加载',
@@ -1078,8 +1080,10 @@ window.__ModuleLoader__.load({
 
     // Ctrl/Cmd+S regardless of CapsLock: with the lock on (or Shift held) the
     // browser reports event.key === 'S', so match the physical key as well.
+    // AltGr arrives as Ctrl+Alt on Windows and must remain text input; a held
+    // key must not keep writing an already-clean notebook.
     function isSaveShortcut(event) {
-      if (!event || isImeKeyEvent(event) || !(event.metaKey || event.ctrlKey)) return false
+      if (!event || isImeKeyEvent(event) || event.repeat === true || event.altKey || !(event.metaKey || event.ctrlKey)) return false
       if (event.code === 'KeyS') return true
       return typeof event.key === 'string' && event.key.toLowerCase() === 's'
     }
@@ -2204,6 +2208,7 @@ window.__ModuleLoader__.load({
       const savingRef = useRef(null)
       const saveRef = useRef(null)
       const pythonRef = useRef('')
+      const autosaveMsRef = useRef(autosaveMs)
       const reloadRequestRef = useRef(0)
       const reloadWaitingRef = useRef(null)
       const saveTimerRef = useRef(null)
@@ -2241,6 +2246,7 @@ window.__ModuleLoader__.load({
       notebookRef.current = notebook
       versionRef.current = version
       pythonRef.current = python
+      autosaveMsRef.current = autosaveMs
       loadStatusRef.current = loadStatus
       visibleRef.current = visible
 
@@ -2312,7 +2318,7 @@ window.__ModuleLoader__.load({
         setDirty(false)
         setConflict(null)
         setAutosaveBlocked(false)
-        setAutosaveDelay(autosaveMs)
+        setAutosaveDelay(autosaveMsRef.current)
         failedSnapshotRef.current = null
         setEditingCell(null)
         setEmptyFile(false)
@@ -2411,7 +2417,7 @@ window.__ModuleLoader__.load({
         setDirty(false)
         setConflict(null)
         setAutosaveBlocked(true)
-        setAutosaveDelay(autosaveMs)
+        setAutosaveDelay(autosaveMsRef.current)
         failedSnapshotRef.current = null
         setEditingCell(null)
         setEmptyFile(false)
@@ -2496,7 +2502,7 @@ window.__ModuleLoader__.load({
             setDirty(true)
           }
           setSaveState('saved')
-          setAutosaveDelay(autosaveMs)
+          setAutosaveDelay(autosaveMsRef.current)
           setEmptyFile(false)
           setConflict(null)
           setBanner((current) => (current && SAVE_BANNER_REASONS.has(current.reason) ? null : current))
@@ -2522,7 +2528,7 @@ window.__ModuleLoader__.load({
             })
             // Retry with backoff instead of hitting the same filesystem error
             // on every autosave tick.
-            setAutosaveDelay((current) => blockedAutosaveDelay(current, autosaveMs))
+            setAutosaveDelay((current) => blockedAutosaveDelay(current, autosaveMsRef.current))
           } else {
             setBanner({ kind: 'error', reason: 'save-failed', key: 'saveFailed', text: error && error.message })
           }
@@ -2903,11 +2909,20 @@ window.__ModuleLoader__.load({
       }, [conflict, runCell])
 
       const interrupt = useCallback(async () => {
+        const previousStop = stopRef.current
         stopRef.current = true
         try {
           await postJson(ctx, 'interrupt', { sessionId: scope && scope.sessionId, path })
         } catch (error) {
-          if (error && error.code === 'kernel-unavailable') setBanner({ kind: 'info', key: 'kernel', textKey: 'off' })
+          if (error && error.code === 'kernel-unavailable') {
+            setBanner({ kind: 'info', key: 'kernel', textKey: 'off' })
+          } else {
+            // A rejected request must not stop only the cells after the current
+            // one while leaving that cell running. Restore the batch plan and
+            // make the failure visible so the user can retry deliberately.
+            stopRef.current = previousStop
+            setBanner({ kind: 'error', key: 'interruptFailed', text: error && error.message })
+          }
         }
       }, [ctx, path, scope])
 
@@ -3403,22 +3418,52 @@ window.__ModuleLoader__.load({
       const [loading, setLoading] = useState(true)
       const [error, setError] = useState('')
       const [pending, setPending] = useState('')
+      const sessionRef = useRef(sessionId)
+      const mountedRef = useRef(true)
+      const loadRequestRef = useRef(0)
+      sessionRef.current = sessionId
 
       const load = useCallback(async () => {
+        const requestId = ++loadRequestRef.current
+        const isCurrent = () => mountedRef.current && sessionRef.current === sessionId && requestId === loadRequestRef.current
         if (!sessionId) {
-          setLoading(false)
+          if (isCurrent()) {
+            setKernels([])
+            setError('')
+            setLoading(false)
+          }
           return
         }
         try {
           const value = await getJson(ctx, 'kernels', { sessionId })
+          if (!isCurrent()) return
           setKernels(Array.isArray(value.kernels) ? value.kernels : [])
           setError('')
         } catch (loadError) {
+          if (!isCurrent()) return
           setError(loadError && loadError.message ? loadError.message : t('kernelsError'))
         } finally {
-          setLoading(false)
+          if (isCurrent()) setLoading(false)
         }
       }, [ctx, sessionId])
+
+      useEffect(() => {
+        mountedRef.current = true
+        return () => {
+          mountedRef.current = false
+          loadRequestRef.current += 1
+        }
+      }, [])
+
+      useEffect(() => {
+        // A different workspace must never display or act on the previous
+        // session's kernels while its first request is still in flight.
+        loadRequestRef.current += 1
+        setKernels([])
+        setError('')
+        setPending('')
+        setLoading(Boolean(sessionId))
+      }, [sessionId])
 
       useEffect(() => {
         if (!sessionId) {
@@ -3430,42 +3475,54 @@ window.__ModuleLoader__.load({
           if (!cancelled) void load()
         }
         poll()
-        if (visible === false) return () => { cancelled = true }
+        if (visible === false) {
+          return () => {
+            cancelled = true
+            loadRequestRef.current += 1
+          }
+        }
         const timer = setInterval(poll, 5000)
         return () => {
           cancelled = true
+          loadRequestRef.current += 1
           clearInterval(timer)
         }
       }, [load, sessionId, visible])
 
       const act = async (kind, kernel) => {
+        const actionSession = sessionId
+        const isCurrent = () => mountedRef.current && sessionRef.current === actionSession
         const key = kind + ':' + kernel.path
         setPending(key)
         setError('')
         try {
-          const body = { sessionId, path: kernel.path }
+          const body = { sessionId: actionSession, path: kernel.path }
           if (kind === 'restart' && typeof kernel.python === 'string' && kernel.python) body.python = kernel.python
           await postJson(ctx, kind === 'stop' ? 'shutdown' : 'restart', body)
+          if (!isCurrent()) return
           await load()
         } catch (actionError) {
-          setError(actionError && actionError.message ? actionError.message : t('notebookActionFailed'))
+          if (isCurrent()) setError(actionError && actionError.message ? actionError.message : t('notebookActionFailed'))
         } finally {
-          setPending('')
+          if (isCurrent()) setPending('')
         }
       }
 
       const createNotebook = async () => {
         if (!sessionId) return
+        const actionSession = sessionId
+        const isCurrent = () => mountedRef.current && sessionRef.current === actionSession
         setPending('create')
         setError('')
         try {
-          const value = await postJson(ctx, 'create', { sessionId, path: scope.cwd || '.' })
+          const value = await postJson(ctx, 'create', { sessionId: actionSession, path: scope.cwd || '.' })
+          if (!isCurrent()) return
           ctx.betterSidebar.openFile(scope, value.path, value.name)
           await load()
         } catch (createError) {
-          setError(createError && createError.message ? createError.message : t('createNotebookFailed'))
+          if (isCurrent()) setError(createError && createError.message ? createError.message : t('createNotebookFailed'))
         } finally {
-          setPending('')
+          if (isCurrent()) setPending('')
         }
       }
 

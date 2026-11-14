@@ -192,6 +192,7 @@ test('registers the Kernels sidebar tab and formats idle durations', async () =>
   const { exports } = await loadClient({
     useState(initial) { return [initial, () => {}] },
     useEffect() {},
+    useRef(value) { return { current: value } },
     useCallback(callback) { return callback },
   })
   const tabs = []
@@ -225,6 +226,91 @@ test('registers the Kernels sidebar tab and formats idle durations', async () =>
   })
   assert.equal(tree.type, 'div')
   assert.match(tree.props.className, /dsh-bsb-ipynb-kernels/)
+})
+
+async function mountKernelsPage(t) {
+  const states = []
+  const refs = []
+  const effectSlots = []
+  let stateCursor = 0
+  let refCursor = 0
+  let effectCursor = 0
+  let effects = []
+  const sameDeps = (left, right) => Array.isArray(left) && Array.isArray(right) &&
+    left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
+  const { exports } = await loadClient({
+    useState(initial) {
+      const index = stateCursor++
+      if (!(index in states)) states[index] = initial
+      return [states[index], (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value
+      }]
+    },
+    useRef(initial) {
+      const index = refCursor++
+      if (!(index in refs)) refs[index] = { current: initial }
+      return refs[index]
+    },
+    useCallback(callback) { return callback },
+    useEffect(callback, deps) { effects.push({ callback, deps }) },
+  })
+  const ctx = { betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route } }
+  const render = (sessionId) => {
+    stateCursor = 0
+    refCursor = 0
+    effectCursor = 0
+    effects = []
+    exports.__test.KernelsPage({ ctx, scope: { sessionId, cwd: '/' + sessionId }, visible: false })
+    for (const { callback, deps } of effects) {
+      const index = effectCursor++
+      const previous = effectSlots[index]
+      if (previous && sameDeps(previous.deps, deps)) continue
+      previous?.cleanup?.()
+      effectSlots[index] = { deps, cleanup: callback() }
+    }
+  }
+  t.after(() => {
+    for (const slot of effectSlots) slot?.cleanup?.()
+  })
+  return { states, render }
+}
+
+test('the Kernels page ignores a response from a replaced session', async (t) => {
+  const page = await mountKernelsPage(t)
+  const requests = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (url) => new Promise((resolve) => {
+    requests.push({
+      url,
+      respond(kernels) {
+        resolve({ ok: true, json: async () => ({ ok: true, value: { kernels } }) })
+      },
+    })
+  })
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  try {
+    page.render('old-session')
+    assert.match(requests[0].url, /sessionId=old-session/)
+    page.render('new-session')
+    assert.match(requests[1].url, /sessionId=new-session/)
+    requests[1].respond([{ path: '/new-session/demo.ipynb' }])
+    await flush()
+    assert.equal(page.states[0][0].path, '/new-session/demo.ipynb')
+    requests[0].respond([{ path: '/old-session/demo.ipynb' }])
+    await flush()
+    assert.equal(page.states[0][0].path, '/new-session/demo.ipynb', 'the old session cannot overwrite the current list')
+
+    page.render('new-session')
+    page.render('new-session')
+    assert.equal(requests.length, 4, 'two refreshes are in flight for the current session')
+    requests[3].respond([{ path: '/new-session/latest.ipynb' }])
+    await flush()
+    requests[2].respond([{ path: '/new-session/stale.ipynb' }])
+    await flush()
+    assert.equal(page.states[0][0].path, '/new-session/latest.ipynb', 'an older refresh cannot overwrite the latest response')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('normalizes persisted plugin settings and reads them from the BSB store', async () => {
@@ -771,6 +857,7 @@ test('reading-mode shortcut resolver handles modifiers, IME and already-handled 
   assert.deepEqual(resolveReadingShortcut({ key: 's', ctrlKey: true }, context), { action: 'save', cellId: null })
   assert.deepEqual(resolveReadingShortcut({ key: 'S', ctrlKey: true }, context), { action: 'save', cellId: null }, 'CapsLock')
   assert.deepEqual(resolveReadingShortcut({ code: 'KeyS', key: 'Unidentified', metaKey: true }, context), { action: 'save', cellId: null })
+  assert.equal(resolveReadingShortcut({ key: 'š', code: 'KeyS', ctrlKey: true, altKey: true }, context), null, 'AltGr is text input, not Ctrl+S')
   assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, isComposing: true }, context), null, 'IME composition')
   assert.equal(resolveReadingShortcut({ key: 's', ctrlKey: true, keyCode: 229 }, context), null, 'IME keyCode 229')
   assert.equal(
@@ -1622,6 +1709,7 @@ test('cell shortcuts ignore IME composition and accept CapsLock Ctrl+S', async (
   assert.equal(isSaveShortcut({ key: 'S', ctrlKey: true }), true, 'CapsLock reports an uppercase key')
   assert.equal(isSaveShortcut({ key: 'S', metaKey: true }), true)
   assert.equal(isSaveShortcut({ code: 'KeyS', key: 'Unidentified', ctrlKey: true }), true)
+  assert.equal(isSaveShortcut({ key: 'š', code: 'KeyS', ctrlKey: true, altKey: true }), false, 'AltGr must not save')
   assert.equal(isSaveShortcut({ key: 'S', ctrlKey: false }), false)
   assert.equal(isSaveShortcut({ key: 'S', ctrlKey: true, isComposing: true }), false)
   assert.equal(isSaveShortcut({ key: 'S', ctrlKey: true, keyCode: 229 }), false)
