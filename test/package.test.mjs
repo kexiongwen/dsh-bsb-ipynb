@@ -30,6 +30,7 @@ test('npm pack ships examples and linked documentation with the documented DSH m
   for (const required of [
     'README.md',
     'README_ZH.md',
+    'CHANGELOG.md',
     'docs/screenshot.png',
     'examples/demo.ipynb',
     'client.js',
