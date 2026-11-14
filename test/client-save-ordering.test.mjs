@@ -34,7 +34,7 @@ async function fixture(t) {
   const makeContext = (origin = 'http://host') => {
     const ctx = {
       effect(effect) { return effect() },
-      betterSidebar: { version: '0.32.1', features: ['hostRouteUrl'],
+      betterSidebar: { registerFileAction: () => () => {}, registerTabAction: () => () => {}, version: '0.32.1', features: ['hostRouteUrl', 'fileActions', 'tabActions'],
         hostRouteUrl: (route) => origin + '/' + route,
         registerFileViewer(viewer) { ctx.viewer = viewer; return () => {} },
       },

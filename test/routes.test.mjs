@@ -195,6 +195,47 @@ test('interpreters lists discovered entries with a default', async () => {
   assert.ok('default' in json.value)
 })
 
+test('create writes a new notebook in the requested workspace directory', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-create-route-')
+  const notes = path.join(dir, 'notes')
+  await mkdir(notes)
+  const ctx = makeCtx({ cwd: dir })
+
+  const first = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST', url: '/ipynb/create', body: { sessionId: 's1', path: notes },
+  }))
+  assert.equal(first.state.status, 200)
+  assert.equal(path.basename(first.json.value.path), 'Untitled.ipynb')
+  const notebook = JSON.parse(await readFile(first.json.value.path, 'utf8'))
+  assert.equal(notebook.nbformat, 4)
+  assert.equal(notebook.nbformat_minor, 5)
+
+  const second = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST', url: '/ipynb/create', body: { sessionId: 's1', path: notes },
+  }))
+  assert.equal(second.state.status, 200)
+  assert.equal(path.basename(second.json.value.path), 'Untitled 1.ipynb')
+})
+
+test('create rejects files and paths outside the workspace', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-create-gate-')
+  const file = path.join(dir, 'notes.txt')
+  await writeFile(file, 'not a notebook')
+  const ctx = makeCtx({ cwd: dir })
+
+  const notDirectory = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST', url: '/ipynb/create', body: { sessionId: 's1', path: file },
+  }))
+  assert.equal(notDirectory.state.status, 400)
+  assert.equal(notDirectory.json.error.code, 'bad-request')
+
+  const outside = await invoke(ctx, makeKernels(), makeReq({
+    method: 'POST', url: '/ipynb/create', body: { sessionId: 's1', path: path.dirname(dir) },
+  }))
+  assert.equal(outside.state.status, 403)
+  assert.equal(outside.json.error.code, 'path-outside-root')
+})
+
 test('config reads and updates the kernel idle timeout', async () => {
   const kernels = makeKernels()
   const initial = await invoke(makeCtx(), kernels, makeReq({ url: '/ipynb/config' }))

@@ -208,6 +208,14 @@ async function openRightSidebar(page) {
 }
 
 async function openFilesPage(page) {
+  // Once a notebook is open, the Files page is a tab on the same strip and
+  // the directory tree is hidden behind it.
+  const existingTab = page.locator('[title="Files"]:visible, [title="文件"]:visible').first()
+  if (await existingTab.count()) {
+    await existingTab.click()
+    await page.waitForTimeout(800)
+    return
+  }
   const files = page.getByRole('button', { name: /^(文件|Files)\b/i })
   if (await files.count()) {
     await files.first().click()
@@ -356,6 +364,11 @@ async function main() {
       },
     }, null, 1), 'utf8')
     await writeFile(notebookPath, JSON.stringify(notebookFor(marker), null, 1), 'utf8')
+    // A visible subdirectory gives the file-action lane a directory row to
+    // right-click; the action creates its notebook inside it.
+    const notesDir = path.join(workspaceDir, 'notes')
+    await mkdir(notesDir, { recursive: true })
+    await writeFile(path.join(notesDir, 'readme.md'), '# notes\n', 'utf8')
     log(`opening ${notebookName} in the isolated e2e-workspace`)
 
     log('booting dsh web')
@@ -391,10 +404,38 @@ async function main() {
     await openFilesPage(page)
     await openNotebook(page, notebookName)
 
-    log('running the notebook cell')
-    await page.getByRole('button', { name: /^(运行单元格|Run cell)$/ }).first().click()
+    log('running the notebook through the editor-header action')
+    const runAllButtons = page.getByRole('button', { name: /^(Run all|全部运行)$/ })
+    const runAllCount = await runAllButtons.count()
+    assert.ok(runAllCount >= 2, 'the editor header and the notebook toolbar both expose Run all')
+    await runAllButtons.last().click()
     await page.locator('.dsh-bsb-ipynb-root').getByText(marker, { exact: false }).first().waitFor({ timeout: 90_000 })
     await waitForSavedOutput(notebookPath, marker)
+
+    log('creating a notebook from the directory row action')
+    await openFilesPage(page)
+    const notesRow = page.getByText('notes', { exact: true }).last()
+    await notesRow.waitFor({ state: 'visible', timeout: 20_000 })
+    await notesRow.click({ button: 'right' })
+    const newNotebook = page.getByRole('menuitem', { name: /New notebook/ })
+    if (await newNotebook.count()) {
+      await newNotebook.first().click()
+    } else {
+      await page.getByText(/^New notebook$/).last().click()
+    }
+    const createdPath = path.join(notesDir, 'Untitled.ipynb')
+    const deadline = Date.now() + 20_000
+    while (Date.now() < deadline) {
+      try {
+        const created = JSON.parse(await readFile(createdPath, 'utf8'))
+        if (created.nbformat === 4 && created.cells.length > 0) break
+      } catch { /* not created yet */ }
+      await sleep(300)
+    }
+    const created = JSON.parse(await readFile(createdPath, 'utf8'))
+    assert.equal(created.nbformat, 4)
+    assert.ok(created.cells.length > 0, 'the new notebook has an empty code cell')
+    await page.locator('.dsh-bsb-ipynb-root:visible').first().waitFor({ timeout: 20_000 })
 
     if (pageErrors.length) {
       throw new Error('page errors during the run:\n' + pageErrors.map((error) => error.stack || error.message).join('\n'))

@@ -8,6 +8,7 @@ import {
   METADATA_DEPTH_LIMIT,
   METADATA_NODE_LIMIT,
   NOTEBOOK_CAP_BYTES,
+  createNotebookFile,
   emptyNotebook,
   normalizeNotebook,
   parseNotebookBytes,
@@ -30,6 +31,20 @@ test('empty notebook is nbformat 4.5 with one code cell', () => {
   assert.equal(notebook.cells[0].cell_type, 'code')
   assert.deepEqual(notebook.cells[0].outputs, [])
   assert.match(notebook.metadata.kernelspec.name, /python/)
+})
+
+test('createNotebookFile allocates race-safe Untitled names and writes nbformat 4.5', async (t) => {
+  const dir = await tempDir(t, 'dsh-bsb-ipynb-create-')
+  const first = await createNotebookFile(dir)
+  const second = await createNotebookFile(dir)
+  assert.equal(path.basename(first), 'Untitled.ipynb')
+  assert.equal(path.basename(second), 'Untitled 1.ipynb')
+  const notebook = JSON.parse(await readFile(first, 'utf8'))
+  assert.equal(notebook.nbformat, 4)
+  assert.equal(notebook.nbformat_minor, 5)
+  assert.equal(notebook.cells.length, 1)
+  assert.equal(notebook.cells[0].cell_type, 'code')
+  assert.deepEqual(notebook.cells[0].outputs, [])
 })
 
 test('serialize produces source line arrays and round-trips', () => {

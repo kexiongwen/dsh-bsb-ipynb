@@ -27,7 +27,8 @@ npm run test:e2e     # pinned DSH + Better Sidebar browser smoke test
 ```
 
 `npm run test:e2e` creates an isolated `DSH_HOME`, boots the pinned DSH Web
-profile and drives the real file tree. It accepts `DSH_E2E_DSH_BIN`, or uses
+profile, and drives the settings panel, editor-header actions and file-tree
+actions through Chrome. It accepts `DSH_E2E_DSH_BIN`, or uses
 `DSH_INSTALL_DIR` / `DSH_NODE_EXECUTABLE` when run inside DSH Desktop. Keep
 `PINNED_DSH` and `PINNED_BSB` in `test/e2e/run.mjs` in sync when upgrading.
 

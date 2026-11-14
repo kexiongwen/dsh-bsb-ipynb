@@ -35,6 +35,7 @@
 - **保存**：写回 nbformat 4.5；以 sha256 版本号实现乐观并发控制（冲突返回 409，绝不静默覆盖）；在同一目录写入临时文件后原子 rename；编辑后默认 1.5 秒自动保存（可在设置面板调整）。
 - **解释器发现**：按 `DSH_IPYNB_PYTHON` → conda 环境 → PATH 上的 `python3`/`python` → DSH 内置 Python 的顺序查找，且只选择安装了 `jupyter_client` + `ipykernel` 的环境；`DSH_IPYNB_PYTHON` 必须是**绝对路径**，相对路径或不可用的值仍会出现在 `/ipynb/interpreters` 列表中并附原因，但不会被使用；启动配置在插件进程内构造，同名系统 kernelspec 不会改变所选解释器。
 - **设置面板**：可在「设置 → 侧边卡片」的 viewer 齿轮面板中调整自动保存延迟、默认解释器、内核空闲超时，以及带可用性说明的解释器列表；设置对所有已打开的 notebook 生效；无头部署仍以 `DSH_IPYNB_KERNEL_IDLE_MS` 为默认值。
+- **文件/标签页操作**：在 Better Sidebar 文件树中右键目录可新建 notebook；打开的 notebook 可在编辑器头部执行全部运行、中断与重启。
 - **与 DSH 集成**：所有颜色跟随 DSH 主题——状态色、banner、链接与 Python 语法高亮消费 `--dsw-alias-*` 与 Shiki 变量，单元格/编辑器/输出字号跟随 DSH 的正文与代码字号设置（暗色即宿主按「主题设置 × 系统配色」解析出的调色板，插件侧不做主题侦测）；界面文案注册在 `dsh-bsb-ipynb` locale 命名空间下，跟随 DSH 的中英文语言偏好。
 - **访问边界**：路径限制在会话工作区内（realpath + 相对路径校验）；HTTP 路由复用 DSH 的 admission fence（请求准入校验）；HTML 输出经 DOMParser 白名单清洗，`<script>` 不会执行。
 
@@ -151,6 +152,7 @@ notebook 自身不带配色方案：`client.js` 在 `.dsh-bsb-ipynb-root` 上声
 | POST | `/ipynb/config` | `{idleMinutes}`；更新内核空闲超时 |
 | GET | `/ipynb/status?sessionId=&path=` | notebook 的内核状态 |
 | POST | `/ipynb/read` | 读取并解析 notebook |
+| POST | `/ipynb/create` | `{sessionId, path}`；在工作区目录中创建 `Untitled.ipynb` |
 | POST | `/ipynb/save` | `{notebook, baseVersion}`；版本过期返回 409 |
 | POST | `/ipynb/execute` | `{cellId, code, python?}`；NDJSON 流式事件 |
 | POST | `/ipynb/interrupt` | 中断当前执行 |
@@ -203,7 +205,7 @@ npm install       # 安装仅开发期使用的 Playwright，供固定版本浏�
 npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1 上运行 E2E
 ```
 
-浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，通过真实的 Better Sidebar 文件树打开生成的 notebook，用真实 Python 内核运行一个 cell，并校验自动保存后的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
+浏览器 E2E 会创建临时 `DSH_HOME`，把本仓库与固定版本的 `dsh-better-sidebar` 安装到全新的 Web profile，在空闲端口启动 `dsh`，检查 viewer 设置面板，通过真实文件树打开生成的 notebook，用编辑器头部的 **全部运行** 操作执行，再从目录行操作新建另一个 notebook，并校验第一个 notebook 在真实 Python 内核下自动保存的输出。运行前需要 Google Chrome、首次 pnpm 安装所需的网络，以及 DSH CLI（`DSH_E2E_DSH_BIN`，或在 DSH Desktop 内使用 `DSH_INSTALL_DIR` + `DSH_NODE_EXECUTABLE`）。有意升级版本时修改 `test/e2e/run.mjs` 中的 `PINNED_DSH` / `PINNED_BSB`；客户端运行时护栏会拒绝旧版 Better Sidebar。设置 `DSH_E2E_KEEP=1` 可保留临时 DSH home 供排查。升级 DSH / Better Sidebar 后以及发布前应运行一次；CI 会运行三平台单元矩阵与该固定版本 E2E lane。
 
 主题测试（`test/client-theme.test.mjs`）用 `test/fixtures/dsh-theme-tokens.json` 中的 stock 调色板解析注入的样式表；DSH 调色板变化时需有意更新该 fixture。真实内核测试会在所有候选解释器都缺少 `jupyter_client`/`ipykernel` 时自动跳过；依赖 `nbformat` 的 schema 测试同样会跳过。可用 `DSH_IPYNB_TEST_PYTHON` 指定测试使用的解释器；CI 中建议显式设置，并检查是否有非预期跳过。CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三平台运行。`test/control-symlink.test.mjs` 中约 28 个大小写回归用例仅在大小写不敏感且允许创建 symlink 的文件系统（macOS APFS、Windows NTFS）上运行；Linux 或未开启 Windows 开发者模式的账号会通过能力探测自动跳过。`test/routes.test.mjs` 中需要非 root 用户的访问控制用例在以 root 运行测试时会自动跳过。
 

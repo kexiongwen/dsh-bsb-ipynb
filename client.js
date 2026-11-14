@@ -11,7 +11,7 @@ window.__ModuleLoader__.load({
     // tested against. The service exposes both fields, so a stale installation
     // fails here with an actionable message instead of on a missing method.
     const MIN_BETTER_SIDEBAR_VERSION = '0.32.0'
-    const REQUIRED_BETTER_SIDEBAR_FEATURES = ['hostRouteUrl']
+    const REQUIRED_BETTER_SIDEBAR_FEATURES = ['hostRouteUrl', 'fileActions', 'tabActions']
     const SAVE_BANNER_REASONS = new Set(['write-blocked', 'write-conflict', 'save-failed', 'capacity', 'metadata-too-complex', 'json-too-complex', 'empty-file'])
     const STATUS_POLL_MS = 10000
     const MAX_MARKDOWN_QUOTE_DEPTH = 64
@@ -100,6 +100,10 @@ window.__ModuleLoader__.load({
         settingsSave: 'Save',
         settingsClose: 'Close',
         settingsError: 'Could not load the notebook settings.',
+        newNotebook: 'New notebook',
+        createNotebookFailed: 'Could not create the notebook.',
+        notebookNotOpen: 'Open the notebook in the editor first.',
+        notebookActionFailed: 'The notebook action failed.',
       },
       zh: {
         runAll: '全部运行',
@@ -177,6 +181,10 @@ window.__ModuleLoader__.load({
         settingsSave: '保存',
         settingsClose: '关闭',
         settingsError: '无法加载 Notebook 设置。',
+        newNotebook: '新建 Notebook',
+        createNotebookFailed: '无法创建 Notebook。',
+        notebookNotOpen: '请先在编辑器中打开该 Notebook。',
+        notebookActionFailed: 'Notebook 操作失败。',
       },
     }
 
@@ -840,9 +848,29 @@ window.__ModuleLoader__.load({
     // accepted saves outside component refs so that replacement viewers and
     // other open views of this document still wait for their result.
     const notebookRequests = new Map()
+    // Live notebook controls keyed by session + path. The tab-header actions
+    // use this registry because their context carries no component instance.
+    const notebookControls = new Map()
     // One host-wide kernel manager backs every open notebook, so the idle
     // setting needs only one successful push per value.
     let lastSyncedIdleMinutes = null
+
+    function notebookControlKey(sessionId, notebookPath) {
+      return JSON.stringify([String(sessionId || ''), String(notebookPath || '')])
+    }
+
+    function findNotebookControls(sessionId, notebookPath) {
+      const direct = notebookControls.get(notebookControlKey(sessionId, notebookPath))
+      if (direct) return direct
+      // The file tree can address a relative path while the active viewer holds
+      // the absolute one; try the normalized spellings before giving up.
+      const normalized = normalizePosix(String(notebookPath || ''))
+      for (const [key, controls] of notebookControls) {
+        if (String(controls.sessionId || '') !== String(sessionId || '')) continue
+        if (normalizePosix(controls.path) === normalized) return controls
+      }
+      return undefined
+    }
 
     function notebookRequestState(ctx, path, sessionId) {
       const key = JSON.stringify([routeUrl(ctx, 'save'), sessionId, path])
@@ -2890,6 +2918,29 @@ window.__ModuleLoader__.load({
         }
       }, [ctx, path, scope, refreshKernel, bumpKernelEpoch])
 
+      // Publish this mounted viewer's controls for the tab-header actions.
+      useEffect(() => {
+        const sessionId = scope && scope.sessionId
+        if (!sessionId) return undefined
+        const controls = {
+          sessionId,
+          path,
+          runAll: () => runAll(),
+          interrupt: () => interrupt(),
+          restart: () => restart(),
+        }
+        const keys = new Set([notebookControlKey(sessionId, path)])
+        if (!isAbsoluteLocalPath(path) && scope && scope.cwd) {
+          keys.add(notebookControlKey(sessionId, normalizePosix(scope.cwd + '/' + path)))
+        }
+        for (const key of keys) notebookControls.set(key, controls)
+        return () => {
+          for (const key of keys) {
+            if (notebookControls.get(key) === controls) notebookControls.delete(key)
+          }
+        }
+      }, [scope && scope.sessionId, scope && scope.cwd, path, runAll, interrupt, restart])
+
       const shutdown = useCallback(async () => {
         const seq = documentSeqRef.current
         const actionId = ++kernelActionRef.current
@@ -3670,6 +3721,75 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // File-tree and tab-header contributions backed by the new BSB action
+    // registries. The file action creates a notebook through the host; the tab
+    // actions drive the live viewer through the module-level controls map.
+    function registerNotebookActions(ctx) {
+      const service = ctx.betterSidebar
+      const disposers = []
+      const disposeAll = () => {
+        while (disposers.length) {
+          try {
+            disposers.pop()()
+          } catch {
+            /* a partially registered action must not mask the original error */
+          }
+        }
+      }
+      try {
+        disposers.push(service.registerFileAction({
+          id: 'dsh-bsb-ipynb:new-notebook',
+          label: () => t('newNotebook'),
+          order: 10,
+          dirs: true,
+          when: (row) => row.isDir && Boolean(row.sessionId),
+          run: async (action) => {
+            try {
+              const value = await postJson(ctx, 'create', {
+                sessionId: action.sessionId,
+                path: action.path,
+              })
+              const scope = { sessionId: action.sessionId }
+              if (action.root) scope.cwd = action.root
+              service.openFile(scope, value.path, value.name)
+            } catch (error) {
+              action.fail(error && error.message ? error.message : t('createNotebookFailed'))
+            }
+          },
+        }))
+
+        const tabActions = [
+          { id: 'dsh-bsb-ipynb:run-all', label: () => t('runAll'), order: 10, control: 'runAll' },
+          { id: 'dsh-bsb-ipynb:interrupt', label: () => t('interrupt'), order: 20, control: 'interrupt' },
+          { id: 'dsh-bsb-ipynb:restart', label: () => t('restart'), order: 30, control: 'restart' },
+        ]
+        for (const action of tabActions) {
+          disposers.push(service.registerTabAction({
+            id: action.id,
+            label: action.label,
+            order: action.order,
+            when: (context) => context.tabType === 'editor' && !context.isDir && /\.ipynb$/i.test(context.path),
+            run: async (context) => {
+              const controls = findNotebookControls(context.sessionId, context.path)
+              if (!controls) {
+                context.fail(t('notebookNotOpen'))
+                return
+              }
+              try {
+                await controls[action.control]()
+              } catch (error) {
+                context.fail(error && error.message ? error.message : t('notebookActionFailed'))
+              }
+            },
+          }))
+        }
+      } catch (error) {
+        disposeAll()
+        throw error
+      }
+      return disposeAll
+    }
+
     function apply(ctx) {
       assertBetterSidebar(ctx)
       bindHostLocale(ctx)
@@ -3700,6 +3820,7 @@ window.__ModuleLoader__.load({
           component: NotebookView,
         }),
       )
+      ctx.effect(() => registerNotebookActions(ctx))
     }
 
     const __test = {
@@ -3713,6 +3834,8 @@ window.__ModuleLoader__.load({
       normalizePluginSettings,
       readPluginSettings,
       SettingsPanel,
+      notebookControls,
+      notebookControlKey,
       isMacPlatform,
       shortcutText,
       bannerText,
