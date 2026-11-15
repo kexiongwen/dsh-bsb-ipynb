@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-test('npm pack ships examples and linked documentation with the documented DSH minimum', async (t) => {
+test('npm pack ships runtime files and linked documentation with the documented DSH minimum', async (t) => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(manifest.engines.dsh, '>=0.2.2-rc.2')
   assert.equal(manifest.dsh.manifestVersion, 1)
@@ -32,7 +32,6 @@ test('npm pack ships examples and linked documentation with the documented DSH m
     'README_ZH.md',
     'CHANGELOG.md',
     'docs/screenshot.png',
-    'examples/demo.ipynb',
     'client.js',
     'client.katex.js',
     'python/bridge.py',

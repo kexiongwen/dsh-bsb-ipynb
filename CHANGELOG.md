@@ -4,6 +4,14 @@ All notable changes to `dsh-bsb-ipynb` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Aligned the `npm pack` contract test with the v0.3.1 publication files: the
+  packed bundle must still ship the runtime files and the linked documentation,
+  but `examples/` is no longer expected now that releases stopped publishing it.
+
 ## [0.3.1] - 2026-11-15
 
 ### Changed
@@ -104,6 +112,8 @@ concurrency, and workspace-contained file access. See the
 [v0.1.0 release](https://github.com/kexiongwen/dsh-bsb-ipynb/releases/tag/v0.1.0)
 for the original notes.
 
+[Unreleased]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/releases/tag/v0.1.0
