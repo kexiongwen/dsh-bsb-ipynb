@@ -101,6 +101,7 @@ dsh-bsb-ipynb/
 │   ├── gate.js       # active workspace resolution and path escape protection
 │   ├── active-worktree.js # host-evidenced linked worktree selection
 │   ├── env.js        # Python interpreter discovery and probing
+│   ├── json-budget.js # exact JSON byte/node/depth budgets, mirrored in client.js
 │   └── json.js       # JSON envelope, request body reader, ApiError
 ├── python/bridge.py  # JSONL kernel bridge over jupyter_client + ipykernel
 ├── locale/{en,zh}.json
@@ -118,7 +119,7 @@ Request path: browser `client.js` → better-sidebar `webServer` → `/ipynb/*` 
 - **Safe writes** — write a temp file in the same directory, check the version again, then rename it into place; this narrows the external-write race window (extreme interleavings remain a known race). If a crash leaves a `.dsh-bsb-ipynb-*.tmp` behind, the next save sweeps stale ones older than an hour.
 - **No stalled streams** — restart/shutdown, kernel death or `os._exit()` always ends the NDJSON stream with a terminal failure event.
 - **Complete output** — after the kernel replies, the bridge waits for the matching IOPub idle; after 10 s it reports a failure and warns that output may be incomplete.
-- **Resource limits** — 32 MiB of client-side output per cell, a 64 MiB server-side NDJSON queue and a 64 MiB cap per kernel output line; exceeding a limit cancels the run and interrupts the kernel.
+- **Resource limits** — 32 MiB of client-side output per cell, a 64 MiB server-side NDJSON queue and a 64 MiB cap per kernel output line. Exceeding a server-side limit ends the stream and cancels the run: the queue limit interrupts the kernel, while an oversized output line restarts it. The client-side output cap replaces that cell's displayed outputs with a truncation marker and shows a notice; the run keeps going.
 - **Kernel lifecycle** — starts, restarts and interpreter switches are serialized per notebook. Interpreter changes check the current kernel's busy state; restarting the same interpreter can deliberately interrupt a running cell. Shutdown cancels pending starts/switches immediately; restart responses report the interpreter actually started.
 - **Kernel cleanup** — idle kernels are swept after 30 minutes (`DSH_IPYNB_KERNEL_IDLE_MS`); ready timeout is 30 s. Shutdown waits 2 s, sends SIGTERM, then SIGKILL 2 s later and allows 500 ms for exit confirmation. If the process still has not exited, the request fails and the stopping entry remains managed; no replacement is started on that path until exit is confirmed. Disposal failures are logged instead of becoming unhandled errors.
 - **Shutdown failures** — the viewer displays the failure and keeps a timed-out kernel in `stopping` state. A failed request is not evidence that the process is off; status or a successful retry must confirm exit. Late messages from the old execution cannot overwrite a newer shutdown or restart result.
