@@ -1,7 +1,6 @@
 {
   "name": "dsh-bsb-ipynb",
   "version": "0.3.0",
-  "private": true,
   "type": "module",
   "engines": {
     "node": ">=20",
@@ -51,11 +50,9 @@
     "client.katex.js",
     "lib",
     "python/bridge.py",
-    "scripts",
     "locale",
     "icon.svg",
     "cordis.patch.yml",
-    "examples",
     "README.md",
     "README_ZH.md",
     "CHANGELOG.md",

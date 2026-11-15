@@ -4,6 +4,17 @@ All notable changes to `dsh-bsb-ipynb` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-15
+
+### Changed
+
+- Packaging for npm: the manifest no longer marks the package private, and the
+  published tarball stops shipping `scripts/` and `examples/`, so it contains
+  only runtime files.
+- Documentation: the architecture tree now lists `lib/json-budget.js`, and the
+  resource-limit notes distinguish server-side limits (which cancel the run)
+  from the client-side output cap (which only truncates the display).
+
 ## [0.3.0] - 2026-11-15
 
 ### Added
