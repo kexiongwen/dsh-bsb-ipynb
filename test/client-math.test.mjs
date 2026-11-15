@@ -154,6 +154,20 @@ test('math preload detection covers Markdown cells and latex/markdown outputs on
   assert.equal(notebookHasMath(null), false)
 })
 
+test('math preload detection follows backslash escape parity', async () => {
+  const { exports } = await loadClient()
+  const { sourceHasMath, renderMarkdown, createMathRenderer } = exports.__test
+  const renderMath = createMathRenderer(loadKatexModule())
+  for (const source of [String.raw`\\$x$`, String.raw`\\\\$x$`]) {
+    assert.equal(sourceHasMath(source), true, `${JSON.stringify(source)} contains an unescaped formula`)
+    assert.match(renderMarkdown(source, { renderMath }), /class="katex"/)
+  }
+  for (const source of [String.raw`\$x$`, String.raw`\\\$x$`]) {
+    assert.equal(sourceHasMath(source), false, `${JSON.stringify(source)} contains only an escaped dollar`)
+    assert.doesNotMatch(renderMarkdown(source, { renderMath }), /class="katex"/)
+  }
+})
+
 test('lazy loader tolerates a host without chunk support and retries failures', async () => {
   const plain = await loadClient()
   assert.equal(await plain.exports.__test.loadMathRenderer(), null)

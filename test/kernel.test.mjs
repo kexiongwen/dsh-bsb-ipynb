@@ -60,6 +60,29 @@ test('a second execute is rejected without stealing the first listener', { skip 
   }
 })
 
+test('a lone surrogate cell id survives the bridge protocol and settles', { skip }, async (t) => {
+  const manager = new KernelManager({}, bridgePath)
+  const target = await makeTarget(t, 'surrogate-cell-id.ipynb')
+  const cellId = '\ud800'
+  try {
+    const entry = await manager.getOrStart(target, python)
+    const events = []
+    const reply = await within(
+      entry.run(cellId, 'print("中文 😀")\n1', (event) => events.push(event)),
+      5000,
+      'a lone surrogate cell id must not lose its terminal reply',
+    )
+    assert.equal(reply.ok, true)
+    assert.equal(reply.cell_id, cellId)
+    assert.ok(events.some((event) => event.type === 'stream' && event.text === '中文 😀\n'))
+    assert.ok(events.some((event) => event.type === 'execute_reply' && event.cell_id === cellId))
+    assert.equal(entry.busy, false)
+    assert.equal(entry.currentRun, null)
+  } finally {
+    await manager.disposeAll()
+  }
+})
+
 test('shutdown and os._exit settle the running cell', { skip }, async (t) => {
   const manager = new KernelManager({}, bridgePath)
   const firstTarget = await makeTarget(t, 'shutdown.ipynb')

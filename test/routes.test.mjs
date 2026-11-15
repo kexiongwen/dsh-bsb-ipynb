@@ -172,6 +172,59 @@ async function invoke(ctx, kernels, req) {
   return { state, text, json }
 }
 
+async function rawExchange(t, request) {
+  const ctx = makeCtx()
+  registerIpynbRoutes(ctx, makeKernels())
+  const handler = ctx.registered[0].handler
+  const server = createServer((req, res) => { void handler(req, res) })
+  const sockets = new Set()
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
+  let client
+  t.after(async () => {
+    client?.destroy()
+    for (const socket of sockets) socket.destroy()
+    if (server.listening) await new Promise((resolve) => server.close(resolve))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  client = connect(server.address().port, '127.0.0.1')
+  client.setEncoding('utf8')
+  const response = new Promise((resolve, reject) => {
+    let text = ''
+    client.on('data', (chunk) => { text += chunk })
+    client.on('end', () => resolve(text))
+    client.on('error', reject)
+    client.setTimeout(5000, () => client.destroy(new Error('real HTTP response timed out')))
+  })
+  await once(client, 'connect')
+  client.end(request)
+  const raw = await response
+  const boundary = raw.indexOf('\r\n\r\n')
+  assert.notEqual(boundary, -1, raw)
+  const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(raw)?.[1])
+  const head = raw.slice(0, boundary)
+  let body = raw.slice(boundary + 4)
+  if (/^transfer-encoding:\s*chunked\s*$/im.test(head)) {
+    let decoded = ''
+    for (;;) {
+      const lineEnd = body.indexOf('\r\n')
+      assert.notEqual(lineEnd, -1, raw)
+      const size = Number.parseInt(body.slice(0, lineEnd), 16)
+      assert.ok(Number.isFinite(size), raw)
+      if (size === 0) break
+      body = body.slice(lineEnd + 2)
+      decoded += body.slice(0, size)
+      assert.equal(body.slice(size, size + 2), '\r\n', raw)
+      body = body.slice(size + 2)
+    }
+    body = decoded
+  }
+  return { status, body }
+}
+
 test('health reports version, kernels and interpreter counts', async () => {
   const ctx = makeCtx()
   const { state, json } = await invoke(ctx, makeKernels(), makeReq())
@@ -297,6 +350,38 @@ test('unknown endpoints and wrong methods return protocol errors with routing de
     assert.equal(json.error.code, code, name)
     if (allow) assert.equal(state.headers.allow, allow, name)
   }
+})
+
+test('a malformed HTTP request target returns 400 instead of an internal error', async (t) => {
+  const errors = t.mock.method(console, 'error', () => {})
+  const { status, body } = await rawExchange(t, [
+    'GET http://[::1/ipynb/health HTTP/1.1',
+    'Host: x',
+    'Connection: close',
+    '',
+    '',
+  ].join('\r\n'))
+  assert.equal(status, 400)
+  assert.equal(JSON.parse(body).error.code, 'bad-request')
+  assert.equal(errors.mock.callCount(), 0, 'client input must not be logged as an unexpected server error')
+})
+
+test('an oversized execute body returns a complete 413 response over real HTTP', async (t) => {
+  const body = JSON.stringify({
+    sessionId: 's1', path: 'demo.ipynb', cellId: 'c1', code: '1',
+    padding: 'x'.repeat(64 * 1024 * 1024),
+  })
+  const { status, body: responseBody } = await rawExchange(t, [
+    'POST /ipynb/execute HTTP/1.1',
+    'Host: 127.0.0.1',
+    'Content-Type: application/json',
+    `Content-Length: ${Buffer.byteLength(body)}`,
+    'Connection: close',
+    '',
+    body,
+  ].join('\r\n'))
+  assert.equal(status, 413)
+  assert.equal(JSON.parse(responseBody).error.code, 'too-large')
 })
 
 test('the admission fence rejects requests and rate-limits repeated failure logs', async (t) => {

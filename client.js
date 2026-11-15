@@ -34,7 +34,8 @@ window.__ModuleLoader__.load({
     const KATEX_RENDER_LIMIT = 2_000
     const KATEX_CACHE_LIMIT = 2_000
     // Cheap preload hint: `$...$`, `$$...$$`, `\(...\)` or `\[...\]`.
-    const MATH_HINT = /(^|[^\\])\$[^\s$]|\\\(|\\\[|^[ \t]*\$\$/m
+    // Backslash pairs leave a dollar delimiter unescaped; odd runs escape it.
+    const MATH_HINT = /(^|[^\\])(?:\\\\)*\$[^\s$]|\\\(|\\\[|^[ \t]*\$\$/m
 
     const STRINGS = {
       en: {

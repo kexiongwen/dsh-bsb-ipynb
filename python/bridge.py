@@ -86,7 +86,9 @@ except Exception:
 def emit(event):
     """Write one event line to stdout, atomically flushed."""
     try:
-        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
+        # Escape non-ASCII so lone surrogates survive as JSON instead of being
+        # replaced by stdout's error handler before the host can match event IDs.
+        sys.stdout.write(json.dumps(event, ensure_ascii=True) + "\n")
         sys.stdout.flush()
     except Exception:
         # stdout is gone (the host exited): dropping the event is the only
