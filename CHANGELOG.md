@@ -4,10 +4,25 @@ All notable changes to `dsh-bsb-ipynb` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.2] - 2026-11-15
+
+### Added
+
+- ANSI output now renders 24-bit truecolor sequences (`38;2;r;g;b` and
+  `48;2;r;g;b`) in addition to the existing 16- and 256-color forms.
 
 ### Fixed
 
+- Interrupts are no longer lost when they race a queued cell starting: each
+  queued execution records the bridge's interrupt generation, and only an
+  execution submitted after the interrupt clears its pending timestamp.
+- Notebook lifecycle regressions: a failed reload transport keeps the unsaved
+  draft instead of adopting an empty error document; relative and absolute
+  spellings of one path now share the same client-side save/read ordering;
+  Markdown → raw conversion keeps attachments (only conversion to code
+  discards them); the Kernels page cancels superseded polls and allows one
+  in-flight load; and a failed config read no longer persists a guessed
+  default idle timeout.
 - Aligned the `npm pack` contract test with the v0.3.1 publication files: the
   packed bundle must still ship the runtime files and the linked documentation,
   but `examples/` is no longer expected now that releases stopped publishing it.
