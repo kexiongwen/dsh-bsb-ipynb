@@ -332,6 +332,17 @@ test('a real kernel drops 1000 background messages from a completed cell without
   assert.equal(value.currentOutput, 'CURRENT RESULT\n')
 })
 
+test('shutdown during replacement launch leaves no live real kernel', {
+  skip: !python && 'Requires jupyter_client/ipykernel',
+}, async () => {
+  const result = await runFixture(python, '--restart-shutdown')
+  const value = JSON.parse(result.stdout.trim())
+  assert.deepEqual(value.restartResult, [false])
+  assert.deepEqual(value.restartErrors, [])
+  assert.equal(value.bridgeManagerCleared, true)
+  assert.equal(value.replacementAliveAfterShutdown, false)
+})
+
 test('Windows job object reaps user subprocesses on shutdown and hard kill', {
   skip: (process.platform !== 'win32' && 'Windows-only: the kill-on-close job object is a Windows primitive') ||
     (!python && 'Requires jupyter_client/ipykernel'),

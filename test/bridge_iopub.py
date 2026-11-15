@@ -901,6 +901,79 @@ class IOPubTests(unittest.TestCase):
                              "%s must route through the deterministic cleanup" % name)
 
 
+def real_restart_shutdown_regression():
+    bridge = bridge_module.Bridge()
+    original_emit = bridge_module.emit
+    bridge_module.emit = lambda event: None
+    manager = None
+    provisioner = None
+    original_start = None
+    launch_entered = threading.Event()
+    launch_release = threading.Event()
+    restart_results = []
+    restart_errors = []
+    thread = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="dsh-restart-shutdown-") as cwd:
+            bridge.start_kernel(cwd)
+            manager = bridge.km
+            provisioner = manager.provisioner
+            original_start = manager._async_start_kernel
+
+            async def gated_start(**kwargs):
+                launch_entered.set()
+                if not launch_release.wait(15):
+                    raise RuntimeError("test did not release replacement launch")
+                await original_start(**kwargs)
+
+            manager._async_start_kernel = gated_start
+
+            def restart():
+                try:
+                    restart_results.append(bridge.restart(42))
+                except Exception as error:
+                    restart_errors.append(str(error))
+
+            thread = threading.Thread(target=restart, daemon=True)
+            thread.start()
+            assert launch_entered.wait(15), "restart did not reach replacement launch"
+            bridge.shutdown_kernel()
+            assert bridge.km is None
+            launch_release.set()
+            thread.join(20)
+            assert not thread.is_alive(), "restart did not finish after shutdown"
+            process = provisioner.process
+            alive = process is not None and process.poll() is None
+            result = {
+                "restartResult": restart_results,
+                "restartErrors": restart_errors,
+                "bridgeManagerCleared": bridge.km is None,
+                "replacementAliveAfterShutdown": alive,
+            }
+            print(json.dumps(result))
+            assert restart_errors == [], restart_errors
+            assert restart_results == [False], restart_results
+            assert not alive, "replacement kernel survived shutdown"
+    finally:
+        launch_release.set()
+        if thread is not None:
+            thread.join(20)
+        if manager is not None:
+            manager._async_start_kernel = original_start
+            try:
+                manager.shutdown_kernel(now=True)
+            finally:
+                # A failing regression must not leak the process it just proved
+                # was left behind by the old bridge lifecycle.
+                process = provisioner.process
+                if process is not None and process.poll() is None:
+                    process.kill()
+                if process is not None:
+                    process.wait()
+        bridge.shutdown_kernel()
+        bridge_module.emit = original_emit
+
+
 def real_kernel_regression():
     bridge = bridge_module.Bridge()
     events = []
@@ -995,11 +1068,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--bridge", required=True)
     parser.add_argument("--integration", action="store_true")
+    parser.add_argument("--restart-shutdown", action="store_true")
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location("reviewed_bridge", args.bridge)
     bridge_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bridge_module)
-    if args.integration:
+    if args.restart_shutdown:
+        real_restart_shutdown_regression()
+    elif args.integration:
         real_kernel_regression()
     else:
         unittest.main(argv=[__file__], verbosity=2)

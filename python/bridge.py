@@ -277,7 +277,9 @@ class Bridge:
         self.pending.clear()
         self.idle_events.clear()
 
-    def shutdown_kernel(self):
+    def shutdown_kernel(self, manager=None):
+        # A racing restart retains its manager after self.km has been cleared.
+        km = self.km if manager is None else manager
         with self.pending_lock:
             self.stop.set()
             self.clear_pending_locked()
@@ -287,8 +289,8 @@ class Bridge:
         except Exception:
             pass
         try:
-            if self.km is not None:
-                self.km.shutdown_kernel(now=True)
+            if km is not None:
+                km.shutdown_kernel(now=True)
         except Exception:
             pass
         # Remove the connection file even when jupyter_client never recorded
@@ -300,8 +302,8 @@ class Bridge:
             except OSError:
                 pass
         try:
-            if self.km is not None:
-                self.km.cleanup_connection_file()
+            if km is not None:
+                km.cleanup_connection_file()
         except Exception:
             pass
         self.kc = None
@@ -754,7 +756,7 @@ class Bridge:
                     self.restart_inflight = None
             holder["done"].set()
 
-    def restart_failed(self, message):
+    def restart_failed(self, message, manager=None):
         """Tear down deterministically after a restart that cannot complete.
 
         Leaving the old (stopped) client in ``self.kc`` while a fresh kernel is
@@ -763,14 +765,18 @@ class Bridge:
         ``kernel_died`` instead of a busy loop and a silent 30s ready timeout.
         """
         was_stopping = self.stop.is_set()
-        self.shutdown_kernel()
+        self.shutdown_kernel(manager=manager)
         if not was_stopping:
             emit({"type": "kernel_died", "message": message})
 
     def restart_once(self, op_id=None):
         # Same batch semantics: a restart cancels cells queued behind the
         # running one (they would otherwise execute after the fresh kernel).
-        if self.stop.is_set() or self.km is None or self.kc is None:
+        # Keep local ownership: shutdown may clear the published refs while the
+        # manager is still launching a replacement on this background thread.
+        km = self.km
+        kc = self.kc
+        if self.stop.is_set() or km is None or kc is None:
             log("warn", "no kernel to restart")
             return False
         self.drain_queue("restarted")
@@ -779,14 +785,19 @@ class Bridge:
             self.clear_pending_locked()
         try:
             try:
-                self.kc.stop_channels()
+                kc.stop_channels()
             except Exception:
                 pass
             try:
-                self.km.restart_kernel(now=True)
+                km.restart_kernel(now=True)
             except Exception as error:
                 log("error", "restart failed: %s" % (error,))
-                self.restart_failed("kernel restart failed: %s" % (error,))
+                self.restart_failed("kernel restart failed: %s" % (error,), manager=km)
+                return False
+            if self.stop.is_set():
+                # Shutdown may have run before the replacement launch. Clean up
+                # the manager that just completed it, not the cleared self.km.
+                self.shutdown_kernel(manager=km)
                 return False
             kc = None
             try:
@@ -794,7 +805,7 @@ class Bridge:
                 # client ("threads can only be started once"), so create a fresh
                 # client against the restarted kernel. The iopub/executor loops
                 # re-read self.kc every iteration, so the swap is safe.
-                kc = self.km.client()
+                kc = km.client()
                 kc.start_channels()
                 kc.wait_for_ready(timeout=25)
             except Exception as error:
@@ -804,7 +815,7 @@ class Bridge:
                         kc.stop_channels()
                 except Exception:
                     pass
-                self.restart_failed("kernel restart failed: %s" % (error,))
+                self.restart_failed("kernel restart failed: %s" % (error,), manager=km)
                 return False
             if self.stop.is_set():
                 # A shutdown raced the restart: never publish a client after
@@ -813,6 +824,7 @@ class Bridge:
                     kc.stop_channels()
                 except Exception:
                     pass
+                self.shutdown_kernel(manager=km)
                 return False
             with self.pending_lock:
                 self.kc = kc
