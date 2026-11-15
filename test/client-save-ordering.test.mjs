@@ -50,7 +50,7 @@ async function fixture(t) {
     sessionId: options.sessionId || scope.sessionId,
     notebook: { cells: [] },
     baseVersion: 'v1',
-  }).then(
+  }, undefined, options.cwd).then(
     (value) => ({ status: 'fulfilled', value }),
     (reason) => ({ status: 'rejected', reason }),
   )
@@ -118,6 +118,35 @@ test('pending saves are isolated by host, session and path', async (t) => {
   await Promise.all(reads)
   f.saves()[0].resolve(success({ version: 'v2' }))
   await saving
+})
+
+test('relative and absolute spellings share the same pending-save barrier', async (t) => {
+  const f = await fixture(t)
+  const saving = f.postSave()
+  const reading = f.ctx.viewer.load('./demo.ipynb', { ...f.scope, cwd: '/workspace' })
+  await settle()
+  assert.equal(f.reads().length, 0, 'the relative read waits for the absolute-path save')
+  f.saves()[0].resolve(success({ version: 'v2' }))
+  await saving
+  await settle()
+  assert.equal(f.reads().length, 1)
+  assert.equal(f.reads()[0].body.path, './demo.ipynb', 'path normalization only keys coordination; it does not rewrite the request')
+  f.reads()[0].resolve(success({ status: 'ok', version: 'v2', notebook: { cells: [] } }))
+  assert.equal((await reading).version, 'v2')
+})
+
+test('a relative save shares the barrier with an absolute-path read', async (t) => {
+  const f = await fixture(t)
+  const saving = f.postSave({ path: 'demo.ipynb', cwd: '/workspace' })
+  const reading = f.ctx.viewer.load(f.path, f.scope)
+  await settle()
+  assert.equal(f.reads().length, 0)
+  f.saves()[0].resolve(success({ version: 'v2' }))
+  await saving
+  await settle()
+  assert.equal(f.reads().length, 1)
+  f.reads()[0].resolve(success({ status: 'ok', version: 'v2', notebook: { cells: [] } }))
+  assert.equal((await reading).version, 'v2')
 })
 
 test('a host refresh waits for every save, including a save added while waiting', async (t) => {

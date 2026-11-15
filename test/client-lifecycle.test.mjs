@@ -450,6 +450,23 @@ test('reload invalidates an old execution before late output, status, errors and
   assert.equal(app.cell.cell.outputs[0].text, 'FRESH')
 })
 
+test('a failed reload transport preserves the unsaved draft and editor state', async (t) => {
+  const app = mountNotebook(t)
+  await app.settle()
+  app.edit('UNSAVED DRAFT')
+  app.toolbar.onReload()
+  await app.settle()
+  const request = app.requests('read').at(-1)
+  assert.ok(request, 'reload attempts the disk read after confirmation')
+  request.reject(new Error('offline'))
+  await app.settle()
+  assert.equal(app.cell.cell.source, 'UNSAVED DRAFT')
+  assert.equal(app.cell.cell.outputs[0].text, 'OLD')
+  assert.equal(app.toolbar.dirty, true)
+  assert.match(app.bannerText, /offline/)
+  assert.equal(app.requests('read').length, 1, 'a transport failure is not adopted or retried as a new document')
+})
+
 for (const termination of ['fatal', 'stream-error', 'fetch-error']) {
   test(`reload preserves new outputs when the old run ends with ${termination} without a reply`, async (t) => {
     const app = mountNotebook(t)

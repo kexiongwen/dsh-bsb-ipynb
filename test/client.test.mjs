@@ -75,6 +75,64 @@ test('the viewer settings panel renders without touching the host until saved', 
   assert.deepEqual(tree.props.children[0].props.children, [exports.__test.translate('settingsTitle')])
 })
 
+test('settings do not persist a guessed idle timeout after a config read failure', async () => {
+  const states = []
+  let stateCursor = 0
+  let loadEffect
+  const { exports } = await loadClient({
+    useState(initial) {
+      const index = stateCursor++
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
+      return [states[index], (value) => {
+        states[index] = typeof value === 'function' ? value(states[index]) : value
+      }]
+    },
+    useEffect(callback) { loadEffect = callback },
+  })
+  const updates = []
+  const requests = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init = {}) => {
+    const route = new URL(url).pathname.split('/').pop()
+    requests.push({ route, method: init.method || 'GET', body: init.body && JSON.parse(init.body) })
+    if (route === 'interpreters') {
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: { interpreters: [], default: null } }) }
+    }
+    if (route === 'config' && (init.method || 'GET') === 'GET') throw new Error('offline')
+    return { ok: true, status: 200, json: async () => ({ ok: true, value: {} }) }
+  }
+  try {
+    const props = {
+      ctx: { betterSidebar: { hostRouteUrl: (route) => 'http://host/' + route } },
+      pluginSettings: { autosaveMs: 2000, defaultPython: '', idleMinutes: null },
+      updatePluginSetting: (key, value) => updates.push([key, value]),
+      close() {},
+    }
+    const render = () => {
+      stateCursor = 0
+      return exports.__test.SettingsPanel(props)
+    }
+    render()
+    loadEffect()
+    await new Promise((resolve) => setImmediate(resolve))
+    const tree = render()
+    const pending = [tree]
+    let saveButton
+    while (pending.length) {
+      const node = pending.shift()
+      if (!node || typeof node !== 'object') continue
+      if (node.props?.children?.[0] === exports.__test.translate('settingsSave')) saveButton = node
+      pending.push(...(node.props?.children || []))
+    }
+    assert.ok(saveButton, 'the settings save action is rendered')
+    saveButton.props.onClick()
+    assert.deepEqual(updates, [['autosaveMs', 2000], ['defaultPython', '']])
+    assert.equal(requests.some((request) => request.route === 'config' && request.method === 'POST'), false)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('the New notebook file action creates and opens a notebook', async () => {
   const { exports } = await loadClient()
   const fileActions = []
@@ -228,7 +286,7 @@ test('registers the Kernels sidebar tab and formats idle durations', async () =>
   assert.match(tree.props.className, /dsh-bsb-ipynb-kernels/)
 })
 
-async function mountKernelsPage(t) {
+async function mountKernelsPage(t, { visible = false } = {}) {
   const states = []
   const refs = []
   const effectSlots = []
@@ -260,7 +318,7 @@ async function mountKernelsPage(t) {
     refCursor = 0
     effectCursor = 0
     effects = []
-    exports.__test.KernelsPage({ ctx, scope: { sessionId, cwd: '/' + sessionId }, visible: false })
+    exports.__test.KernelsPage({ ctx, scope: { sessionId, cwd: '/' + sessionId }, visible })
     for (const { callback, deps } of effects) {
       const index = effectCursor++
       const previous = effectSlots[index]
@@ -269,19 +327,21 @@ async function mountKernelsPage(t) {
       effectSlots[index] = { deps, cleanup: callback() }
     }
   }
-  t.after(() => {
+  const unmount = () => {
     for (const slot of effectSlots) slot?.cleanup?.()
-  })
-  return { states, render }
+  }
+  t.after(unmount)
+  return { states, render, unmount }
 }
 
 test('the Kernels page ignores a response from a replaced session', async (t) => {
   const page = await mountKernelsPage(t)
   const requests = []
   const originalFetch = globalThis.fetch
-  globalThis.fetch = (url) => new Promise((resolve) => {
+  globalThis.fetch = (url, init) => new Promise((resolve) => {
     requests.push({
       url,
+      signal: init.signal,
       respond(kernels) {
         resolve({ ok: true, json: async () => ({ ok: true, value: { kernels } }) })
       },
@@ -293,6 +353,7 @@ test('the Kernels page ignores a response from a replaced session', async (t) =>
     assert.match(requests[0].url, /sessionId=old-session/)
     page.render('new-session')
     assert.match(requests[1].url, /sessionId=new-session/)
+    assert.equal(requests[0].signal.aborted, true, 'changing sessions aborts the obsolete request')
     requests[1].respond([{ path: '/new-session/demo.ipynb' }])
     await flush()
     assert.equal(page.states[0][0].path, '/new-session/demo.ipynb')
@@ -302,7 +363,9 @@ test('the Kernels page ignores a response from a replaced session', async (t) =>
 
     page.render('new-session')
     page.render('new-session')
-    assert.equal(requests.length, 4, 'two refreshes are in flight for the current session')
+    assert.equal(requests.length, 4)
+    assert.equal(requests[2].signal.aborted, true, 'a replacement refresh aborts the previous request')
+    assert.equal(requests[3].signal.aborted, false)
     requests[3].respond([{ path: '/new-session/latest.ipynb' }])
     await flush()
     requests[2].respond([{ path: '/new-session/stale.ipynb' }])
@@ -310,6 +373,35 @@ test('the Kernels page ignores a response from a replaced session', async (t) =>
     assert.equal(page.states[0][0].path, '/new-session/latest.ipynb', 'an older refresh cannot overwrite the latest response')
   } finally {
     globalThis.fetch = originalFetch
+  }
+})
+
+test('the Kernels page keeps polling single-flight and aborts on cleanup', async (t) => {
+  const page = await mountKernelsPage(t, { visible: true })
+  const originalFetch = globalThis.fetch
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  const requests = []
+  let poll
+  globalThis.fetch = (url, init) => new Promise(() => {
+    requests.push({ url, signal: init.signal })
+  })
+  globalThis.setInterval = (callback) => { poll = callback; return 1 }
+  globalThis.clearInterval = () => {}
+  try {
+    page.render('session-1')
+    assert.equal(requests.length, 1)
+    assert.ok(poll, 'visible pages arm the polling timer')
+    poll()
+    poll()
+    poll()
+    assert.equal(requests.length, 1, 'polls do not overlap an unresolved request')
+    page.unmount()
+    assert.equal(requests[0].signal.aborted, true, 'cleanup aborts the active request')
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
   }
 })
 
@@ -1341,7 +1433,7 @@ test('cell type changes detect actual output and attachment loss', async () => {
   assert.equal(cellTypeChangeLosesData({ cell_type: 'code', outputs: [output] }, 'raw'), true)
   assert.equal(cellTypeChangeLosesData({ cell_type: 'code', outputs: [output] }, 'code'), false)
   assert.equal(cellTypeChangeLosesData({ cell_type: 'code', outputs: [] }, 'markdown'), false)
-  assert.equal(cellTypeChangeLosesData({ cell_type: 'markdown', attachments: { 'plot.png': {} } }, 'raw'), true)
+  assert.equal(cellTypeChangeLosesData({ cell_type: 'markdown', attachments: { 'plot.png': {} } }, 'raw'), false)
   assert.equal(cellTypeChangeLosesData({ cell_type: 'markdown', attachments: { 'plot.png': {} } }, 'code'), true)
   assert.equal(cellTypeChangeLosesData({ cell_type: 'raw', attachments: { 'plot.png': {} } }, 'markdown'), false)
   assert.equal(cellTypeChangeLosesData({ cell_type: 'markdown', attachments: {} }, 'raw'), false)
@@ -1375,6 +1467,7 @@ test('cell deletion and type changes honor confirmation and cancellation', async
         cells: [
           { id: 'with-output', cell_type: 'code', execution_count: 1, metadata: {}, outputs: [{ output_type: 'stream', name: 'stdout', text: 'result' }], source: '' },
           { id: 'empty', cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: '' },
+          { id: 'with-attachment', cell_type: 'markdown', metadata: {}, attachments: { 'plot.png': { 'image/png': 'AA==' } }, source: 'plot' },
         ],
       },
     },
@@ -1402,6 +1495,14 @@ test('cell deletion and type changes honor confirmation and cancellation', async
   views.empty.onType('empty', 'markdown')
   assert.equal(messages.length, 2, 'a lossless type change must not ask for confirmation')
   assert.equal(stateCalls.length, 2, 'a lossless type change still updates notebook and dirty state')
+  views['with-attachment'].onType('with-attachment', 'raw')
+  assert.equal(messages.length, 2, 'Markdown to raw preserves attachments and needs no confirmation')
+  assert.equal(stateCalls.length, 4)
+  const updateNotebook = stateCalls.at(-2).value
+  const updated = updateNotebook({
+    cells: [{ id: 'with-attachment', cell_type: 'markdown', metadata: {}, attachments: { 'plot.png': { 'image/png': 'AA==' } }, source: 'plot' }],
+  })
+  assert.deepEqual(updated.cells[0].attachments, { 'plot.png': { 'image/png': 'AA==' } })
   const strings = /^zh/i.test(globalThis.navigator?.language || '') ? STRINGS.zh : STRINGS.en
   assert.deepEqual(messages, [strings.deleteCellConfirm, strings.changeTypeConfirm])
 })
@@ -1868,4 +1969,9 @@ test('ansi output handles carriage returns and strips OSC sequences', async () =
   assert.match(mixed, /<span style="color:#cd3131">red<\/span>/)
   assert.match(mixed, / plain/)
   assert.doesNotMatch(mixed, /\u001b/)
+
+  const truecolor = ansiToHtml('\u001b[38;2;255;0;0mRED\u001b[48;2;31;40;47mDARK\u001b[0m')
+  assert.match(truecolor, /<span style="color:rgb\(255,0,0\)">RED<\/span>/)
+  assert.match(truecolor, /<span style="color:rgb\(255,0,0\);background-color:rgb\(31,40,47\)">DARK<\/span>/)
+  assert.doesNotMatch(truecolor, /opacity|color:#cd3131|background-color:#e5e5e5/)
 })

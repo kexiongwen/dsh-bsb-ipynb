@@ -194,10 +194,11 @@ class Bridge:
         # thread, which may already hold this lock inside restart/shutdown, and
         # its deterministic cleanup must not deadlock against itself.
         self.pending_lock = threading.RLock()
-        self.exec_queue = queue.Queue()   # (cell_id, exec_id, code)
+        self.exec_queue = queue.Queue()   # (cell_id, exec_id, code, interrupt_generation)
         self.stop = threading.Event()
         self.executor = None
         self.interrupt_requested_at = None
+        self.interrupt_generation = 0
         self.restarting = False           # True while a restart is in flight
         # Restarts are serialized: concurrent callers share one restart and
         # wait for the same completion instead of racing the kernel manager.
@@ -339,13 +340,14 @@ class Bridge:
 
     def execute(self, cell_id, exec_id, code):
         """Queue one cell for execution; the executor thread runs it."""
-        self.exec_queue.put((cell_id, exec_id, code))
+        with self.pending_lock:
+            self.exec_queue.put((cell_id, exec_id, code, self.interrupt_generation))
 
     def executor_loop(self):
         """Run queued executions serially; read shell replies."""
         while not self.stop.is_set():
             try:
-                cell_id, exec_id, code = self.exec_queue.get(timeout=0.3)
+                cell_id, exec_id, code, interrupt_generation = self.exec_queue.get(timeout=0.3)
             except queue.Empty:
                 continue
             except Exception:
@@ -353,7 +355,7 @@ class Bridge:
             if self.stop.is_set():
                 break
             try:
-                self.run_one(cell_id, exec_id, code)
+                self.run_one(cell_id, exec_id, code, interrupt_generation)
             except Exception as error:
                 emit({
                     "type": "error",
@@ -371,9 +373,16 @@ class Bridge:
                     "execution_count": None,
                 })
 
-    def run_one(self, cell_id, exec_id, code):
+    def run_one(self, cell_id, exec_id, code, interrupt_generation=None):
         kc = self.kc
-        self.interrupt_requested_at = None
+        with self.pending_lock:
+            if interrupt_generation is None:
+                interrupt_generation = self.interrupt_generation
+            # An interrupt submitted after this execution owns it, even when
+            # the executor had already dequeued it. Only clear a timestamp that
+            # predates this submission; it must not cancel a later execution.
+            if interrupt_generation == self.interrupt_generation:
+                self.interrupt_requested_at = None
         finished = False
         msg_id = None
         idle = None
@@ -689,7 +698,7 @@ class Bridge:
                 dropped.append(self.exec_queue.get_nowait())
             except queue.Empty:
                 break
-        for cell_id, exec_id, _code in dropped:
+        for cell_id, exec_id, _code, _interrupt_generation in dropped:
             emit({
                 "type": "execute_reply",
                 "cell_id": cell_id,
@@ -706,8 +715,10 @@ class Bridge:
         if self.km is None or self.kc is None:
             log("warn", "no kernel to interrupt")
             return
-        if self.interrupt_requested_at is None:
-            self.interrupt_requested_at = time.monotonic()
+        with self.pending_lock:
+            self.interrupt_generation += 1
+            if self.interrupt_requested_at is None:
+                self.interrupt_requested_at = time.monotonic()
         # Drop cells queued behind the running one: an interrupt cancels the
         # whole batch, not just the head (the client sends run-all as one
         # batch so the bridge owns the queue across browser reconnects).

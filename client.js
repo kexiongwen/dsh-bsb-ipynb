@@ -1018,7 +1018,15 @@ window.__ModuleLoader__.load({
           else if (code >= 100 && code <= 107) state.bg = ANSI_BASE[code - 100 + 8]
           else if (code === 39) state.fg = null
           else if (code === 49) state.bg = null
-          else if ((code === 38 || code === 48) && codes[index + 1] === 5) {
+          else if ((code === 38 || code === 48) && codes[index + 1] === 2) {
+            const channels = codes.slice(index + 2, index + 5)
+            if (channels.length === 3 && channels.every((channel) => channel >= 0 && channel <= 255)) {
+              const color = 'rgb(' + channels.join(',') + ')'
+              if (code === 38) state.fg = color
+              else state.bg = color
+              index += 4
+            }
+          } else if ((code === 38 || code === 48) && codes[index + 1] === 5) {
             const color = ansi256(codes[index + 2] || 0)
             if (code === 38) state.fg = color
             else state.bg = color
@@ -1170,8 +1178,18 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    function notebookRequestState(ctx, path, sessionId) {
-      const key = JSON.stringify([routeUrl(ctx, 'save'), sessionId, path])
+    function notebookRequestPath(path, cwd) {
+      const value = String(path || '')
+      const absolute = isAbsoluteLocalPath(value) || typeof cwd !== 'string' || !cwd
+        ? value
+        : String(cwd).replace(/[\\/]+$/, '') + '/' + value
+      return normalizePosix(absolute)
+    }
+
+    function notebookRequestState(ctx, path, sessionId, cwd) {
+      // The host may spell one document as relative or absolute. Share its
+      // client-side ordering whenever the session cwd establishes that identity.
+      const key = JSON.stringify([routeUrl(ctx, 'save'), sessionId, notebookRequestPath(path, cwd)])
       let state = notebookRequests.get(key)
       if (!state) {
         state = { key, pending: new Set(), readers: 0, generation: 0 }
@@ -1209,8 +1227,8 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function postJson(ctx, method, body, signal) {
-      const state = method === 'save' ? notebookRequestState(ctx, body.path, body.sessionId) : null
+    async function postJson(ctx, method, body, signal, cwd) {
+      const state = method === 'save' ? notebookRequestState(ctx, body.path, body.sessionId, cwd) : null
       let settleSave, pending
       if (state) {
         pending = new Promise((resolve) => { settleSave = resolve })
@@ -1242,7 +1260,7 @@ window.__ModuleLoader__.load({
     }
 
     async function readNotebook(ctx, path, scope, signal) {
-      const state = notebookRequestState(ctx, path, scope && scope.sessionId)
+      const state = notebookRequestState(ctx, path, scope && scope.sessionId, scope && scope.cwd)
       state.readers += 1
       try {
         for (;;) {
@@ -1453,7 +1471,7 @@ window.__ModuleLoader__.load({
 
     function cellTypeChangeLosesData(cell, type) {
       const losesOutputs = type !== 'code' && Array.isArray(cell.outputs) && cell.outputs.length > 0
-      const losesAttachments = type !== 'markdown' && cell.attachments && typeof cell.attachments === 'object' && Object.keys(cell.attachments).length > 0
+      const losesAttachments = type === 'code' && cell.attachments && typeof cell.attachments === 'object' && Object.keys(cell.attachments).length > 0
       return Boolean(losesOutputs || losesAttachments)
     }
 
@@ -2681,7 +2699,15 @@ window.__ModuleLoader__.load({
           if ((dirtyRef.current || runningRef.current || conflict) &&
             (typeof window === 'undefined' || !window.confirm || !window.confirm(t('reloadConfirm')))) return
           const data = await readNotebook(ctx, path, scope, read.controller?.signal)
-          if (isCurrentReload()) adopt(data)
+          if (isCurrentReload()) {
+            // A transport/HTTP error contains no disk snapshot. Keep the draft
+            // and execution state instead of adopting an empty error document.
+            if (data?.status === 'error') {
+              setBanner({ kind: 'error', key: 'loadError', text: data.message })
+            } else {
+              adopt(data)
+            }
+          }
         } catch (error) {
           if (error?.name !== 'AbortError' && isCurrentReload()) {
             setBanner({ kind: 'error', key: 'loadError', text: error && error.message })
@@ -2781,7 +2807,7 @@ window.__ModuleLoader__.load({
             // server; the in-memory notebook keeps display_id for live updates.
             notebook: normalizeNotebook(snapshot),
             baseVersion: versionRef.current,
-          })
+          }, undefined, scope && scope.cwd)
           if (!isCurrentSave()) return
           versionRef.current = value.version
           setVersion(value.version)
@@ -3398,7 +3424,7 @@ window.__ModuleLoader__.load({
               delete next.outputs
               delete next.execution_count
             }
-            if (type !== 'markdown') delete next.attachments
+            if (type === 'code') delete next.attachments
             return next
           }),
         )
@@ -3580,7 +3606,9 @@ window.__ModuleLoader__.load({
           setFailed(all.filter((entry) => !entry.ok))
           setDraft((current) => ({
             ...current,
-            idleMinutes: config && Number.isInteger(config.idleMinutes) ? config.idleMinutes : (current.idleMinutes ?? 30),
+            // A failed config read must leave an unset value unset. The input
+            // may display a fallback, but save() will not persist a guessed TTL.
+            idleMinutes: config && Number.isInteger(config.idleMinutes) ? config.idleMinutes : current.idleMinutes,
           }))
           setLoading(false)
         }).catch((loadError) => {
@@ -3716,9 +3744,12 @@ window.__ModuleLoader__.load({
       const sessionRef = useRef(sessionId)
       const mountedRef = useRef(true)
       const loadRequestRef = useRef(0)
+      const activeLoadRef = useRef(null)
       sessionRef.current = sessionId
 
       const load = useCallback(async () => {
+        // A slow request must not accumulate another fetch on every poll.
+        if (activeLoadRef.current) return
         const requestId = ++loadRequestRef.current
         const isCurrent = () => mountedRef.current && sessionRef.current === sessionId && requestId === loadRequestRef.current
         if (!sessionId) {
@@ -3729,8 +3760,11 @@ window.__ModuleLoader__.load({
           }
           return
         }
+        const controller = typeof AbortController === 'function' ? new AbortController() : null
+        const active = { requestId, controller }
+        activeLoadRef.current = active
         try {
-          const value = await getJson(ctx, 'kernels', { sessionId })
+          const value = await getJson(ctx, 'kernels', { sessionId }, controller?.signal)
           if (!isCurrent()) return
           setKernels(Array.isArray(value.kernels) ? value.kernels : [])
           setError('')
@@ -3738,14 +3772,21 @@ window.__ModuleLoader__.load({
           if (!isCurrent()) return
           setError(loadError && loadError.message ? loadError.message : t('kernelsError'))
         } finally {
+          if (activeLoadRef.current === active) activeLoadRef.current = null
           if (isCurrent()) setLoading(false)
         }
       }, [ctx, sessionId])
+
+      const cancelActiveLoad = () => {
+        activeLoadRef.current?.controller?.abort()
+        activeLoadRef.current = null
+      }
 
       useEffect(() => {
         mountedRef.current = true
         return () => {
           mountedRef.current = false
+          cancelActiveLoad()
           loadRequestRef.current += 1
         }
       }, [])
@@ -3773,12 +3814,14 @@ window.__ModuleLoader__.load({
         if (visible === false) {
           return () => {
             cancelled = true
+            cancelActiveLoad()
             loadRequestRef.current += 1
           }
         }
         const timer = setInterval(poll, 5000)
         return () => {
           cancelled = true
+          cancelActiveLoad()
           loadRequestRef.current += 1
           clearInterval(timer)
         }

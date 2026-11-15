@@ -487,6 +487,117 @@ class IOPubTests(unittest.TestCase):
         self.assertEqual(self.bridge.pending, {})
         self.assertEqual(self.bridge.idle_events, {})
 
+    def test_interrupt_after_dequeue_before_run_one_keeps_the_deadline(self):
+        self.client = SilentClient()
+        self.bridge.kc = self.client
+
+        class Session:
+            def msg(self, _msg_type, content):
+                return content
+
+        class Control:
+            def send(self, _msg):
+                pass
+
+        self.client.session = Session()
+        self.client.control_channel = Control()
+        entered = threading.Event()
+        release = threading.Event()
+        reply_seen = threading.Event()
+        self.releases.append(release)
+        original_run_one = self.bridge.run_one
+
+        def gated_run(*args):
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError("test did not release run_one")
+            return original_run_one(*args)
+
+        def capture(event):
+            self.events.append(event)
+            if event.get("type") == "execute_reply":
+                reply_seen.set()
+
+        self.bridge.run_one = gated_run
+        bridge_module.emit = capture
+        executor = self.start_thread(self.bridge.executor_loop)
+        self.bridge.execute("dequeued-cell", "dequeued-exec", "work")
+        self.wait(entered)
+
+        clock = [10.0]
+        restarts = []
+        original_monotonic = bridge_module.time.monotonic
+        original_restart = self.bridge.restart
+
+        def restart():
+            restarts.append(clock[0] - self.bridge.interrupt_requested_at)
+            return True
+
+        self.bridge.restart = restart
+        bridge_module.time.monotonic = lambda: clock[0]
+        try:
+            # The executor owns the head, so drain_queue() cannot drop it. The
+            # interrupt must follow that head across the run_one boundary.
+            self.bridge.interrupt()
+            self.assertEqual(self.bridge.interrupt_requested_at, 10.0)
+            self.assertTrue(self.bridge.exec_queue.empty())
+            release.set()
+            self.wait(self.client.shell_entered)
+            self.assertEqual(self.bridge.interrupt_requested_at, 10.0)
+            clock[0] = 13.01
+            self.assertTrue(reply_seen.wait(3), "interrupted execution did not settle")
+            self.assertEqual(len(restarts), 1)
+            self.assertAlmostEqual(restarts[0], 3.01)
+            reply = next(event for event in self.events if event["type"] == "execute_reply")
+            self.assertEqual(reply["status"], "interrupted")
+            self.assertTrue(reply["kernel_restarted"])
+        finally:
+            release.set()
+            bridge_module.time.monotonic = original_monotonic
+            self.bridge.restart = original_restart
+            self.bridge.stop.set()
+            executor.join(3)
+
+    def test_interrupt_before_a_new_submission_does_not_cancel_it(self):
+        class Session:
+            def msg(self, _msg_type, content):
+                return content
+
+        class Control:
+            def send(self, _msg):
+                pass
+
+        self.client.session = Session()
+        self.client.control_channel = Control()
+        reply_seen = threading.Event()
+        original_emit = bridge_module.emit
+
+        def capture(event):
+            self.events.append(event)
+            if event.get("type") == "execute_reply":
+                reply_seen.set()
+
+        bridge_module.emit = capture
+        self.bridge.interrupt()
+        self.assertIsNotNone(self.bridge.interrupt_requested_at)
+        executor = self.start_thread(self.bridge.executor_loop)
+        try:
+            self.bridge.execute("new-cell", "new-exec", "work")
+            self.wait(self.client.shell_entered)
+            self.assertIsNone(self.bridge.interrupt_requested_at,
+                              "an interrupt older than the submission must be stale")
+            self.bridge.handle_iopub(message(self.client.parent, "status", execution_state="idle"))
+            self.client.shell_release.set()
+            self.assertTrue(reply_seen.wait(3), "new execution did not settle")
+            reply = next(event for event in self.events if event["type"] == "execute_reply")
+            self.assertTrue(reply["ok"])
+            self.assertEqual(reply["exec_id"], "new-exec")
+        finally:
+            self.client.shell_release.set()
+            self.bridge.stop.set()
+            executor.join(3)
+            bridge_module.emit = original_emit
+
     def test_interrupt_deadline_starts_before_send_and_survives_retries(self):
         self.client = SilentClient()
         self.bridge.kc = self.client
