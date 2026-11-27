@@ -7,8 +7,9 @@ welcome. For security issues use [SECURITY.md](SECURITY.md), not the issue track
 
 - Node.js >= 20
 - Python with `jupyter_client`, `ipykernel` and `nbformat`
-- DSH **0.2.2-rc.2+** with **dsh-better-sidebar 0.32.x** for the E2E lane
-  (the client guard rejects older sidebar builds)
+- DSH **0.2.2-rc.5** with **dsh-better-sidebar 0.33.0** for the E2E lane
+  (the client guard rejects older sidebar builds; DSH **0.2.2-rc.2** hosts pair
+  with sidebar **0.32.1**, because 0.33.0 requires rc.3+)
 - Google Chrome and the dev-only `playwright` package for `npm run test:e2e`
 
 There is no build step: `client.js` is loaded as-is and the host side is plain ESM.

@@ -14,7 +14,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.2+" src="https://img.shields.io/badge/DSH-0.2.2--rc.2%2B-4C8DFF"></a>
-  <a href="https://github.com/omdsh-dev/DSH-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
+  <a href="https://github.com/omdsh-dev/DSH-better-sidebar"><img alt="better-sidebar 0.33.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.33.x-8A2BE2"></a>
 </p>
 
 <p align="center">
@@ -45,13 +45,13 @@
 
 | 依赖 | 要求 |
 | --- | --- |
-| DSH | Web GUI **0.2.2-rc.2** 或更新（当前验证 **0.2.2-rc.3**） |
-| dsh-better-sidebar | **0.32.x**（当前验证 **0.32.1**；旧版本会被运行时护栏拒绝） |
+| DSH | Web GUI **0.2.2-rc.2** 或更新（当前验证 **0.2.2-rc.5**；**0.2.2-rc.2** 需配侧边栏 **0.32.1**） |
+| dsh-better-sidebar | **0.32.x–0.33.x**（当前验证 **0.33.0**；旧版本会被运行时护栏拒绝） |
 | Python | 安装 `jupyter_client` + `ipykernel`，可用 `python3 -c "import jupyter_client, ipykernel"`（macOS/Linux）或 `python -c "import jupyter_client, ipykernel"`（Windows）自检 |
 
-> **版本配对**：本构建面向 DSH **0.2.2-rc.2+** 与 `dsh-better-sidebar` **0.32.x**；启动时会检查侧边栏版本与所需特性，旧版会得到明确错误，而不是在缺方法时才崩溃。当前验证组合为 DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`，单元测试与固定版本浏览器 E2E 均通过。
+> **版本配对**：本构建面向 DSH **0.2.2-rc.2+** 与 `dsh-better-sidebar` **0.32.x–0.33.x**；启动时会检查侧边栏版本与所需特性，旧版会得到明确错误，而不是在缺方法时才崩溃。当前验证组合为 DSH `0.2.2-rc.5` + `dsh-better-sidebar@0.33.0`，单元测试与固定版本浏览器 E2E 均通过；DSH **0.2.2-rc.2** 配侧边栏 **0.32.1**（0.33.0 要求 rc.3+）。
 >
-> **从 0.30.x 升级？** 本构建有意不再支持 0.30/旧侧边栏线：请先把 `dsh-better-sidebar` 升级到 **0.32.x**，再重载插件。
+> **从 0.30.x 升级？** 本构建有意不再支持 0.30/旧侧边栏线：请先把 `dsh-better-sidebar` 升级到 **0.33.0**（宿主为 DSH 0.2.2-rc.2 时用 **0.32.1**），再重载插件。
 
 ```bash
 # 如缺少依赖
@@ -176,7 +176,7 @@ Notebook 相关接口需要非空 `sessionId` 与 `path`（`/status` 与 `/image
 
 - 仅支持 Python 内核（nbformat 4.x）；不渲染依赖 JavaScript 的交互输出（ipywidgets、plotly、bokeh 等），HTML 会被清洗为静态内容。
 - **HTML 输出中的公式**：`text/html` 输出里内嵌的 LaTeX 不会被排版，该通道保持清洗后的静态内容；公式请使用 Markdown 单元格、Markdown 输出或 `text/latex` 输出。
-- **旧版宿主上的公式**：KaTeX chunk 依赖 client module loader 的 package-local chunk 能力（已在 DSH 0.2.2-rc.3 验证）。宿主不支持时会继续显示公式源码而非报错，插件其余功能不受影响。
+- **旧版宿主上的公式**：KaTeX chunk 依赖 client module loader 的 package-local chunk 能力（已在 DSH 0.2.2-rc.5 验证）。宿主不支持时会继续显示公式源码而非报错，插件其余功能不受影响。
 - 不支持 `input()`：内核以 `allow_stdin=False` 启动，调用会立即报错而非挂起。`%%` cell magic 与 `!cmd`、`%pip`、`%cd`、`%pwd` 可用。
 - 中断后约 3 秒内核仍未响应会被强制重启，所有变量与内核状态都会清空。
 - 执行结果由客户端回写并在保存时落盘；服务端不会在后台追加输出。
@@ -215,7 +215,7 @@ for file in index.js lib/*.js client.js client.katex.js; do node --check "$file"
 python -m py_compile python/bridge.py
 npm test          # 运行完整单元测试与集成测试
 npm install       # 仅开发期依赖：Playwright 与 KaTeX（E2E、chunk 重建）
-npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1 上运行 E2E
+npm run test:e2e  # 在隔离的 DSH 0.2.2-rc.5 + dsh-better-sidebar 0.33.0 上运行 E2E
 npm run build:katex  # 有意升级 KaTeX 后重新生成 client.katex.js
 ```
 

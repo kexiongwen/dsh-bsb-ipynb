@@ -51,7 +51,7 @@ jobs:
       - name: Install the pinned DSH CLI
         run: |
           mkdir -p "$RUNNER_TEMP/dsh-cli"
-          npm install --prefix "$RUNNER_TEMP/dsh-cli" --no-save --no-package-lock @deepseek-ai/dsh@0.2.2-rc.3
+          npm install --prefix "$RUNNER_TEMP/dsh-cli" --no-save --no-package-lock @deepseek-ai/dsh@0.2.2-rc.5
           echo "DSH_E2E_DSH_BIN=$RUNNER_TEMP/dsh-cli/node_modules/.bin/dsh" >> "$GITHUB_ENV"
 
       - name: Run the pinned browser E2E

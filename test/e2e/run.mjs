@@ -1,7 +1,7 @@
 // End-to-end smoke test for the pinned DSH + dsh-better-sidebar pair.
 //
 // The test creates an isolated DSH_HOME, installs this repository and
-// dsh-better-sidebar@0.32.1 into a fresh Web profile, boots `dsh` on a free
+// dsh-better-sidebar@0.33.0 into a fresh Web profile, boots `dsh` on a free
 // port, opens a temporary notebook through the real Better Sidebar file tree,
 // runs one cell with the real Python kernel and checks the autosaved output.
 //
@@ -24,8 +24,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
-const PINNED_DSH = '0.2.2-rc.3'
-const PINNED_BSB = '0.32.1'
+const PINNED_DSH = '0.2.2-rc.5'
+const PINNED_BSB = '0.33.0'
 const PROFILE = 'dsh-bsb-ipynb-e2e'
 const TIMEOUT_MS = 60_000
 

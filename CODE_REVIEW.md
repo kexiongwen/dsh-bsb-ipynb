@@ -1,6 +1,6 @@
 # dsh-bsb-ipynb 代码审查：未解决项
 
-> 更新：2026-11-15。适用于 DSH 0.2.2-rc.2+ / dsh-better-sidebar 0.32.x；当前验证组合为 DSH 0.2.2-rc.3 + Better Sidebar 0.32.1。
+> 更新：2026-11-27。适用于 DSH 0.2.2-rc.2+ / dsh-better-sidebar 0.32.x–0.33.x；当前验证组合为 DSH 0.2.2-rc.5 + Better Sidebar 0.33.0。
 >
 > 本报告只记录当前未解决项。编号按本版顺序排列，与旧报告不对应。位置以函数名为主，避免行号随改动失效。
 

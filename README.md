@@ -14,7 +14,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639.svg"></a>
   <a href="https://nodejs.org"><img alt="Node.js 20+" src="https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&amp;logoColor=white"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DSH 0.2.2-rc.2+" src="https://img.shields.io/badge/DSH-0.2.2--rc.2%2B-4C8DFF"></a>
-  <a href="https://github.com/omdsh-dev/DSH-better-sidebar"><img alt="better-sidebar 0.32.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.32.x-8A2BE2"></a>
+  <a href="https://github.com/omdsh-dev/DSH-better-sidebar"><img alt="better-sidebar 0.33.x" src="https://img.shields.io/badge/dsh--better--sidebar-0.33.x-8A2BE2"></a>
 </p>
 
 <p align="center">
@@ -45,13 +45,13 @@
 
 | Requirement | Version / notes |
 | --- | --- |
-| DSH | Web GUI **0.2.2-rc.2** or newer (verified with **0.2.2-rc.3**) |
-| dsh-better-sidebar | **0.32.x** (verified with **0.32.1**; older lines are rejected by the runtime guard) |
+| DSH | Web GUI **0.2.2-rc.2** or newer (verified with **0.2.2-rc.5**; **0.2.2-rc.2** requires sidebar **0.32.1**) |
+| dsh-better-sidebar | **0.32.x–0.33.x** (verified with **0.33.0**; older lines are rejected by the runtime guard) |
 | Python | `jupyter_client` + `ipykernel`; verify with `python3 -c "import jupyter_client, ipykernel"` (macOS/Linux) or `python -c "import jupyter_client, ipykernel"` (Windows) |
 
-> **Version pairing:** this build targets DSH **0.2.2-rc.2+** and `dsh-better-sidebar` **0.32.x**. The sidebar version and required features are checked at startup, so a stale installation fails with a clear message instead of a missing-method error. The latest verified combination is DSH `0.2.2-rc.3` + `dsh-better-sidebar@0.32.1`; the unit suite and the pinned browser E2E pass.
+> **Version pairing:** this build targets DSH **0.2.2-rc.2+** and `dsh-better-sidebar` **0.32.x–0.33.x**. The sidebar version and required features are checked at startup, so a stale installation fails with a clear message instead of a missing-method error. The latest verified combination is DSH `0.2.2-rc.5` + `dsh-better-sidebar@0.33.0`; the unit suite and the pinned browser E2E pass. DSH **0.2.2-rc.2** pairs with sidebar **0.32.1** (0.33.0 requires DSH rc.3+).
 >
-> **Upgrading from 0.30.x?** The 0.30/older-sidebar line is intentionally no longer supported: update `dsh-better-sidebar` to **0.32.x** first, then reload the plugin.
+> **Upgrading from 0.30.x?** The 0.30/older-sidebar line is intentionally no longer supported: update `dsh-better-sidebar` to **0.33.0** (or **0.32.1** when the host is DSH 0.2.2-rc.2) first, then reload the plugin.
 
 ```bash
 # if the dependencies are missing
@@ -176,7 +176,7 @@ Error codes: `bad-request`, `forbidden`, `workspace-unknown`, `path-outside-root
 
 - Python kernels only (nbformat 4.x). Interactive JavaScript outputs (ipywidgets, plotly, bokeh, …) are not rendered; HTML is sanitized into static content.
 - **Math in HTML outputs** — formulas embedded in `text/html` outputs are not typeset; that surface stays sanitized and static. Markdown cells, Markdown outputs and `text/latex` outputs are typeset.
-- **Math on older hosts** — the KaTeX chunk uses the client module loader's package-local chunk support (verified with DSH 0.2.2-rc.3). A host without it keeps showing the formula source instead of failing; the rest of the plugin is unaffected.
+- **Math on older hosts** — the KaTeX chunk uses the client module loader's package-local chunk support (verified with DSH 0.2.2-rc.5). A host without it keeps showing the formula source instead of failing; the rest of the plugin is unaffected.
 - No `input()`: kernels start with `allow_stdin=False`, so calls fail immediately rather than hanging. `%%` cell magics and `!cmd`, `%pip`, `%cd`, `%pwd` work.
 - If the kernel is still unresponsive about 3 s after an interrupt, it is force-restarted and all variables and kernel state are lost.
 - Results are written back by the client and persisted on save; the server never appends output in the background.
@@ -215,7 +215,7 @@ for file in index.js lib/*.js client.js client.katex.js; do node --check "$file"
 python -m py_compile python/bridge.py
 npm test          # run the complete unit and integration suite
 npm install       # Playwright and KaTeX (dev-only) for the E2E lane and chunk rebuilds
-npm run test:e2e  # isolated DSH 0.2.2-rc.3 + dsh-better-sidebar 0.32.1
+npm run test:e2e  # isolated DSH 0.2.2-rc.5 + dsh-better-sidebar 0.33.0
 npm run build:katex  # regenerate client.katex.js after a deliberate KaTeX upgrade
 ```
 

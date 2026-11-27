@@ -4,6 +4,20 @@ All notable changes to `dsh-bsb-ipynb` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions use
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-11-27
+
+### Changed
+
+- Compatibility release for the current host line: verified against DSH
+  **0.2.2-rc.5** and `dsh-better-sidebar` **0.33.0**. DSH's rc.3 → rc.5 upgrade
+  guides only change LLM error codes and the default web-search provider, and
+  sidebar 0.33.0 keeps every extension point this viewer uses, so no runtime
+  code changed.
+- The pinned browser E2E and CI now install DSH `0.2.2-rc.5` and
+  `dsh-better-sidebar@0.33.0`; the documentation records the pairing (DSH
+  **0.2.2-rc.3+** with sidebar **0.33.0**; DSH **0.2.2-rc.2** with sidebar
+  **0.32.1**, because 0.33.0 requires rc.3+).
+
 ## [0.3.2] - 2026-11-15
 
 ### Added
@@ -127,7 +141,9 @@ concurrency, and workspace-contained file access. See the
 [v0.1.0 release](https://github.com/kexiongwen/dsh-bsb-ipynb/releases/tag/v0.1.0)
 for the original notes.
 
-[Unreleased]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kexiongwen/dsh-bsb-ipynb/compare/v0.1.0...v0.2.0
